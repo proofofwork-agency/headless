@@ -11,6 +11,7 @@ export type BackendAdapter = {
   metadata: typeof backendMetadata[Backend];
   stdinPrompt: boolean;
   credentialPrefixes: string[];
+  selfSandboxed?: boolean;
   buildEnv?: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
   buildCommand: (opts: ExecOptions, cwd: string) => string[];
   parse: (stdout: string) => JsonParseResult;
@@ -41,6 +42,7 @@ export const backendAdapters: Record<Backend, BackendAdapter> = {
     metadata: backendMetadata.codex,
     stdinPrompt: true,
     credentialPrefixes: ["OPENAI_", "CODEX_"],
+    selfSandboxed: true,
     buildCommand: buildCodexCommand,
     parse: parseCodexJson,
   },
