@@ -171,13 +171,17 @@ export async function deliberate(opts: DeliberationOptions) {
     ),
   );
 
+  const okCount = runs.filter((run) => run.result.ok).length;
   appendEvent(session, {
     type: "note",
     source,
-    content: `Collected ${runs.length} deliberation result${runs.length === 1 ? "" : "s"} for parent synthesis.`,
-    handlesHandoffId: handoff.id,
+    content: okCount
+      ? `Collected ${runs.length} deliberation result${runs.length === 1 ? "" : "s"} for parent synthesis.`
+      : `Deliberation failed: all ${runs.length} worker result${runs.length === 1 ? "" : "s"} failed.`,
+    handlesHandoffId: okCount ? handoff.id : undefined,
     meta: {
       runIds: runs.map((run) => run.runId),
+      okCount,
     },
   });
 

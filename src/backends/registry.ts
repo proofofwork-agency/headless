@@ -33,7 +33,7 @@ export const backendAdapters: Record<Backend, BackendAdapter> = {
     metadata: backendMetadata["claude-code"],
     stdinPrompt: true,
     credentialPrefixes: ["ANTHROPIC_", "CLAUDE_"],
-    buildCommand: () => ["claude", "-p", "--output-format", "stream-json", "--verbose", "--allowedTools", "Read,Grep,Glob,LS"],
+    buildCommand: buildClaudeCommand,
     parse: parseClaudeStreamJson,
   },
   codex: {
@@ -41,7 +41,7 @@ export const backendAdapters: Record<Backend, BackendAdapter> = {
     metadata: backendMetadata.codex,
     stdinPrompt: true,
     credentialPrefixes: ["OPENAI_", "CODEX_"],
-    buildCommand: () => ["codex", "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--ephemeral", "-"],
+    buildCommand: buildCodexCommand,
     parse: parseCodexJson,
   },
   "grok-build": {
@@ -63,4 +63,17 @@ export function assertModeAllowed(backend: Backend, mode: ExecOptions["mode"] = 
 
 export function buildBackendEnv(adapter: BackendAdapter, env: NodeJS.ProcessEnv = process.env) {
   return adapter.buildEnv ? adapter.buildEnv(env) : buildAdapterEnv(env, adapter.credentialPrefixes);
+}
+
+function buildClaudeCommand(opts: ExecOptions) {
+  const cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--allowedTools", "Read,Grep,Glob,LS"];
+  if (opts.model) cmd.push("--model", opts.model);
+  return cmd;
+}
+
+function buildCodexCommand(opts: ExecOptions) {
+  const cmd = ["codex", "exec"];
+  if (opts.model) cmd.push("--model", opts.model);
+  cmd.push("--json", "--sandbox", "read-only", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--ephemeral", "-");
+  return cmd;
 }
