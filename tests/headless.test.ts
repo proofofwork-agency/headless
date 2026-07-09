@@ -22,8 +22,11 @@ import {
 } from "../src/index";
 import { getPrompt, parseIntegerArg } from "../src/cli";
 import { isSuccessfulRun } from "../src/runner/simple";
+import { runGitStrict } from "../src/runtime/git";
 
 const originalEnv = { ...process.env };
+const gitAvailable = runGitStrict(["--version"], process.cwd()).ok;
+const gitTest = gitAvailable ? test : test.skip;
 
 beforeEach(() => {
   process.env = { ...originalEnv };
@@ -468,6 +471,77 @@ printf '{"type":"text","part":{"text":"should not run"}}\\n'
     expect(result.output).toContain("does not support write mode");
     expect(existsSync(marker)).toBe(false);
   });
+
+  gitTest("write mode requires a git repository before spawning a backend", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    const cwd = mkdtempSync(join(tmpdir(), "headless-non-git-"));
+    const marker = join(cwd, "spawned");
+    await writeExecutable(
+      join(bin, "grok"),
+      `#!/bin/sh
+touch ${JSON.stringify(marker)}
+printf '{"type":"response.output_text.delta","delta":"should not run"}\\n'
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const result = await exec({ backend: "grok-build", prompt: "write", cwd, mode: "write" });
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("write mode requires a git repository");
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  gitTest("write mode runs in an ephemeral worktree and returns a structured diff", async () => {
+    const repo = initGitRepo();
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    const beforeList = gitWorktreeList(repo);
+    await writeExecutable(
+      join(bin, "grok"),
+      `#!/usr/bin/env bun
+await Bun.write("agent-change.txt", "from agent\\n");
+console.log(JSON.stringify({ type: "response.output_text.delta", delta: "done" }));
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const result = await exec({ backend: "grok-build", prompt: "write", cwd: repo, mode: "write" });
+    const afterList = gitWorktreeList(repo);
+    const remainingBranches = runGitStrict(["branch", "--list", "headless/write/*", "--format=%(refname:short)"], repo);
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("done");
+    expect(result.diff?.files).toEqual(["agent-change.txt"]);
+    expect(result.diff?.status).toContain("?? agent-change.txt");
+    expect(result.diff?.patch).toContain("+from agent");
+    expect(result.worktreeBranch?.startsWith("headless/write/grok-build-")).toBe(true);
+    expect(existsSync(join(repo, "agent-change.txt"))).toBe(false);
+    expect(afterList).toBe(beforeList);
+    expect(remainingBranches.stdout.trim()).toBe("");
+  });
+
+  gitTest("write mode captures a diff even when the backend fails", async () => {
+    const repo = initGitRepo();
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    await writeExecutable(
+      join(bin, "grok"),
+      `#!/usr/bin/env bun
+await Bun.write("failed-change.txt", "from failed worker\\n");
+console.log(JSON.stringify({ type: "error", message: "backend failed" }));
+process.exit(7);
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const result = await exec({ backend: "grok-build", prompt: "write", cwd: repo, mode: "write" });
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toBe("backend failed");
+    expect(result.exitCode).toBe(7);
+    expect(result.diff?.files).toEqual(["failed-change.txt"]);
+    expect(result.diff?.patch).toContain("+from failed worker");
+    expect(existsSync(join(repo, "failed-change.txt"))).toBe(false);
+  });
 });
 
 describe("native ledger runtime", () => {
@@ -730,6 +804,28 @@ exit 2
     expect(failureNote?.content).toContain("Deliberation failed");
     expect(failureNote?.handlesHandoffId).toBeUndefined();
   });
+
+  gitTest("headless_run records write diffs as ledger artifacts", async () => {
+    const repo = initGitRepo();
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    await writeExecutable(
+      join(bin, "grok"),
+      `#!/usr/bin/env bun
+await Bun.write("ledger-change.txt", "from ledger\\n");
+console.log(JSON.stringify({ type: "response.output_text.delta", delta: "done" }));
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const { result, session } = await headlessRun({ backend: "grok-build", prompt: "write", cwd: repo, mode: "write", sessionId: "write-artifact-session" });
+    const artifact = readLedger(session).find((event) => event.artifact?.kind === "write_diff");
+
+    expect(result.ok).toBe(true);
+    expect(result.diff?.files).toEqual(["ledger-change.txt"]);
+    expect(artifact?.type).toBe("artifact");
+    expect(artifact?.artifact?.evidence).toEqual(["ledger-change.txt"]);
+    expect(artifact?.meta?.patch).toContain("+from ledger");
+  });
 });
 
 describe("ledger durability and concurrency", () => {
@@ -814,6 +910,22 @@ describe("cli argument parsing", () => {
 async function writeExecutable(path: string, content: string) {
   await Bun.write(path, content);
   chmodSync(path, 0o755);
+}
+
+function initGitRepo() {
+  const repo = mkdtempSync(join(tmpdir(), "headless-repo-"));
+  expect(runGitStrict(["init"], repo).ok).toBe(true);
+  writeFileSync(join(repo, ".gitignore"), ".headless/\n", "utf8");
+  writeFileSync(join(repo, "README.md"), "base\n", "utf8");
+  expect(runGitStrict(["add", ".gitignore", "README.md"], repo).ok).toBe(true);
+  expect(runGitStrict(["-c", "user.email=headless@example.test", "-c", "user.name=Headless Test", "commit", "-m", "init"], repo).ok).toBe(true);
+  return repo;
+}
+
+function gitWorktreeList(repo: string) {
+  const list = runGitStrict(["worktree", "list", "--porcelain"], repo);
+  expect(list.ok).toBe(true);
+  return list.stdout;
 }
 
 async function runCli(args: string[]) {

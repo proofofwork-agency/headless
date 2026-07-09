@@ -1,6 +1,7 @@
 import { spawn } from "bun";
 import type { ExecOptions, ExecResult, Backend } from "../index";
-import { assertModeAllowed, backendAdapters, buildBackendEnv } from "../backends/registry";
+import { assertModeAllowed, backendAdapters, buildBackendEnv, type BackendAdapter } from "../backends/registry";
+import { captureWriteDiff, createWriteWorktree, planWriteWorktree, removeWriteWorktree, type WriteDiff } from "../runtime/worktree";
 
 const DEFAULT_TIMEOUT = 180_000;
 
@@ -25,6 +26,74 @@ export async function runHeadless(opts: ExecOptions & { backend: Backend }): Pro
     return failedResult(backend, error, Date.now() - start);
   }
 
+  if (opts.mode === "write") {
+    return runContainedWrite(opts, adapter, cwd, env, start, timeoutMs);
+  }
+
+  return runBackendProcess(opts, adapter, cwd, env, start, timeoutMs);
+}
+
+async function runContainedWrite(
+  opts: ExecOptions & { backend: Backend },
+  adapter: BackendAdapter,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  start: number,
+  timeoutMs: number,
+): Promise<ExecResult> {
+  let plan;
+  try {
+    plan = planWriteWorktree({ primaryRoot: cwd, label: opts.backend });
+    createWriteWorktree(plan);
+  } catch (error) {
+    const message = error instanceof Error && error.message.includes("not a git worktree root")
+      ? `write mode requires a git repository: ${cwd}`
+      : error;
+    return failedResult(opts.backend, message, Date.now() - start);
+  }
+
+  let result: ExecResult = failedResult(opts.backend, "write-mode backend did not run", Date.now() - start);
+  let captured: WriteDiff | null = null;
+  try {
+    try {
+      result = await runBackendProcess(opts, adapter, plan.worktreePath, env, start, timeoutMs);
+    } catch (error) {
+      result = failedResult(opts.backend, error, Date.now() - start);
+    }
+
+    try {
+      captured = captureWriteDiff(plan);
+    } catch (error) {
+      result = markFailed(result, `Failed to capture write diff: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } finally {
+    try {
+      removeWriteWorktree(plan, { force: true });
+    } catch (error) {
+      // Cleanup errors are surfaced below after the forced removal attempt.
+      captured = captured ?? null;
+      const cleanupMessage = `Failed to clean up write worktree: ${error instanceof Error ? error.message : String(error)}`;
+      result = markFailed(result, cleanupMessage);
+    }
+  }
+
+  return {
+    ...result,
+    diff: captured ? { patch: captured.diff, status: captured.status, files: captured.files } : null,
+    worktreeBranch: plan.branch,
+  };
+}
+
+async function runBackendProcess(
+  opts: ExecOptions & { backend: Backend },
+  adapter: BackendAdapter,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  start: number,
+  timeoutMs: number,
+): Promise<ExecResult> {
+  const backend = opts.backend;
+  const prompt = opts.prompt;
   const cmd = adapter.buildCommand(opts, cwd);
 
   const proc = spawn(cmd, {
@@ -103,6 +172,14 @@ function failedResult(backend: Backend, error: unknown, durationMs: number): Exe
     durationMs,
     exitCode: null,
     timedOut: false,
+  };
+}
+
+function markFailed(result: ExecResult, message: string): ExecResult {
+  return {
+    ...result,
+    ok: false,
+    output: result.output ? `${result.output}\n\n${message}` : message,
   };
 }
 

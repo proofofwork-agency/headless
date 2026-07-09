@@ -134,6 +134,27 @@ export async function headlessRun(opts: HeadlessRunOptions) {
   }
 
   const event = appendResult(session, source, runId, result);
+  if (result.diff) {
+    appendEvent(session, {
+      type: "artifact",
+      source,
+      runId,
+      workerId: runId,
+      content: `Write diff: ${result.diff.files.length} file${result.diff.files.length === 1 ? "" : "s"} changed.`,
+      artifact: {
+        kind: "write_diff",
+        title: "Write diff",
+        summary: `${result.diff.files.length} file${result.diff.files.length === 1 ? "" : "s"} changed in ${result.worktreeBranch ?? "ephemeral worktree"}.`,
+        status: result.ok ? "passed" : "failed",
+        evidence: result.diff.files,
+      },
+      meta: {
+        branch: result.worktreeBranch,
+        status: result.diff.status,
+        patch: result.diff.patch,
+      },
+    });
+  }
   return { session, runId, event, result };
 }
 
@@ -217,6 +238,8 @@ function failedResult(backend: Backend, error: unknown): ExecResult {
     durationMs: 0,
     exitCode: null,
     timedOut: false,
+    diff: null,
+    worktreeBranch: null,
   };
 }
 
