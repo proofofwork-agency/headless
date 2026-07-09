@@ -222,6 +222,7 @@ describe("grok and generic backend helpers", () => {
   test("token accounting prefers explicit total over split subset fields", () => {
     expect(tokenCount({ total_tokens: 10, input_tokens: 4, output_tokens: 5, cache: { read: 100, write: 100 } })).toBe(10);
     expect(tokenCount({ input_tokens: 4, output_tokens: 5, reasoning_tokens: 2, cache: { read: 100, write: 100 } })).toBe(11);
+    expect(tokenCount({ input_tokens: 4, cached_input_tokens: 100, output_tokens: 5, reasoning_output_tokens: 2 })).toBe(11);
   });
 
   test("parses Claude stream-json fixture without duplicating final result", () => {
@@ -249,6 +250,33 @@ describe("grok and generic backend helpers", () => {
 
     expect(parsed.output).toBe("pong");
     expect(parsed.tokens).toBe(10);
+  });
+
+  test("parses live-captured Codex 0.143.0 JSONL golden item.completed agent message", () => {
+    const parsed = parseCodexJson(
+      [
+        JSON.stringify({ type: "thread.started", thread_id: "019f4881-a3cc-75a1-92fb-acb3ca72c6ef" }),
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "PONG" } }),
+        JSON.stringify({ type: "turn.completed", usage: { input_tokens: 11233, cached_input_tokens: 2432, output_tokens: 6, reasoning_output_tokens: 0 } }),
+      ].join("\n"),
+    );
+
+    expect(parsed.output).toBe("PONG");
+    expect(parsed.tokens).toBe(11239);
+    expect(parsed.error).toBe(null);
+  });
+
+  test("parses Codex turn and item errors", () => {
+    const parsed = parseCodexJson(
+      [
+        JSON.stringify({ type: "item.completed", item: { type: "error", message: "tool failed" } }),
+        JSON.stringify({ type: "turn.failed", error: { message: "turn failed" } }),
+      ].join("\n"),
+    );
+
+    expect(parsed.error).toContain("tool failed");
+    expect(parsed.error).toContain("turn failed");
   });
 
   test("builds Claude Code read-only stream-json command", () => {
