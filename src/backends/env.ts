@@ -1,4 +1,7 @@
-const BASE_ENV_KEYS = new Set(["PATH", "HOME", "TMPDIR", "TERM", "SHELL", "LANG"]);
+// USER/LOGNAME are non-secret identity vars, but they are required for
+// macOS Keychain access — Claude Code stores its OAuth token there ("Claude
+// Safe Storage"), so stripping them makes `claude -p` report "Not logged in".
+const BASE_ENV_KEYS = new Set(["PATH", "HOME", "TMPDIR", "TERM", "SHELL", "LANG", "USER", "LOGNAME"]);
 
 export function buildAdapterEnv(sourceEnv: NodeJS.ProcessEnv, credentialPrefixes: string[]) {
   const env: NodeJS.ProcessEnv = {};
