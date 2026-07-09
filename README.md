@@ -42,6 +42,23 @@ Backend option support:
 | Codex | passed as `--model` | ignored; Codex exec has no Headless agent mapping yet |
 | Grok CLI | passed as `--model` | passed as `--agent` |
 
+## Contained Write Mode
+
+`--mode write` is diff-only and git-required. Headless creates an ephemeral git worktree on a `headless/write/<label>-<id>` branch, runs the backend inside that worktree, captures the resulting patch/status/file list, and removes the worktree. It does not auto-apply or merge changes back into the caller's tree.
+
+If the requested `--cwd` is not a git worktree root, write mode fails before spawning the backend. Dirty primary trees are refused for now; Headless does not seed uncommitted caller changes into write worktrees.
+
+The structured result includes:
+
+```ts
+{
+  diff: { patch: string, status: string, files: string[] },
+  worktreeBranch: string
+}
+```
+
+When invoked through the runtime/orchestrator, the same diff is recorded as a `write_diff` ledger artifact with the changed files as evidence.
+
 ## OpenCode Plugin
 
 `plugin/index.ts` exports a loadable OpenCode plugin with these tools:

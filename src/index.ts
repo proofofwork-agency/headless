@@ -46,6 +46,12 @@ export interface ExecResult {
   durationMs: number;
   exitCode: number | null;
   timedOut: boolean;
+  diff?: {
+    patch: string;
+    status: string;
+    files: string[];
+  } | null;
+  worktreeBranch?: string | null;
 }
 
 export async function exec(opts: ExecOptions): Promise<ExecResult> {
