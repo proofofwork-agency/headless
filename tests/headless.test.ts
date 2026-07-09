@@ -346,6 +346,8 @@ describe("grok and generic backend helpers", () => {
       SHELL: "/bin/zsh",
       LANG: "en_US.UTF-8",
       LC_ALL: "C",
+      USER: "dev",
+      LOGNAME: "dev",
       OPENAI_API_KEY: "ok",
       HEADLESS_DEPTH: "1",
       MY_FAKE_TOKEN: "secret",
@@ -359,6 +361,9 @@ describe("grok and generic backend helpers", () => {
       SHELL: "/bin/zsh",
       LANG: "en_US.UTF-8",
       LC_ALL: "C",
+      // USER/LOGNAME must pass through — macOS Keychain auth (Claude Code) needs them.
+      USER: "dev",
+      LOGNAME: "dev",
       OPENAI_API_KEY: "ok",
       HEADLESS_DEPTH: "1",
     });
