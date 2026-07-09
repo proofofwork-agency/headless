@@ -1,0 +1,639 @@
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
+import { normalizeBackend } from "../src/backends/ids";
+import { buildGrokCommand, parseGrokJsonl } from "../src/backends/grok";
+import { parseClaudeStreamJson, parseCodexJson, parseGenericAgentJson } from "../src/backends/json";
+import { buildOpenCodeCommand, nextOpenCodeEnv, parseOpenCodeJsonl } from "../src/backends/opencode";
+import {
+  appendEvent,
+  appendNote,
+  deliberate,
+  getOrCreateSession,
+  getReadContext,
+  getTaskState,
+  headlessRun,
+  readLedger,
+  recordArtifact,
+  exec,
+  LedgerIntegrityError,
+} from "../src/index";
+import { getPrompt, parseIntegerArg } from "../src/cli";
+
+const originalEnv = { ...process.env };
+
+beforeEach(() => {
+  process.env = { ...originalEnv };
+});
+
+afterEach(() => {
+  process.env = { ...originalEnv };
+});
+
+describe("backend normalization", () => {
+  test("accepts canonical ids and aliases", () => {
+    expect(normalizeBackend("claude")).toBe("claude-code");
+    expect(normalizeBackend("claude-code")).toBe("claude-code");
+    expect(normalizeBackend("grok")).toBe("grok-build");
+    expect(normalizeBackend("grok-build")).toBe("grok-build");
+    expect(normalizeBackend("codex-cli")).toBe("codex");
+    expect(normalizeBackend("headless-opencode")).toBe("opencode");
+  });
+});
+
+describe("opencode backend helpers", () => {
+  test("builds one-shot pure JSON command with cwd, model, and agent", () => {
+    expect(
+      buildOpenCodeCommand(
+        {
+          backend: "opencode",
+          prompt: "do work",
+          model: "provider/model",
+          agent: "review",
+        },
+        "/repo",
+      ),
+    ).toEqual([
+      "opencode",
+      "run",
+      "--pure",
+      "--format",
+      "json",
+      "--dir",
+      "/repo",
+      "--model",
+      "provider/model",
+      "--agent",
+      "review",
+      "do work",
+    ]);
+  });
+
+  test("parses text, cost, tokens, and errors from JSONL", () => {
+    const parsed = parseOpenCodeJsonl(
+      [
+        JSON.stringify({ type: "text", part: { type: "text", text: "hello" } }),
+        JSON.stringify({ type: "step_finish", part: { type: "step-finish", cost: 0.25, tokens: { input: 10, output: 5, reasoning: 2, cache: { read: 3, write: 4 } } } }),
+        JSON.stringify({ type: "error", error: { data: { message: "bad model" } } }),
+      ].join("\n"),
+    );
+
+    expect(parsed.output).toBe("hello");
+    expect(parsed.cost).toBe(0.25);
+    expect(parsed.tokens).toBe(24);
+    expect(parsed.error).toBe("bad model");
+  });
+
+  test("parses real OpenCode message.part.updated text shape", () => {
+    const parsed = parseOpenCodeJsonl(
+      JSON.stringify({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            type: "text",
+            text: "assistant answer",
+            time: { end: Date.now() },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.output).toBe("assistant answer");
+  });
+
+  test("does not treat lifecycle-only JSON as assistant output", () => {
+    const parsed = parseOpenCodeJsonl(
+      JSON.stringify({
+        type: "step_start",
+        part: { type: "step-start", sessionID: "s" },
+      }),
+    );
+
+    expect(parsed.output).toBe("");
+    expect(parsed.error).toBe(null);
+  });
+
+  test("rejects depth greater than one before spawning", () => {
+    expect(nextOpenCodeEnv({ HEADLESS_DEPTH: "1" }).HEADLESS_DEPTH).toBe("2");
+    expect(() => nextOpenCodeEnv({ HEADLESS_DEPTH: "2" })).toThrow("HEADLESS_DEPTH=2");
+  });
+});
+
+describe("grok and generic backend helpers", () => {
+  test("builds real Grok single-turn streaming JSON command", () => {
+    expect(buildGrokCommand({ backend: "grok-build", prompt: "do work", mode: "read-only" }, "/repo")).toEqual([
+      "grok",
+      "--single",
+      "do work",
+      "--cwd",
+      "/repo",
+      "--output-format",
+      "streaming-json",
+      "--permission-mode",
+      "plan",
+    ]);
+  });
+
+  test("parses Grok streaming JSON text and errors", () => {
+    const ok = parseGrokJsonl(
+      [
+        JSON.stringify({ type: "response.output_text.delta", delta: "hel" }),
+        JSON.stringify({ type: "response.output_text.delta", delta: "lo", usage: { input_tokens: 2, output_tokens: 3 } }),
+      ].join("\n"),
+    );
+    expect(ok.output).toBe("hello");
+    expect(ok.tokens).toBe(5);
+
+    const failed = parseGrokJsonl(JSON.stringify({ type: "error", message: "balance exhausted" }));
+    expect(failed.output).toBe("");
+    expect(failed.error).toBe("balance exhausted");
+  });
+
+  test("parses generic Claude/Codex JSONL text, cost, and tokens", () => {
+    const parsed = parseGenericAgentJson(
+      [
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "hi" }] } }),
+        JSON.stringify({ total_cost_usd: 0.01, usage: { input_tokens: 4, output_tokens: 5 } }),
+      ].join("\n"),
+    );
+
+    expect(parsed.output).toBe("hi");
+    expect(parsed.cost).toBe(0.01);
+    expect(parsed.tokens).toBe(9);
+  });
+
+  test("parses Claude stream-json fixture without duplicating final result", () => {
+    const parsed = parseClaudeStreamJson(
+      [
+        JSON.stringify({ type: "system", subtype: "init" }),
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "pong" }] } }),
+        JSON.stringify({ type: "result", subtype: "success", result: "pong", total_cost_usd: 0.02, usage: { input_tokens: 7, output_tokens: 3 } }),
+      ].join("\n"),
+    );
+
+    expect(parsed.output).toBe("pong");
+    expect(parsed.cost).toBe(0.02);
+    expect(parsed.tokens).toBe(10);
+  });
+
+  test("parses Codex JSONL fixture through the named parser", () => {
+    const parsed = parseCodexJson(
+      [
+        JSON.stringify({ type: "thread.started", id: "t" }),
+        JSON.stringify({ type: "agent_message", message: "pong" }),
+        JSON.stringify({ type: "turn.completed", usage: { input_tokens: 8, output_tokens: 2 } }),
+      ].join("\n"),
+    );
+
+    expect(parsed.output).toBe("pong");
+    expect(parsed.tokens).toBe(10);
+  });
+});
+
+describe("runner process behavior", () => {
+  test("passes pure OpenCode command and recursion env to child", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    const capture = join(bin, "capture.json");
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/usr/bin/env bun
+await Bun.write(${JSON.stringify(capture)}, JSON.stringify({
+  argv: process.argv.slice(2),
+  depth: process.env.HEADLESS_DEPTH,
+  parent: process.env.HEADLESS_PARENT_BACKEND,
+}));
+console.log(JSON.stringify({ type: "text", part: { type: "text", text: "ok" } }));
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+    process.env.HEADLESS_DEPTH = "1";
+
+    const result = await exec({ backend: "opencode", prompt: "inspect", cwd: bin });
+    const captured = JSON.parse(await Bun.file(capture).text());
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("ok");
+    expect(captured.argv).toContain("--pure");
+    expect(captured.argv).toContain("--format");
+    expect(captured.argv).toContain("json");
+    expect(captured.argv).toContain("--dir");
+    expect(captured.argv).toContain(bin);
+    expect(captured.depth).toBe("2");
+    expect(captured.parent).toBe("opencode");
+  });
+
+  test("returns timedOut when child exceeds timeout", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/bin/sh
+sleep 2
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const result = await exec({ backend: "opencode", prompt: "slow", cwd: bin, timeoutMs: 50 });
+
+    expect(result.ok).toBe(false);
+    expect(result.timedOut).toBe(true);
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test("returns ok false for non-zero exit and preserves error output", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/bin/sh
+printf '{"type":"error","error":{"message":"backend failed"}}\\n'
+exit 7
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const result = await exec({ backend: "opencode", prompt: "fail", cwd: bin });
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(7);
+    expect(result.output).toBe("backend failed");
+  });
+
+  test("returns ok false when OpenCode only emits lifecycle events", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/bin/sh
+printf '{"type":"step_start","part":{"type":"step-start","sessionID":"s"}}\\n'
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const result = await exec({ backend: "opencode", prompt: "no answer", cwd: bin });
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toBe("No assistant output was produced by the backend.");
+  });
+
+  test("rejects unsupported write mode before spawning a backend", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    const marker = join(bin, "spawned");
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/bin/sh
+touch ${JSON.stringify(marker)}
+printf '{"type":"text","part":{"text":"should not run"}}\\n'
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const result = await exec({ backend: "opencode", prompt: "write", cwd: bin, mode: "write" });
+
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("does not support write mode");
+    expect(existsSync(marker)).toBe(false);
+  });
+});
+
+describe("native ledger runtime", () => {
+  test("creates a .headless session with initial session_started entry", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "test-session" });
+
+    expect(session.ledgerPath).toBe(join(cwd, ".headless", "sessions", "test-session", "ledger.jsonl"));
+    expect(existsSync(session.ledgerPath)).toBe(true);
+
+    const events = readLedger(session);
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("session_started");
+    expect(events[0].sessionId).toBe("test-session");
+  });
+
+  test("appends valid JSONL events and reads recent context in order", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "recent-session" });
+    appendNote({ cwd, sessionId: session.sessionId, text: "first" });
+    recordArtifact({ cwd, sessionId: session.sessionId, kind: "test_report", title: "Tests", summary: "passed", status: "passed" });
+
+    const lines = readFileSync(session.ledgerPath, "utf8").trim().split("\n");
+    expect(lines.every((line) => JSON.parse(line).schema === "v1")).toBe(true);
+
+    const context = getReadContext({ cwd, sessionId: session.sessionId, view: "recent", limit: 2 });
+    expect(context.entries.map((entry) => entry.type)).toEqual(["note", "artifact"]);
+  });
+
+  test("appends a verifiable seq/hash chain", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "hash-session" });
+    appendNote({ cwd, sessionId: session.sessionId, text: "first" });
+
+    const events = readLedger(session);
+    expect(events[0].seq).toBe(1);
+    expect(events[0].prevHash).toBe(null);
+    expect(typeof events[0].hash).toBe("string");
+    expect(events[1].seq).toBe(2);
+    expect(events[1].prevHash).toBe(events[0].hash);
+  });
+
+  test("rejects tampered ledger events with a clear integrity error", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "tamper-session" });
+    appendNote({ cwd, sessionId: session.sessionId, text: "original" });
+
+    const lines = readFileSync(session.ledgerPath, "utf8").trim().split("\n");
+    const tampered = JSON.parse(lines[1]);
+    tampered.content = "changed";
+    lines[1] = JSON.stringify(tampered);
+    writeFileSync(session.ledgerPath, `${lines.join("\n")}\n`, "utf8");
+
+    expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
+  });
+
+  test("derives task state from handoff, handled note, artifact, and finality entries", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "state-session" });
+    const handoff = appendEvent(session, {
+      type: "handoff",
+      source: "opencode",
+      content: "review this",
+      handoff: {
+        from: "opencode",
+        to: "headless_workers",
+        reason: "review",
+        ask: "review this",
+      },
+    });
+    appendNote({ cwd, sessionId: session.sessionId, text: "handled", handlesHandoffId: handoff.id });
+    recordArtifact({ cwd, sessionId: session.sessionId, kind: "patch_summary", title: "Patch", summary: "done", status: "passed" });
+    appendEvent(session, {
+      type: "finality_proposal",
+      source: "opencode",
+      content: "complete",
+    });
+
+    const state = getTaskState({ cwd, sessionId: session.sessionId });
+    expect(state.taskBoard.activeCount).toBe(0);
+    expect(state.taskBoard.handledCount).toBe(1);
+    expect(state.taskBoard.lanes[0].handledBy).toHaveLength(1);
+    expect(state.artifacts[0].kind).toBe("patch_summary");
+    expect(state.finality.proposals).toHaveLength(1);
+  });
+});
+
+describe("orchestration", () => {
+  test("headless_run records lifecycle events and final normalized result", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/bin/sh
+printf '{"type":"text","part":{"text":"worker ok"}}\\n'
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const { result, session } = await headlessRun({ backend: "opencode", prompt: "inspect", cwd: bin, sessionId: "run-session" });
+    const events = readLedger(session);
+
+    expect(result.ok).toBe(true);
+    expect(events.map((event) => event.type)).toContain("run_started");
+    expect(events.map((event) => event.type)).toContain("worker_spawned");
+    expect(events.at(-1)?.type).toBe("headless_result");
+    expect(events.at(-1)?.result?.output).toBe("worker ok");
+  });
+
+  test("failed backend run records failed result", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/bin/sh
+printf '{"type":"error","error":{"message":"backend failed"}}\\n'
+exit 3
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const { result, session } = await headlessRun({ backend: "opencode", prompt: "fail", cwd: bin, sessionId: "failed-session" });
+    const last = readLedger(session).at(-1);
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(3);
+    expect(last?.type).toBe("headless_result");
+    expect(last?.meta?.status).toBe("failed");
+  });
+
+  test("timeout records timedOut true", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/bin/sh
+sleep 2
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const { result, session } = await headlessRun({ backend: "opencode", prompt: "slow", cwd: bin, sessionId: "timeout-session", timeoutMs: 50 });
+    const last = readLedger(session).at(-1);
+
+    expect(result.timedOut).toBe(true);
+    expect(last?.result?.timedOut).toBe(true);
+    expect(last?.meta?.status).toBe("timed_out");
+  });
+
+  test("headless_deliberate fans out and returns collected outputs", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-deliberate-"));
+    await writeExecutable(
+      join(cwd, "opencode"),
+      `#!/bin/sh
+printf '{"type":"text","part":{"text":"deliberated"}}\\n'
+`,
+    );
+    process.env.PATH = `${cwd}:${process.env.PATH}`;
+
+    const result = await deliberate({
+      cwd,
+      sessionId: "deliberate-session",
+      question: "List capabilities",
+      backends: ["opencode"],
+    });
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].backend).toBe("opencode");
+    expect(result.results[0].output).toBe("deliberated");
+    expect(getTaskState({ cwd, sessionId: "deliberate-session" }).taskBoard.handledCount).toBe(1);
+  });
+});
+
+describe("plugin", () => {
+  test("exports id, server, and headless_run tool", async () => {
+    mock.module("@opencode-ai/plugin", () => ({
+      tool: Object.assign((definition: unknown) => definition, {
+        schema: zodLike(),
+      }),
+    }));
+
+    const mod = await import(`../plugin/index.ts?plugin-test=${Date.now()}`);
+    expect(mod.id).toBe("headless");
+    expect(typeof mod.server).toBe("function");
+    expect(mod.default.id).toBe("headless");
+
+    const hooks = await mod.server({} as never);
+    expect(hooks.tool.headless_run).toBeDefined();
+    expect(hooks.tool.headless_append_note).toBeDefined();
+    expect(hooks.tool.headless_record_artifact).toBeDefined();
+    expect(hooks.tool.headless_read_context).toBeDefined();
+    expect(hooks.tool.headless_task_state).toBeDefined();
+    expect(hooks.tool.headless_propose_final).toBeDefined();
+    expect(hooks.tool.headless_deliberate).toBeDefined();
+  });
+
+  test("headless_run uses OpenCode context directory as cwd", async () => {
+    mock.module("@opencode-ai/plugin", () => ({
+      tool: Object.assign((definition: unknown) => definition, {
+        schema: zodLike(),
+      }),
+    }));
+
+    const cwd = mkdtempSync(join(tmpdir(), "headless-plugin-cwd-"));
+    await writeExecutable(
+      join(cwd, "opencode"),
+      `#!/bin/sh
+printf '{"type":"text","part":{"text":"ok from plugin cwd"}}\\n'
+`,
+    );
+    process.env.PATH = `${cwd}:${process.env.PATH}`;
+
+    const mod = await import(`../plugin/index.ts?plugin-cwd-test=${Date.now()}`);
+    const hooks = await mod.server({} as never);
+    const result = await hooks.tool.headless_run.execute(
+      {
+        backend: "opencode",
+        prompt: "hello",
+        mode: "read-only",
+      },
+      pluginContext(cwd, "s"),
+    );
+
+    const parsed = JSON.parse(result.output);
+    expect(parsed.sessionId).toBe("s");
+    expect(parsed.result.backend).toBe("opencode");
+    expect(parsed.result.output).toBe("ok from plugin cwd");
+  });
+
+  test("ledger tools return structured OpenCode tool results", async () => {
+    mock.module("@opencode-ai/plugin", () => ({
+      tool: Object.assign((definition: unknown) => definition, {
+        schema: zodLike(),
+      }),
+    }));
+
+    const cwd = mkdtempSync(join(tmpdir(), "headless-plugin-ledger-"));
+    const mod = await import(`../plugin/index.ts?plugin-ledger-test=${Date.now()}`);
+    const hooks = await mod.server({} as never);
+    const context = pluginContext(cwd, "plugin-session");
+
+    const note = await hooks.tool.headless_append_note.execute({ text: "hello" }, context);
+    const artifact = await hooks.tool.headless_record_artifact.execute({ kind: "test_report", title: "Tests", summary: "ok", status: "passed" }, context);
+    const state = await hooks.tool.headless_task_state.execute({}, context);
+
+    expect(note.title).toBe("headless_append_note");
+    expect(JSON.parse(artifact.output).artifact.kind).toBe("test_report");
+    expect(JSON.parse(state.output).artifacts).toHaveLength(1);
+  });
+});
+
+describe("ledger durability and concurrency", () => {
+  test("concurrent cross-process appends stay atomic and keep the hash chain intact", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-concurrent-"));
+    const sessionId = "concurrent-session";
+    getOrCreateSession({ cwd, sessionId });
+
+    const srcIndex = new URL("../src/index.ts", import.meta.url).pathname;
+    const fixture = join(cwd, "writer.ts");
+    await Bun.write(
+      fixture,
+      `import { appendNote } from ${JSON.stringify(srcIndex)};\n` +
+        `const cwd = process.argv[2]!;\n` +
+        `const sid = process.argv[3]!;\n` +
+        `const n = Number(process.argv[4]!);\n` +
+        `for (let i = 0; i < n; i += 1) appendNote({ cwd, sessionId: sid, text: \`p\${process.pid}-\${i}\` });\n`,
+    );
+
+    const children = 6;
+    const perChild = 15;
+    const procs = Array.from({ length: children }, () =>
+      Bun.spawn(["bun", fixture, cwd, sessionId, String(perChild)], { cwd, stdout: "ignore", stderr: "inherit" }),
+    );
+    for (const proc of procs) await proc.exited;
+
+    const events = readLedger(getOrCreateSession({ cwd, sessionId }));
+    expect(events.length).toBe(1 + children * perChild);
+    expect(events.map((event) => event.seq)).toEqual(events.map((_, index) => index + 1));
+    expect(new Set(events.map((event) => event.id)).size).toBe(events.length);
+  });
+});
+
+describe("cli argument parsing", () => {
+  test("getPrompt skips the value of known value-taking flags", () => {
+    expect(getPrompt(["exec", "--cwd", "./x"])).toBeUndefined();
+    expect(getPrompt(["exec", "--backend", "opencode", "--model", "gpt-4"])).toBeUndefined();
+    expect(getPrompt(["exec", "--backend", "grok", "do work"])).toBe("do work");
+    expect(getPrompt(["exec", "--cwd", "./x", "do work"])).toBe("do work");
+  });
+
+  test("getPrompt treats everything after -- as the prompt verbatim", () => {
+    expect(getPrompt(["exec", "--", "--not-a-flag", "and more"])).toBe("--not-a-flag and more");
+  });
+
+  test("getPrompt ignores the subcommand token", () => {
+    expect(getPrompt(["exec"])).toBeUndefined();
+    expect(getPrompt(["run", "hello"])).toBe("hello");
+  });
+
+  test("parseIntegerArg returns undefined when absent and parses when valid", () => {
+    expect(parseIntegerArg(["exec", "--timeout-ms", "1500"], "--timeout-ms")).toBe(1500);
+    expect(parseIntegerArg(["exec", "hi"], "--timeout-ms")).toBeUndefined();
+  });
+});
+
+async function writeExecutable(path: string, content: string) {
+  await Bun.write(path, content);
+  chmodSync(path, 0o755);
+}
+
+function zodLike() {
+  const chain = {
+    describe() {
+      return chain;
+    },
+    default() {
+      return chain;
+    },
+    optional() {
+      return chain;
+    },
+    int() {
+      return chain;
+    },
+    positive() {
+      return chain;
+    },
+  };
+
+  return {
+    string: () => chain,
+    number: () => chain,
+    enum: () => chain,
+  };
+}
+
+function pluginContext(cwd: string, sessionID = "s") {
+  return {
+    directory: cwd,
+    worktree: "/wrong",
+    sessionID,
+    messageID: "m",
+    agent: "build",
+    abort: new AbortController().signal,
+    metadata() {},
+    async ask() {},
+  };
+}

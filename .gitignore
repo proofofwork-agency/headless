@@ -1,0 +1,9 @@
+node_modules/
+dist/
+opencode/
+.headless/
+*.log
+.contextrelay/
+.DS_Store
+.env
+.env.local

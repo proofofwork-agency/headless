@@ -1,0 +1,26 @@
+{
+  "name": "@proofofwork/headless",
+  "version": "0.1.0",
+  "description": "Headless runner and local ledger tools for OpenCode.",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "headless",
+    "orchestrator",
+    "grok",
+    "multi-agent"
+  ],
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "opencode": {
+    "type": "plugin"
+  }
+}
