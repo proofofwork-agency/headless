@@ -87,7 +87,60 @@ export function parseClaudeStreamJson(stdout: string): JsonParseResult {
 }
 
 export function parseCodexJson(stdout: string): JsonParseResult {
-  return parseGenericAgentJson(stdout);
+  const output = textCollector();
+  const errors: string[] = [];
+  let cost = 0;
+  let tokens = 0;
+  let sawCost = false;
+  let sawTokens = false;
+
+  for (const event of parseJsonValues(stdout)) {
+    if (event.type === "item.completed") {
+      const item = objectValue(event.item);
+      if (item?.type === "agent_message") {
+        const text = stringValue(item.text) ?? stringValue(item.message);
+        if (text) appendText(output, text);
+      }
+      if (item?.type === "error") {
+        const message = formatError(item.error) ?? stringValue(item.message) ?? stringValue(item.text) ?? "Codex item failed.";
+        errors.push(message);
+      }
+    }
+
+    // Backward-compatible local fixture shape used before Codex 0.143.0's
+    // item.completed envelope was captured from a live run.
+    if (event.type === "agent_message") {
+      const text = stringValue(event.text) ?? stringValue(event.message);
+      if (text) appendText(output, text);
+    }
+
+    if (event.type === "turn.failed") {
+      const message = formatError(event.error) ?? stringValue(event.message) ?? "Codex turn failed.";
+      errors.push(message);
+    }
+
+    const error = formatError(event.error) ?? (event.type === "error" ? stringValue(event.message) : null);
+    if (error) errors.push(error);
+
+    const costValue = numberValue(event.cost) ?? numberValue(event.total_cost_usd);
+    if (costValue !== null) {
+      sawCost = true;
+      cost += costValue;
+    }
+
+    const tokenValue = tokenCount(event.usage) ?? tokenCount(event.tokens);
+    if (tokenValue !== null) {
+      sawTokens = true;
+      tokens += tokenValue;
+    }
+  }
+
+  return {
+    output: output.join("\n").trim(),
+    cost: sawCost ? cost : null,
+    tokens: sawTokens ? tokens : null,
+    error: errors.length ? errors.join("\n") : null,
+  };
 }
 
 export function parseJsonValues(stdout: string) {
@@ -173,7 +226,7 @@ export function tokenCount(value: unknown): number | null {
 
   let total = 0;
   let saw = false;
-  for (const key of ["input", "output", "reasoning", "input_tokens", "output_tokens", "reasoning_tokens"] as const) {
+  for (const key of ["input", "output", "reasoning", "input_tokens", "output_tokens", "reasoning_tokens", "reasoning_output_tokens"] as const) {
     const count = numberValue(record[key]);
     if (count !== null) {
       saw = true;

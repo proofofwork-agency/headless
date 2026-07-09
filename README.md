@@ -42,6 +42,12 @@ Backend option support:
 | Codex | passed as `--model` | ignored; Codex exec has no Headless agent mapping yet |
 | Grok CLI | passed as `--model` | passed as `--agent` |
 
+## Troubleshooting
+
+Claude Code and Codex runs use the installed local CLIs, so those CLIs must already be authenticated. For Claude Code, run `claude` and complete `/login`; for Codex, complete its CLI auth flow before invoking it through Headless.
+
+OpenCode is launched with `--pure` for containment, which intentionally ignores user config. Pass an explicit model, for example `--model opencode/big-pickle`, if an OpenCode run produces no assistant output because no default model was available in pure mode.
+
 ## Contained Write Mode
 
 `--mode write` is diff-only and git-required. Headless creates an ephemeral git worktree on a `headless/write/<label>-<id>` branch, runs the backend inside that worktree, captures the resulting patch/status/file list, and removes the worktree. It does not auto-apply or merge changes back into the caller's tree.
