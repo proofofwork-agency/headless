@@ -1,4 +1,5 @@
 import type { ExecOptions } from "../index";
+import { buildAdapterEnv } from "./env";
 import { buildGrokCommand, parseGrokJsonl } from "./grok";
 import { parseClaudeStreamJson, parseCodexJson, type JsonParseResult } from "./json";
 import { buildOpenCodeCommand, nextOpenCodeEnv, parseOpenCodeJsonl } from "./opencode";
@@ -9,7 +10,8 @@ export type BackendAdapter = {
   id: Backend;
   metadata: typeof backendMetadata[Backend];
   stdinPrompt: boolean;
-  prepareEnv?: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
+  credentialPrefixes: string[];
+  buildEnv?: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
   buildCommand: (opts: ExecOptions, cwd: string) => string[];
   parse: (stdout: string) => JsonParseResult;
 };
@@ -19,7 +21,10 @@ export const backendAdapters: Record<Backend, BackendAdapter> = {
     id: "opencode",
     metadata: backendMetadata.opencode,
     stdinPrompt: false,
-    prepareEnv: nextOpenCodeEnv,
+    // opencode is multi-provider: users who auth providers via env vars
+    // (instead of the opencode auth store) need these to reach the child.
+    credentialPrefixes: ["OPENCODE_", "ANTHROPIC_", "OPENAI_", "XAI_", "GOOGLE_", "GEMINI_", "OPENROUTER_"],
+    buildEnv: nextOpenCodeEnv,
     buildCommand: buildOpenCodeCommand,
     parse: parseOpenCodeJsonl,
   },
@@ -27,6 +32,7 @@ export const backendAdapters: Record<Backend, BackendAdapter> = {
     id: "claude-code",
     metadata: backendMetadata["claude-code"],
     stdinPrompt: true,
+    credentialPrefixes: ["ANTHROPIC_", "CLAUDE_"],
     buildCommand: () => ["claude", "-p", "--output-format", "stream-json", "--verbose", "--allowedTools", "Read,Grep,Glob,LS"],
     parse: parseClaudeStreamJson,
   },
@@ -34,6 +40,7 @@ export const backendAdapters: Record<Backend, BackendAdapter> = {
     id: "codex",
     metadata: backendMetadata.codex,
     stdinPrompt: true,
+    credentialPrefixes: ["OPENAI_", "CODEX_"],
     buildCommand: () => ["codex", "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--ephemeral", "-"],
     parse: parseCodexJson,
   },
@@ -41,6 +48,7 @@ export const backendAdapters: Record<Backend, BackendAdapter> = {
     id: "grok-build",
     metadata: backendMetadata["grok-build"],
     stdinPrompt: false,
+    credentialPrefixes: ["XAI_", "GROK_"],
     buildCommand: buildGrokCommand,
     parse: parseGrokJsonl,
   },
@@ -51,4 +59,8 @@ export function assertModeAllowed(backend: Backend, mode: ExecOptions["mode"] = 
   if (mode === "write" && !adapter.metadata.canWrite) {
     throw new Error(`Backend ${backend} does not support write mode in Headless yet.`);
   }
+}
+
+export function buildBackendEnv(adapter: BackendAdapter, env: NodeJS.ProcessEnv = process.env) {
+  return adapter.buildEnv ? adapter.buildEnv(env) : buildAdapterEnv(env, adapter.credentialPrefixes);
 }
