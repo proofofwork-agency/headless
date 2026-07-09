@@ -1,4 +1,4 @@
-import { type Plugin, tool } from "@opencode-ai/plugin";
+import { type Plugin, type ToolContext, tool } from "@opencode-ai/plugin";
 import {
   appendNote,
   deliberate,
@@ -16,12 +16,6 @@ type HeadlessRunArgs = {
   model?: string;
   agent?: string;
   timeoutMs?: number;
-};
-
-type RuntimeContext = {
-  directory?: string;
-  worktree?: string;
-  sessionID?: string;
 };
 
 export const id = "headless";
@@ -188,11 +182,11 @@ export default {
   server,
 };
 
-function runtimeCwd(context: RuntimeContext) {
+function runtimeCwd(context: ToolContext) {
   return context.directory || context.worktree || process.cwd();
 }
 
-function runtimeSessionId(context: RuntimeContext) {
+function runtimeSessionId(context: ToolContext) {
   return context.sessionID;
 }
 
