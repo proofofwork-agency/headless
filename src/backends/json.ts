@@ -6,7 +6,7 @@ export type JsonParseResult = {
 };
 
 export function parseGenericAgentJson(stdout: string): JsonParseResult {
-  const output: string[] = [];
+  const output = textCollector();
   const errors: string[] = [];
   let cost = 0;
   let tokens = 0;
@@ -41,7 +41,7 @@ export function parseGenericAgentJson(stdout: string): JsonParseResult {
 }
 
 export function parseClaudeStreamJson(stdout: string): JsonParseResult {
-  const output: string[] = [];
+  const output = textCollector();
   const errors: string[] = [];
   let finalResult: string | null = null;
   let cost = 0;
@@ -121,7 +121,7 @@ export function parseJsonValues(stdout: string) {
 
 export function collectText(value: unknown, output: string[]) {
   if (typeof value === "string") {
-    if (value.trim()) output.push(value);
+    appendText(output, value);
     return;
   }
 
@@ -137,11 +137,14 @@ export function collectText(value: unknown, output: string[]) {
 
   for (const key of ["text", "content", "delta", "output_text", "result"] as const) {
     const next = stringValue(record[key]);
-    if (next) output.push(next);
+    if (next) appendText(output, next);
   }
 
-  for (const key of ["part", "message", "response", "output", "content"] as const) {
+  for (const key of ["part", "message", "response", "output"] as const) {
     collectText(record[key], output);
+  }
+  if (typeof record.content !== "string") {
+    collectText(record.content, output);
   }
 }
 
@@ -165,24 +168,16 @@ export function tokenCount(value: unknown): number | null {
   const record = objectValue(value);
   if (!record) return null;
 
+  const explicitTotal = numberValue(record.total_tokens);
+  if (explicitTotal !== null) return explicitTotal;
+
   let total = 0;
   let saw = false;
-  for (const key of ["input", "output", "reasoning", "input_tokens", "output_tokens", "total_tokens"] as const) {
+  for (const key of ["input", "output", "reasoning", "input_tokens", "output_tokens", "reasoning_tokens"] as const) {
     const count = numberValue(record[key]);
     if (count !== null) {
       saw = true;
       total += count;
-    }
-  }
-
-  const cache = objectValue(record.cache);
-  if (cache) {
-    for (const key of ["read", "write"] as const) {
-      const count = numberValue(cache[key]);
-      if (count !== null) {
-        saw = true;
-        total += count;
-      }
     }
   }
 
@@ -200,4 +195,18 @@ export function formatError(value: unknown): string | null {
     stringValue(error.message) ??
     stringValue(error.name)
   );
+}
+
+export function textCollector(): string[] {
+  return Object.assign([], { seen: new Set<string>() }) as string[] & { seen: Set<string> };
+}
+
+export function appendText(output: string[], value: string) {
+  if (!value.trim()) return;
+  const maybeSeen = (output as string[] & { seen?: Set<string> }).seen;
+  if (maybeSeen) {
+    if (maybeSeen.has(value)) return;
+    maybeSeen.add(value);
+  }
+  output.push(value);
 }

@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import { normalizeBackend } from "../src/backends/ids";
 import { backendAdapters, buildBackendEnv } from "../src/backends/registry";
 import { buildGrokCommand, parseGrokJsonl } from "../src/backends/grok";
-import { parseClaudeStreamJson, parseCodexJson, parseGenericAgentJson } from "../src/backends/json";
+import { parseClaudeStreamJson, parseCodexJson, parseGenericAgentJson, tokenCount } from "../src/backends/json";
 import { buildOpenCodeCommand, nextOpenCodeEnv, OPENCODE_CONFIG_CONTENT, parseOpenCodeJsonl } from "../src/backends/opencode";
 import {
   appendEvent,
@@ -21,6 +21,7 @@ import {
   LedgerIntegrityError,
 } from "../src/index";
 import { getPrompt, parseIntegerArg } from "../src/cli";
+import { isSuccessfulRun } from "../src/runner/simple";
 
 const originalEnv = { ...process.env };
 
@@ -82,7 +83,7 @@ describe("opencode backend helpers", () => {
 
     expect(parsed.output).toBe("hello");
     expect(parsed.cost).toBe(0.25);
-    expect(parsed.tokens).toBe(24);
+    expect(parsed.tokens).toBe(17);
     expect(parsed.error).toBe("bad model");
   });
 
@@ -102,6 +103,28 @@ describe("opencode backend helpers", () => {
 
     expect(parsed.output).toBe("assistant answer");
   });
+
+  test("dedupes OpenCode text collected from both top-level and properties part", () => {
+    const parsed = parseOpenCodeJsonl(
+      JSON.stringify({
+        type: "message.part.updated",
+        part: {
+          type: "text",
+          text: "assistant answer",
+        },
+        properties: {
+          part: {
+            type: "text",
+            text: "assistant answer",
+            time: { end: Date.now() },
+          },
+        },
+      }),
+    );
+
+    expect(parsed.output).toBe("assistant answer");
+  });
+
 
   test("does not treat lifecycle-only JSON as assistant output", () => {
     const parsed = parseOpenCodeJsonl(
@@ -187,6 +210,17 @@ describe("grok and generic backend helpers", () => {
     expect(parsed.tokens).toBe(9);
   });
 
+  test("does not double-emit string content fields", () => {
+    const parsed = parseGenericAgentJson(JSON.stringify({ content: "hello" }));
+
+    expect(parsed.output).toBe("hello");
+  });
+
+  test("token accounting prefers explicit total over split subset fields", () => {
+    expect(tokenCount({ total_tokens: 10, input_tokens: 4, output_tokens: 5, cache: { read: 100, write: 100 } })).toBe(10);
+    expect(tokenCount({ input_tokens: 4, output_tokens: 5, reasoning_tokens: 2, cache: { read: 100, write: 100 } })).toBe(11);
+  });
+
   test("parses Claude stream-json fixture without duplicating final result", () => {
     const parsed = parseClaudeStreamJson(
       [
@@ -226,10 +260,41 @@ describe("grok and generic backend helpers", () => {
     ]);
   });
 
+  test("passes model to Claude Code command and ignores unmapped agent", () => {
+    expect(backendAdapters["claude-code"].buildCommand({ backend: "claude-code", prompt: "inspect", model: "claude-model", agent: "review" }, "/repo")).toEqual([
+      "claude",
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--allowedTools",
+      "Read,Grep,Glob,LS",
+      "--model",
+      "claude-model",
+    ]);
+  });
+
   test("builds Codex read-only sandbox command", () => {
     expect(backendAdapters.codex.buildCommand({ backend: "codex", prompt: "inspect" }, "/repo")).toEqual([
       "codex",
       "exec",
+      "--json",
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--ephemeral",
+      "-",
+    ]);
+  });
+
+  test("passes model to Codex exec command and ignores unmapped agent", () => {
+    expect(backendAdapters.codex.buildCommand({ backend: "codex", prompt: "inspect", model: "gpt-5", agent: "review" }, "/repo")).toEqual([
+      "codex",
+      "exec",
+      "--model",
+      "gpt-5",
       "--json",
       "--sandbox",
       "read-only",
@@ -459,6 +524,65 @@ describe("native ledger runtime", () => {
     expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
   });
 
+  test("allows legacy unchained ledger entries only before the chained prefix starts", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "legacy-prefix-session" });
+    const chained = readFileSync(session.ledgerPath, "utf8");
+    const legacy = JSON.stringify({
+      schema: "v1",
+      id: "legacy",
+      timestamp: Date.now(),
+      sessionId: session.sessionId,
+      type: "note",
+      source: "test",
+      content: "legacy prefix",
+    });
+    writeFileSync(session.ledgerPath, `${legacy}\n${chained}`, "utf8");
+
+    expect(readLedger(session).map((event) => event.id)).toEqual(["legacy", expect.any(String)]);
+  });
+
+  test("rejects legacy unchained ledger entries appended after a chained event", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "legacy-tail-session" });
+    const legacy = JSON.stringify({
+      schema: "v1",
+      id: "legacy-tail",
+      timestamp: Date.now(),
+      sessionId: session.sessionId,
+      type: "note",
+      source: "test",
+      content: "legacy tail",
+    });
+    writeFileSync(session.ledgerPath, `${readFileSync(session.ledgerPath, "utf8")}${legacy}\n`, "utf8");
+
+    expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
+  });
+
+  test("append after a legacy prefix numbers the chained event so it round-trips", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "legacy-append-session" });
+    const chained = readFileSync(session.ledgerPath, "utf8");
+    const legacy = JSON.stringify({
+      schema: "v1",
+      id: "legacy",
+      timestamp: Date.now(),
+      sessionId: session.sessionId,
+      type: "note",
+      source: "test",
+      content: "legacy prefix",
+    });
+    // Ledger becomes: [legacy(unchained), session_started(seq 1)].
+    writeFileSync(session.ledgerPath, `${legacy}\n${chained}`, "utf8");
+
+    const appended = appendNote({ cwd, sessionId: session.sessionId, text: "after legacy" });
+    // seq counts only chained events (session_started=1), so this is 2 — not 3.
+    expect(appended.seq).toBe(2);
+    const events = readLedger(session);
+    expect(events.map((event) => event.id)).toEqual(["legacy", expect.any(String), appended.id]);
+    expect(events.at(-1)?.content).toBe("after legacy");
+  });
+
   test("derives task state from handoff, handled note, artifact, and finality entries", () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
     const session = getOrCreateSession({ cwd, sessionId: "state-session" });
@@ -549,6 +673,11 @@ sleep 2
     expect(last?.meta?.status).toBe("timed_out");
   });
 
+  test("exitCode null is not classified as a successful run", () => {
+    expect(isSuccessfulRun({ timedOut: false, parseError: null, noAssistantOutput: false, exitCode: null })).toBe(false);
+    expect(isSuccessfulRun({ timedOut: false, parseError: null, noAssistantOutput: false, exitCode: 0 })).toBe(true);
+  });
+
   test("headless_deliberate fans out and returns collected outputs", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-deliberate-"));
     await writeExecutable(
@@ -570,6 +699,36 @@ printf '{"type":"text","part":{"text":"deliberated"}}\\n'
     expect(result.results[0].backend).toBe("opencode");
     expect(result.results[0].output).toBe("deliberated");
     expect(getTaskState({ cwd, sessionId: "deliberate-session" }).taskBoard.handledCount).toBe(1);
+  });
+
+  test("headless_deliberate leaves the handoff active when every worker fails", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-deliberate-failed-"));
+    await writeExecutable(
+      join(cwd, "opencode"),
+      `#!/bin/sh
+printf '{"type":"error","error":{"message":"worker failed"}}\\n'
+exit 2
+`,
+    );
+    process.env.PATH = `${cwd}:${process.env.PATH}`;
+
+    const result = await deliberate({
+      cwd,
+      sessionId: "deliberate-failed-session",
+      question: "List capabilities",
+      backends: ["opencode"],
+    });
+
+    const state = getTaskState({ cwd, sessionId: "deliberate-failed-session" });
+    const events = readLedger(result.session);
+    const failureNote = events.at(-1);
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].ok).toBe(false);
+    expect(state.taskBoard.activeCount).toBe(1);
+    expect(state.taskBoard.handledCount).toBe(0);
+    expect(failureNote?.content).toContain("Deliberation failed");
+    expect(failureNote?.handlesHandoffId).toBeUndefined();
   });
 });
 
@@ -625,9 +784,47 @@ describe("cli argument parsing", () => {
     expect(parseIntegerArg(["exec", "--timeout-ms", "1500"], "--timeout-ms")).toBe(1500);
     expect(parseIntegerArg(["exec", "hi"], "--timeout-ms")).toBeUndefined();
   });
+
+  test("CLI reports missing value flags without a stack trace", async () => {
+    const result = await runCli(["exec", "--backend"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Missing value for --backend.");
+    expect(result.stderr).not.toContain("at ");
+  });
+
+  test("CLI rejects extra unquoted prompt positionals by name", async () => {
+    const result = await runCli(["exec", "first", "second", "third"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Unexpected extra prompt arguments: second third");
+    expect(result.stderr).not.toContain("at ");
+  });
+
+  test("CLI reports unsupported backend as one friendly line", async () => {
+    const result = await runCli(["exec", "--backend", "nope", "prompt"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.trim().split("\n")).toHaveLength(1);
+    expect(result.stderr).toContain("Unsupported --backend nope.");
+    expect(result.stderr).not.toContain("at ");
+  });
 });
 
 async function writeExecutable(path: string, content: string) {
   await Bun.write(path, content);
   chmodSync(path, 0o755);
+}
+
+async function runCli(args: string[]) {
+  const proc = Bun.spawn(["bun", new URL("../src/cli.ts", import.meta.url).pathname, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    Bun.readableStreamToText(proc.stdout),
+    Bun.readableStreamToText(proc.stderr),
+    proc.exited,
+  ]);
+  return { stdout, stderr, exitCode };
 }

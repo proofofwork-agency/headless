@@ -33,6 +33,15 @@ Grok child workers are launched through the real Grok CLI single-turn path:
 grok --single <prompt> --cwd <cwd> --output-format streaming-json
 ```
 
+Backend option support:
+
+| Backend | `--model` | `--agent` |
+| --- | --- | --- |
+| OpenCode | passed as `--model` | passed as `--agent` |
+| Claude Code | passed as `--model` | ignored; no Headless agent mapping yet |
+| Codex | passed as `--model` | ignored; Codex exec has no Headless agent mapping yet |
+| Grok CLI | passed as `--model` | passed as `--agent` |
+
 ## OpenCode Plugin
 
 `plugin/index.ts` exports a loadable OpenCode plugin with these tools:

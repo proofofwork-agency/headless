@@ -78,7 +78,7 @@ export async function runHeadless(opts: ExecOptions & { backend: Backend }): Pro
   const finalOutput = output || parseError || stderr.trim() || (noAssistantOutput ? "No assistant output was produced by the backend." : stdout.trim());
 
   return {
-    ok: !timedOut && !parseError && !noAssistantOutput && (exitCode === 0 || exitCode === null),
+    ok: isSuccessfulRun({ timedOut, parseError, noAssistantOutput, exitCode }),
     backend,
     output: finalOutput,
     cost,
@@ -87,6 +87,10 @@ export async function runHeadless(opts: ExecOptions & { backend: Backend }): Pro
     exitCode,
     timedOut,
   };
+}
+
+export function isSuccessfulRun(input: { timedOut: boolean; parseError: string | null; noAssistantOutput: boolean; exitCode: number | null }) {
+  return !input.timedOut && !input.parseError && !input.noAssistantOutput && input.exitCode === 0;
 }
 
 function failedResult(backend: Backend, error: unknown, durationMs: number): ExecResult {

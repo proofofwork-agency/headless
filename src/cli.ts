@@ -9,6 +9,8 @@
 import { join } from "path";
 import { backendChoices, exec, normalizeBackend } from "./index";
 
+class CliUsageError extends Error {}
+
 async function main() {
   const args = process.argv.slice(2);
   const sub = args[0];
@@ -24,11 +26,15 @@ async function main() {
 
   if (sub === "exec" || sub === "run") {
     const backendInput = getArg(args, "--backend") || "opencode";
-    const backend = normalizeBackend(backendInput);
+    let backend: ReturnType<typeof normalizeBackend>;
+    try {
+      backend = normalizeBackend(backendInput);
+    } catch {
+      throw new CliUsageError(`Unsupported --backend ${backendInput}. Expected one of: ${backendChoices().join(", ")}`);
+    }
     const prompt = getPrompt(args);
     if (!prompt) {
-      console.error(`Usage: headless exec --backend <${backendChoices().join("|")}> "your prompt"`);
-      process.exit(1);
+      throw new CliUsageError(`Usage: headless exec --backend <${backendChoices().join("|")}> "your prompt"`);
     }
     const model = getArg(args, "--model");
     const agent = getArg(args, "--agent");
@@ -133,7 +139,12 @@ async function readVersion(): Promise<string> {
 
 function getArg(argv: string[], name: string): string | undefined {
   const i = argv.indexOf(name);
-  return i >= 0 ? argv[i + 1] : undefined;
+  if (i < 0) return undefined;
+  const value = argv[i + 1];
+  if (value === undefined || value.startsWith("-")) {
+    throw new CliUsageError(`Missing value for ${name}.`);
+  }
+  return value;
 }
 
 export const VALUE_FLAGS = new Set(["--backend", "--model", "--agent", "--cwd", "--mode", "--timeout-ms"]);
@@ -172,12 +183,15 @@ export function getPrompt(argv: string[]): string | undefined {
     }
     positionals.push(tok);
   }
-  return positionals.length ? positionals[positionals.length - 1] : undefined;
+  if (positionals.length > 1) {
+    throw new CliUsageError(`Unexpected extra prompt argument${positionals.length === 2 ? "" : "s"}: ${positionals.slice(1).join(" ")}`);
+  }
+  return positionals[0];
 }
 
 if (import.meta.main) {
   main().catch((e) => {
-    console.error(e);
+    console.error(e instanceof Error ? e.message : String(e));
     process.exit(1);
   });
 }

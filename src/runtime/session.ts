@@ -50,12 +50,16 @@ export function appendEvent(session: HeadlessSession, input: EventInput): Headle
   return withLedgerLock(session, () => {
     const events = readLedgerUnlocked(session);
     const previous = events.at(-1);
+    // seq counts only chained events, matching verifyEvent on read. For an
+    // all-chained ledger this equals events.length + 1; for a legacy prefix it
+    // numbers the first real chained event as 1 so append+re-read round-trips.
+    const chainedCount = events.filter(isChainedEvent).length;
     const eventWithoutHash: Omit<HeadlessEvent, "hash"> = {
       schema: "v1",
       id: input.id || crypto.randomUUID(),
       timestamp: input.timestamp || Date.now(),
       sessionId: session.sessionId,
-      seq: events.length + 1,
+      seq: chainedCount + 1,
       prevHash: previous?.hash || null,
       ...input,
     };
@@ -108,6 +112,7 @@ function readLedgerUnlocked(session: HeadlessSession): HeadlessEvent[] {
   const events: HeadlessEvent[] = [];
 
   let lineNumber = 0;
+  let chainedCount = 0;
   for (const line of text.split("\n")) {
     lineNumber += 1;
     const trimmed = line.trim();
@@ -118,7 +123,8 @@ function readLedgerUnlocked(session: HeadlessSession): HeadlessEvent[] {
     } catch (error) {
       throw new LedgerIntegrityError(`Invalid ledger JSON at ${session.ledgerPath}:${lineNumber}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    verifyEvent(session, event, events.at(-1), events.length + 1, lineNumber);
+    verifyEvent(session, event, events.at(-1), chainedCount + 1, lineNumber);
+    if (isChainedEvent(event)) chainedCount += 1;
     events.push(event);
   }
 
@@ -147,7 +153,10 @@ function sanitizeSessionId(value?: string | null) {
 }
 
 function verifyEvent(session: HeadlessSession, event: HeadlessEvent, previous: HeadlessEvent | undefined, expectedSeq: number, lineNumber: number) {
-  if (!event.hash && event.seq === undefined && event.prevHash === undefined) {
+  if (!isChainedEvent(event)) {
+    if (previous && isChainedEvent(previous)) {
+      throw new LedgerIntegrityError(`Legacy unchained ledger event after chained event at ${session.ledgerPath}:${lineNumber}.`);
+    }
     return;
   }
   if (event.seq !== expectedSeq) {
@@ -165,6 +174,10 @@ function verifyEvent(session: HeadlessSession, event: HeadlessEvent, previous: H
   if (event.hash !== expectedHash) {
     throw new LedgerIntegrityError(`Ledger hash mismatch at ${session.ledgerPath}:${lineNumber}.`);
   }
+}
+
+function isChainedEvent(event: HeadlessEvent) {
+  return !!event.hash || event.seq !== undefined || event.prevHash !== undefined;
 }
 
 function hashEvent(event: Omit<HeadlessEvent, "hash">) {

@@ -1,6 +1,6 @@
 import type { ExecOptions } from "../index";
 import { buildAdapterEnv } from "./env";
-import { collectText, formatError, numberValue, objectValue, tokenCount } from "./json";
+import { appendText, collectText, formatError, numberValue, objectValue, textCollector, tokenCount } from "./json";
 
 export type OpenCodeJsonlParseResult = {
   output: string;
@@ -76,7 +76,7 @@ export function nextOpenCodeEnv(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export function parseOpenCodeJsonl(stdout: string): OpenCodeJsonlParseResult {
-  const output: string[] = [];
+  const output = textCollector();
   const errors: string[] = [];
   let cost = 0;
   let tokens = 0;
@@ -91,7 +91,7 @@ export function parseOpenCodeJsonl(stdout: string): OpenCodeJsonlParseResult {
     try {
       event = JSON.parse(trimmed) as Record<string, unknown>;
     } catch {
-      output.push(trimmed);
+      appendText(output, trimmed);
       continue;
     }
 
