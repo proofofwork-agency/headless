@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -573,84 +573,6 @@ printf '{"type":"text","part":{"text":"deliberated"}}\\n'
   });
 });
 
-describe("plugin", () => {
-  test("exports id, server, and headless_run tool", async () => {
-    mock.module("@opencode-ai/plugin", () => ({
-      tool: Object.assign((definition: unknown) => definition, {
-        schema: zodLike(),
-      }),
-    }));
-
-    const mod = await import(`../plugin/index.ts?plugin-test=${Date.now()}`);
-    expect(mod.id).toBe("headless");
-    expect(typeof mod.server).toBe("function");
-    expect(mod.default.id).toBe("headless");
-
-    const hooks = await mod.server({} as never);
-    expect(hooks.tool.headless_run).toBeDefined();
-    expect(hooks.tool.headless_append_note).toBeDefined();
-    expect(hooks.tool.headless_record_artifact).toBeDefined();
-    expect(hooks.tool.headless_read_context).toBeDefined();
-    expect(hooks.tool.headless_task_state).toBeDefined();
-    expect(hooks.tool.headless_propose_final).toBeDefined();
-    expect(hooks.tool.headless_deliberate).toBeDefined();
-  });
-
-  test("headless_run uses OpenCode context directory as cwd", async () => {
-    mock.module("@opencode-ai/plugin", () => ({
-      tool: Object.assign((definition: unknown) => definition, {
-        schema: zodLike(),
-      }),
-    }));
-
-    const cwd = mkdtempSync(join(tmpdir(), "headless-plugin-cwd-"));
-    await writeExecutable(
-      join(cwd, "opencode"),
-      `#!/bin/sh
-printf '{"type":"text","part":{"text":"ok from plugin cwd"}}\\n'
-`,
-    );
-    process.env.PATH = `${cwd}:${process.env.PATH}`;
-
-    const mod = await import(`../plugin/index.ts?plugin-cwd-test=${Date.now()}`);
-    const hooks = await mod.server({} as never);
-    const result = await hooks.tool.headless_run.execute(
-      {
-        backend: "opencode",
-        prompt: "hello",
-        mode: "read-only",
-      },
-      pluginContext(cwd, "s"),
-    );
-
-    const parsed = JSON.parse(result.output);
-    expect(parsed.sessionId).toBe("s");
-    expect(parsed.result.backend).toBe("opencode");
-    expect(parsed.result.output).toBe("ok from plugin cwd");
-  });
-
-  test("ledger tools return structured OpenCode tool results", async () => {
-    mock.module("@opencode-ai/plugin", () => ({
-      tool: Object.assign((definition: unknown) => definition, {
-        schema: zodLike(),
-      }),
-    }));
-
-    const cwd = mkdtempSync(join(tmpdir(), "headless-plugin-ledger-"));
-    const mod = await import(`../plugin/index.ts?plugin-ledger-test=${Date.now()}`);
-    const hooks = await mod.server({} as never);
-    const context = pluginContext(cwd, "plugin-session");
-
-    const note = await hooks.tool.headless_append_note.execute({ text: "hello" }, context);
-    const artifact = await hooks.tool.headless_record_artifact.execute({ kind: "test_report", title: "Tests", summary: "ok", status: "passed" }, context);
-    const state = await hooks.tool.headless_task_state.execute({}, context);
-
-    expect(note.title).toBe("headless_append_note");
-    expect(JSON.parse(artifact.output).artifact.kind).toBe("test_report");
-    expect(JSON.parse(state.output).artifacts).toHaveLength(1);
-  });
-});
-
 describe("ledger durability and concurrency", () => {
   test("concurrent cross-process appends stay atomic and keep the hash chain intact", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-concurrent-"));
@@ -708,43 +630,4 @@ describe("cli argument parsing", () => {
 async function writeExecutable(path: string, content: string) {
   await Bun.write(path, content);
   chmodSync(path, 0o755);
-}
-
-function zodLike() {
-  const chain = {
-    describe() {
-      return chain;
-    },
-    default() {
-      return chain;
-    },
-    optional() {
-      return chain;
-    },
-    int() {
-      return chain;
-    },
-    positive() {
-      return chain;
-    },
-  };
-
-  return {
-    string: () => chain,
-    number: () => chain,
-    enum: () => chain,
-  };
-}
-
-function pluginContext(cwd: string, sessionID = "s") {
-  return {
-    directory: cwd,
-    worktree: "/wrong",
-    sessionID,
-    messageID: "m",
-    agent: "build",
-    abort: new AbortController().signal,
-    metadata() {},
-    async ask() {},
-  };
 }

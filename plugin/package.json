@@ -1,7 +1,7 @@
 {
-  "name": "@proofofwork/headless",
+  "name": "@proofofwork-agency/headless-plugin",
   "version": "0.1.0",
-  "description": "Headless runner and local ledger tools for OpenCode.",
+  "description": "OpenCode plugin exposing Headless runner and local ledger tools. Loads as a repo-path plugin (see root opencode.json); npm distribution requires bundling ../src (not yet wired).",
   "type": "module",
   "main": "./index.ts",
   "exports": {

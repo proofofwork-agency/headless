@@ -45,6 +45,16 @@ grok --single <prompt> --cwd <cwd> --output-format streaming-json
 - `headless_propose_final`
 - `headless_deliberate`
 
+This repo dogfoods the plugin through `opencode.json`:
+
+```json
+{ "plugin": ["./plugin/index.ts"] }
+```
+
+For local global use, install or copy the plugin into an OpenCode plugin location such as `.opencode/plugin` / `.opencode/plugins`, or reference this repo's `plugin/index.ts` from OpenCode config.
+
+The plugin package is not npm-ready yet. `plugin/package.json` is named `@proofofwork-agency/headless-plugin`, but publishing still needs a bundle that includes the Headless core currently imported from `../src`.
+
 The plugin uses `context.directory || context.worktree` as the execution root and writes session data under:
 
 ```text
