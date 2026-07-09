@@ -571,6 +571,34 @@ describe("native ledger runtime", () => {
     expect(context.entries.map((entry) => entry.type)).toEqual(["note", "artifact"]);
   });
 
+  test("redacts secrets before hashing ledger note content", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "redaction-session" });
+
+    appendNote({ cwd, sessionId: session.sessionId, text: "token sk-ABCDEFGHIJKLMNOP1234 should not persist" });
+    const events = readLedger(session);
+    const note = events.at(-1);
+
+    expect(note?.content).toBe("token [REDACTED_OPENAI_KEY] should not persist");
+    expect(note?.content).not.toContain("sk-ABCDEFGHIJKLMNOP1234");
+    expect(note?.meta?.redacted).toBe(true);
+    expect(note?.meta?.truncated).toBe(false);
+    expect(readLedger(session).at(-1)?.hash).toBe(note?.hash);
+  });
+
+  test("truncates oversized ledger content with metadata", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "truncate-session" });
+
+    appendNote({ cwd, sessionId: session.sessionId, text: "x".repeat(20_010) });
+    const note = readLedger(session).at(-1);
+
+    expect(note?.content?.length).toBeLessThan(20_050);
+    expect(note?.content).toContain("[TRUNCATED 10 chars]");
+    expect(note?.meta?.redacted).toBe(false);
+    expect(note?.meta?.truncated).toBe(true);
+  });
+
   test("appends a verifiable seq/hash chain", () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
     const session = getOrCreateSession({ cwd, sessionId: "hash-session" });
@@ -707,6 +735,25 @@ printf '{"type":"text","part":{"text":"worker ok"}}\\n'
     expect(events.map((event) => event.type)).toContain("worker_spawned");
     expect(events.at(-1)?.type).toBe("headless_result");
     expect(events.at(-1)?.result?.output).toBe("worker ok");
+  });
+
+  test("headless_run redacts bearer tokens from ledger result output", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/bin/sh
+printf '{"type":"text","part":{"text":"token Bearer abcdefghijklmnop123456"}}\\n'
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const { result, session } = await headlessRun({ backend: "opencode", prompt: "inspect", cwd: bin, sessionId: "redacted-output-session" });
+    const last = readLedger(session).at(-1);
+
+    expect(result.output).toContain("Bearer abcdefghijklmnop123456");
+    expect(last?.content).toBe("token Bearer [REDACTED_BEARER_TOKEN]");
+    expect(last?.result?.output).toBe("token Bearer [REDACTED_BEARER_TOKEN]");
+    expect(JSON.stringify(last)).not.toContain("abcdefghijklmnop123456");
   });
 
   test("failed backend run records failed result", async () => {
