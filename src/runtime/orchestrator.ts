@@ -4,6 +4,7 @@ import { backendMetadata } from "../backends/metadata";
 import { runHeadless } from "../runner/simple";
 import type { ArtifactStatus, HeadlessEvent } from "./events";
 import { deriveTaskState, readContext, type ReadContextView } from "./read-model";
+import { redactAndTruncate } from "./redaction";
 import { appendEvent, getOrCreateSession, readLedger, type HeadlessSession, type SessionOptions } from "./session";
 
 export type RuntimeOptions = SessionOptions & {
@@ -133,25 +134,26 @@ export async function headlessRun(opts: HeadlessRunOptions) {
     result = failedResult(backend, error);
   }
 
-  const event = appendResult(session, source, runId, result);
-  if (result.diff) {
+  const ledgerResult = redactResultForLedger(result);
+  const event = appendResult(session, source, runId, ledgerResult);
+  if (ledgerResult.diff) {
     appendEvent(session, {
       type: "artifact",
       source,
       runId,
       workerId: runId,
-      content: `Write diff: ${result.diff.files.length} file${result.diff.files.length === 1 ? "" : "s"} changed.`,
+      content: `Write diff: ${ledgerResult.diff.files.length} file${ledgerResult.diff.files.length === 1 ? "" : "s"} changed.`,
       artifact: {
         kind: "write_diff",
         title: "Write diff",
-        summary: `${result.diff.files.length} file${result.diff.files.length === 1 ? "" : "s"} changed in ${result.worktreeBranch ?? "ephemeral worktree"}.`,
-        status: result.ok ? "passed" : "failed",
-        evidence: result.diff.files,
+        summary: `${ledgerResult.diff.files.length} file${ledgerResult.diff.files.length === 1 ? "" : "s"} changed in ${ledgerResult.worktreeBranch ?? "ephemeral worktree"}.`,
+        status: ledgerResult.ok ? "passed" : "failed",
+        evidence: ledgerResult.diff.files,
       },
       meta: {
-        branch: result.worktreeBranch,
-        status: result.diff.status,
-        patch: result.diff.patch,
+        branch: ledgerResult.worktreeBranch,
+        status: ledgerResult.diff.status,
+        patch: ledgerResult.diff.patch,
       },
     });
   }
@@ -226,6 +228,23 @@ function appendResult(session: HeadlessSession, source: string, runId: string, r
       status: result.timedOut ? "timed_out" : result.ok ? "passed" : "failed",
     },
   });
+}
+
+function redactResultForLedger(result: ExecResult): ExecResult {
+  const output = redactAndTruncate(result.output);
+  const patch = result.diff ? redactAndTruncate(result.diff.patch) : null;
+  const status = result.diff ? redactAndTruncate(result.diff.status) : null;
+  return {
+    ...result,
+    output: output.text,
+    diff: result.diff
+      ? {
+          ...result.diff,
+          patch: patch?.text ?? result.diff.patch,
+          status: status?.text ?? result.diff.status,
+        }
+      : result.diff,
+  };
 }
 
 function failedResult(backend: Backend, error: unknown): ExecResult {

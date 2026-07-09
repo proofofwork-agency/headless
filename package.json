@@ -4,17 +4,32 @@
   "description": "Universal headless runner and local control plane for AI coding CLIs with a native JSONL ledger and OpenCode plugin tools.",
   "type": "module",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
   "bin": {
     "headless": "./dist/cli.js",
     "hless": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "bun build ./src/cli.ts --outdir ./dist --target bun && bun build ./src/index.ts --outdir ./dist --target bun",
+    "build": "bun build ./src/cli.ts --outdir ./dist --target bun && bun build ./src/index.ts --outdir ./dist --target bun && bun run build:types",
+    "build:types": "bunx tsc --emitDeclarationOnly --outDir dist",
     "dev": "bun --watch src/cli.ts",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test tests",
     "check": "bun run typecheck && bun run test",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "bun run build"
   },
   "dependencies": {},
   "devDependencies": {

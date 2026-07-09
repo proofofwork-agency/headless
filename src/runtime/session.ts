@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmdirSync } from "fs";
 import { dirname, join } from "path";
 import type { EventInput, HeadlessEvent } from "./events";
 import { atomicWriteFile } from "./atomic-write";
+import { redactAndTruncate, type RedactionResult } from "./redaction";
 
 export type HeadlessSession = {
   root: string;
@@ -50,6 +51,7 @@ export function appendEvent(session: HeadlessSession, input: EventInput): Headle
   return withLedgerLock(session, () => {
     const events = readLedgerUnlocked(session);
     const previous = events.at(-1);
+    const redactedInput = redactEventInput(input);
     // seq counts only chained events, matching verifyEvent on read. For an
     // all-chained ledger this equals events.length + 1; for a legacy prefix it
     // numbers the first real chained event as 1 so append+re-read round-trips.
@@ -61,7 +63,7 @@ export function appendEvent(session: HeadlessSession, input: EventInput): Headle
       sessionId: session.sessionId,
       seq: chainedCount + 1,
       prevHash: previous?.hash || null,
-      ...input,
+      ...redactedInput,
     };
     const event: HeadlessEvent = {
       ...eventWithoutHash,
@@ -88,6 +90,7 @@ function ensureSessionStarted(session: HeadlessSession, source: string) {
   withLedgerLock(session, () => {
     const existing = readLedgerUnlocked(session);
     if (existing.length > 0) return;
+    const redacted = redactContent("Headless session started.", { root: session.root });
     const eventWithoutHash: Omit<HeadlessEvent, "hash"> = {
       schema: "v1",
       id: crypto.randomUUID(),
@@ -97,8 +100,8 @@ function ensureSessionStarted(session: HeadlessSession, source: string) {
       prevHash: null,
       type: "session_started",
       source,
-      content: "Headless session started.",
-      meta: { root: session.root },
+      content: redacted.content,
+      meta: redacted.meta,
     };
     const event = { ...eventWithoutHash, hash: hashEvent(eventWithoutHash) };
     const existingRaw = existsSync(session.ledgerPath) ? readFileSync(session.ledgerPath, "utf8") : "";
@@ -182,6 +185,31 @@ function isChainedEvent(event: HeadlessEvent) {
 
 function hashEvent(event: Omit<HeadlessEvent, "hash">) {
   return createHash("sha256").update(JSON.stringify(event)).digest("hex");
+}
+
+function redactEventInput(input: EventInput): EventInput {
+  if (input.content === undefined) return input;
+  return {
+    ...input,
+    ...redactContent(input.content, input.meta),
+  };
+}
+
+function redactContent(content: string, meta?: Record<string, unknown>): { content: string; meta?: Record<string, unknown> } {
+  const redacted = redactAndTruncate(content);
+  if (!redacted.redacted && !redacted.truncated) return { content, meta };
+  return {
+    content: redacted.text,
+    meta: redactionMeta(meta, redacted),
+  };
+}
+
+function redactionMeta(meta: Record<string, unknown> | undefined, redacted: RedactionResult) {
+  return {
+    ...(meta ?? {}),
+    redacted: redacted.redacted,
+    truncated: redacted.truncated,
+  };
 }
 
 function withLedgerLock<T>(session: HeadlessSession, fn: () => T): T {
