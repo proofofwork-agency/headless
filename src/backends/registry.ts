@@ -2,7 +2,7 @@ import type { ExecOptions } from "../index";
 import { buildAdapterEnv } from "./env";
 import { buildGrokCommand, parseGrokJsonl } from "./grok";
 import { parseClaudeStreamJson, parseCodexJson, type JsonParseResult } from "./json";
-import { buildOpenCodeCommand, nextOpenCodeEnv, parseOpenCodeJsonl } from "./opencode";
+import { buildOpenCodeCommand, nextOpenCodeEnv, OPENCODE_CREDENTIAL_PREFIXES, parseOpenCodeJsonl } from "./opencode";
 import { backendMetadata } from "./metadata";
 import type { Backend } from "./ids";
 
@@ -22,9 +22,8 @@ export const backendAdapters: Record<Backend, BackendAdapter> = {
     id: "opencode",
     metadata: backendMetadata.opencode,
     stdinPrompt: false,
-    // opencode is multi-provider: users who auth providers via env vars
-    // (instead of the opencode auth store) need these to reach the child.
-    credentialPrefixes: ["OPENCODE_", "ANTHROPIC_", "OPENAI_", "XAI_", "GOOGLE_", "GEMINI_", "OPENROUTER_"],
+    // Single source of truth in opencode.ts (nextOpenCodeEnv uses the same list).
+    credentialPrefixes: OPENCODE_CREDENTIAL_PREFIXES,
     buildEnv: nextOpenCodeEnv,
     buildCommand: buildOpenCodeCommand,
     parse: parseOpenCodeJsonl,

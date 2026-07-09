@@ -46,7 +46,15 @@ Backend option support:
 
 Claude Code and Codex runs use the installed local CLIs, so those CLIs must already be authenticated. For Claude Code, run `claude` and complete `/login`; for Codex, complete its CLI auth flow before invoking it through Headless.
 
-OpenCode is launched with `--pure` for containment, which intentionally ignores user config. Pass an explicit model, for example `--model opencode/big-pickle`, if an OpenCode run produces no assistant output because no default model was available in pure mode.
+### OpenCode models and credentials
+
+OpenCode is launched with `--pure`. Per the OpenCode source (v1.17.x, `packages/opencode/src/plugin/index.ts`), `--pure` disables **external plugins only** — it does **not** strip provider authentication, environment API keys, or config. So Headless can run any authenticated model:
+
+- Pass it as `--model <provider>/<model>` (e.g. `--model anthropic/claude-sonnet-4-5`, `--model zai-coding-plan/glm-4.7`).
+- Credentials resolve, in order, from: `<PROVIDER>_API_KEY` env vars (auto-detected; the env allowlist forwards `ANTHROPIC_`/`OPENAI_`/`XAI_`/`GOOGLE_`/`GEMINI_`/`OPENROUTER_` and `OPENCODE_` prefixes), then the user's `~/.local/share/opencode/auth.json`, then any `provider.<id>.options.apiKey` in `OPENCODE_CONFIG_CONTENT`. All of these work under `--pure`.
+- The env var name is provider-specific (from the models.dev catalog), **not** always `<NAME>_API_KEY`. Notably, **z.ai / GLM ("zai", "zai-coding-plan") use `ZHIPU_API_KEY`**.
+
+If a run produces no assistant output, it is almost always the **model**, not Headless: opencode's free hosted models (`opencode/big-pickle`, `*-free`) authenticate but are too weak to emit valid tool calls (they print the tool call as text), and some third-party endpoints (observed with z.ai GLM) intermittently return empty responses or `Unexpected server error`. Headless authenticates the provider, applies its tool/permission denies, wraps the run in the OS sandbox, and parses the output correctly regardless — pick a capable, reliable model for real work.
 
 ## macOS Read-Only Sandbox
 
