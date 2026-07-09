@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { normalizeBackend } from "../src/backends/ids";
@@ -21,12 +22,14 @@ import {
   LedgerIntegrityError,
 } from "../src/index";
 import { getPrompt, parseIntegerArg } from "../src/cli";
-import { isSuccessfulRun } from "../src/runner/simple";
+import { isSuccessfulRun, maybeWrapWithSandbox } from "../src/runner/simple";
 import { runGitStrict } from "../src/runtime/git";
+import { buildDarwinReadOnlyProfile, cleanupSandboxProfile, DARWIN_SANDBOX_EXEC, probeDarwinSandboxWriteDenial, writeDarwinSandboxProfile } from "../src/runtime/os-sandbox";
 
 const originalEnv = { ...process.env };
 const gitAvailable = runGitStrict(["--version"], process.cwd()).ok;
 const gitTest = gitAvailable ? test : test.skip;
+const darwinTest = process.platform === "darwin" ? test : test.skip;
 
 beforeEach(() => {
   process.env = { ...originalEnv };
@@ -374,7 +377,8 @@ describe("grok and generic backend helpers", () => {
 describe("runner process behavior", () => {
   test("passes pure OpenCode command and recursion env to child", async () => {
     const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
-    const capture = join(bin, "capture.json");
+    // Capture outside cwd: the macOS sandbox denies writes to the project dir.
+    const capture = join(mkdtempSync(join(tmpdir(), "headless-cap-")), "capture.json");
     await writeExecutable(
       join(bin, "opencode"),
       `#!/usr/bin/env bun
@@ -405,7 +409,8 @@ console.log(JSON.stringify({ type: "text", part: { type: "text", text: "ok" } })
 
   test("does not pass unrelated secret env vars to child process", async () => {
     const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
-    const capture = join(bin, "env-capture.json");
+    // Capture outside cwd: the macOS sandbox denies writes to the project dir.
+    const capture = join(mkdtempSync(join(tmpdir(), "headless-cap-")), "env-capture.json");
     await writeExecutable(
       join(bin, "opencode"),
       `#!/usr/bin/env bun
@@ -439,8 +444,8 @@ console.log(JSON.stringify({ type: "text", part: { type: "text", text: "ok" } })
     const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
     await writeExecutable(
       join(bin, "opencode"),
-      `#!/bin/sh
-sleep 2
+      `#!/usr/bin/env bun
+await Bun.sleep(2000);
 `,
     );
     process.env.PATH = `${bin}:${process.env.PATH}`;
@@ -456,9 +461,9 @@ sleep 2
     const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
     await writeExecutable(
       join(bin, "opencode"),
-      `#!/bin/sh
-printf '{"type":"error","error":{"message":"backend failed"}}\\n'
-exit 7
+      `#!/usr/bin/env bun
+console.log(JSON.stringify({ type: "error", error: { message: "backend failed" } }));
+process.exit(7);
 `,
     );
     process.env.PATH = `${bin}:${process.env.PATH}`;
@@ -474,8 +479,8 @@ exit 7
     const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
     await writeExecutable(
       join(bin, "opencode"),
-      `#!/bin/sh
-printf '{"type":"step_start","part":{"type":"step-start","sessionID":"s"}}\\n'
+      `#!/usr/bin/env bun
+console.log(JSON.stringify({ type: "step_start", part: { type: "step-start", sessionID: "s" } }));
 `,
     );
     process.env.PATH = `${bin}:${process.env.PATH}`;
@@ -574,6 +579,96 @@ process.exit(7);
     expect(result.diff?.files).toEqual(["failed-change.txt"]);
     expect(result.diff?.patch).toContain("+from failed worker");
     expect(existsSync(join(repo, "failed-change.txt"))).toBe(false);
+  });
+
+  darwinTest("read-only sandbox preserves stdin passthrough for stdin-based backends", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    // Capture must live OUTSIDE cwd: the sandbox denies writes to the project
+    // dir (cwd=bin), so the fake backend writes its capture to a separate dir.
+    const outDir = mkdtempSync(join(tmpdir(), "headless-capture-"));
+    const capture = join(outDir, "stdin-capture.txt");
+    await writeExecutable(
+      join(bin, "claude"),
+      `#!/usr/bin/env bun
+const input = await Bun.readableStreamToText(Bun.stdin.stream());
+await Bun.write(${JSON.stringify(capture)}, input);
+console.log(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "stdin ok" }] } }));
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+
+    const result = await exec({ backend: "claude-code", prompt: "hello through stdin", cwd: bin });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe("stdin ok");
+    expect(readFileSync(capture, "utf8")).toBe("hello through stdin\n");
+  });
+});
+
+describe("macOS OS sandbox", () => {
+  darwinTest("probe confirms sandbox-exec denies writes on darwin", () => {
+    expect(probeDarwinSandboxWriteDenial().ok).toBe(true);
+  });
+
+  darwinTest("buildDarwinReadOnlyProfile denies project writes, credential access, and interactive shells", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-sandbox-cwd-"));
+    const cred = mkdtempSync(join(tmpdir(), "headless-sandbox-cred-"));
+    const profile = buildDarwinReadOnlyProfile({
+      workdir: cwd,
+      denyWriteRoots: [cred],
+      denyReadRoots: [cred],
+    });
+
+    expect(profile).toContain("(allow default)");
+    expect(profile).toContain(`(deny file-write* (subpath ${JSON.stringify(realpathSync.native(cwd))}))`);
+    expect(profile).toContain(`(deny file-write* (subpath ${JSON.stringify(realpathSync.native(cred))}))`);
+    expect(profile).toContain(`(deny file-read* (subpath ${JSON.stringify(realpathSync.native(cred))}))`);
+    expect(profile).toContain('(deny process-exec (literal "/bin/bash"))');
+    expect(profile).toContain('(deny process-exec (literal "/bin/zsh"))');
+    // /bin/sh stays allowed so backends can shell out for legitimate work.
+    expect(profile).not.toContain('(deny process-exec (literal "/bin/sh"))');
+  });
+
+  darwinTest("sandbox profile denies project-dir writes while allowing writes elsewhere", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-sandbox-cwd-"));
+    const scratch = mkdtempSync(join(tmpdir(), "headless-sandbox-scratch-"));
+    const denied = join(cwd, "should-fail");
+    const allowed = join(scratch, "should-pass");
+    const profile = writeDarwinSandboxProfile({ workdir: cwd });
+
+    try {
+      const denyResult = spawnSync(DARWIN_SANDBOX_EXEC, ["-f", profile, "/usr/bin/perl", "-e", `open my $fh, '>', ${JSON.stringify(denied)} or die $!; print $fh "x";`], {
+        cwd,
+        encoding: "utf8",
+      });
+      const allowResult = spawnSync(DARWIN_SANDBOX_EXEC, ["-f", profile, "/usr/bin/perl", "-e", `open my $fh, '>', ${JSON.stringify(allowed)} or die $!; print $fh "x";`], {
+        cwd,
+        encoding: "utf8",
+      });
+
+      expect(denyResult.status).not.toBe(0);
+      expect(existsSync(denied)).toBe(false);
+      expect(allowResult.status).toBe(0);
+      expect(readFileSync(allowed, "utf8")).toBe("x");
+    } finally {
+      cleanupSandboxProfile(profile);
+    }
+  });
+
+  darwinTest("maybeWrapWithSandbox wraps non-self-sandboxed read-only commands and skips codex", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-sandbox-cwd-"));
+    const wrapped = maybeWrapWithSandbox(["echo", "ok"], { backend: "opencode", prompt: "ok" }, backendAdapters.opencode, cwd);
+    const codex = maybeWrapWithSandbox(["codex", "exec", "-"], { backend: "codex", prompt: "ok" }, backendAdapters.codex, cwd);
+
+    try {
+      expect(wrapped.sandboxed).toBe(true);
+      expect(wrapped.cmd[0]).toBe(DARWIN_SANDBOX_EXEC);
+      expect(codex.sandboxed).toBe(false);
+      expect(codex.cmd).toEqual(["codex", "exec", "-"]);
+    } finally {
+      wrapped.cleanup();
+      codex.cleanup();
+    }
   });
 });
 
@@ -754,8 +849,8 @@ describe("orchestration", () => {
     const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
     await writeExecutable(
       join(bin, "opencode"),
-      `#!/bin/sh
-printf '{"type":"text","part":{"text":"worker ok"}}\\n'
+      `#!/usr/bin/env bun
+console.log(JSON.stringify({ type: "text", part: { text: "worker ok" } }));
 `,
     );
     process.env.PATH = `${bin}:${process.env.PATH}`;
@@ -774,8 +869,8 @@ printf '{"type":"text","part":{"text":"worker ok"}}\\n'
     const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
     await writeExecutable(
       join(bin, "opencode"),
-      `#!/bin/sh
-printf '{"type":"text","part":{"text":"token Bearer abcdefghijklmnop123456"}}\\n'
+      `#!/usr/bin/env bun
+console.log(JSON.stringify({ type: "text", part: { text: "token Bearer abcdefghijklmnop123456" } }));
 `,
     );
     process.env.PATH = `${bin}:${process.env.PATH}`;
@@ -793,9 +888,9 @@ printf '{"type":"text","part":{"text":"token Bearer abcdefghijklmnop123456"}}\\n
     const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
     await writeExecutable(
       join(bin, "opencode"),
-      `#!/bin/sh
-printf '{"type":"error","error":{"message":"backend failed"}}\\n'
-exit 3
+      `#!/usr/bin/env bun
+console.log(JSON.stringify({ type: "error", error: { message: "backend failed" } }));
+process.exit(3);
 `,
     );
     process.env.PATH = `${bin}:${process.env.PATH}`;
@@ -813,8 +908,8 @@ exit 3
     const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
     await writeExecutable(
       join(bin, "opencode"),
-      `#!/bin/sh
-sleep 2
+      `#!/usr/bin/env bun
+await Bun.sleep(2000);
 `,
     );
     process.env.PATH = `${bin}:${process.env.PATH}`;
@@ -836,8 +931,8 @@ sleep 2
     const cwd = mkdtempSync(join(tmpdir(), "headless-deliberate-"));
     await writeExecutable(
       join(cwd, "opencode"),
-      `#!/bin/sh
-printf '{"type":"text","part":{"text":"deliberated"}}\\n'
+      `#!/usr/bin/env bun
+console.log(JSON.stringify({ type: "text", part: { text: "deliberated" } }));
 `,
     );
     process.env.PATH = `${cwd}:${process.env.PATH}`;

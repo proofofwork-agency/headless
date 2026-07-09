@@ -48,6 +48,16 @@ Claude Code and Codex runs use the installed local CLIs, so those CLIs must alre
 
 OpenCode is launched with `--pure` for containment, which intentionally ignores user config. Pass an explicit model, for example `--model opencode/big-pickle`, if an OpenCode run produces no assistant output because no default model was available in pure mode.
 
+## macOS Read-Only Sandbox
+
+On macOS, Headless auto-detects `/usr/bin/sandbox-exec` and probes that Seatbelt actually denies writes. When available, read-only runs for OpenCode, Claude Code, and Grok are wrapped in a generated Seatbelt profile as an OS-enforced floor beneath each backend's app-level denies.
+
+The profile is a **deny-list**: it allows the backend to run normally (its SQLite databases, macOS Keychain auth, caches, and temp all work) and then subtracts the things a read-only run must never do — it **denies all writes to the project directory** (`--cwd`, the OS-enforced read-only guarantee), denies read/write of credential directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`), and denies spawning interactive shells (`/bin/bash`, `/bin/zsh`). This shape is deliberate: an allow-list that enumerates every writable root breaks full CLIs (opencode's SQLite, claude's Keychain), while the property we actually need — "the project is not modified" — is enforced directly. `/bin/sh` stays allowed so backends can shell out for legitimate work; the agent's own bash/exec tool is already denied at the app level.
+
+Codex is exempt from this outer wrapper because it already runs with `codex exec --sandbox read-only`; write mode is also exempt because it uses ephemeral git worktree containment instead.
+
+On non-macOS platforms, or if the sandbox probe fails, Headless falls back to the app-level containment without refusing the run.
+
 ## Contained Write Mode
 
 `--mode write` is diff-only and git-required. Headless creates an ephemeral git worktree on a `headless/write/<label>-<id>` branch, runs the backend inside that worktree, captures the resulting patch/status/file list, and removes the worktree. It does not auto-apply or merge changes back into the caller's tree.

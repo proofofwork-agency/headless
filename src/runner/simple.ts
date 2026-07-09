@@ -1,9 +1,14 @@
 import { spawn } from "bun";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExecOptions, ExecResult, Backend } from "../index";
 import { assertModeAllowed, backendAdapters, buildBackendEnv, type BackendAdapter } from "../backends/registry";
+import { cleanupSandboxProfile, DARWIN_SANDBOX_EXEC, probeDarwinSandboxWriteDenial, writeDarwinSandboxProfile } from "../runtime/os-sandbox";
 import { captureWriteDiff, createWriteWorktree, planWriteWorktree, removeWriteWorktree, type WriteDiff } from "../runtime/worktree";
 
 const DEFAULT_TIMEOUT = 180_000;
+let sandboxProbe: ReturnType<typeof probeDarwinSandboxWriteDenial> | null = null;
 
 export async function runHeadless(opts: ExecOptions & { backend: Backend }): Promise<ExecResult> {
   const start = Date.now();
@@ -94,68 +99,73 @@ async function runBackendProcess(
 ): Promise<ExecResult> {
   const backend = opts.backend;
   const prompt = opts.prompt;
-  const cmd = adapter.buildCommand(opts, cwd);
+  const wrapped = maybeWrapWithSandbox(adapter.buildCommand(opts, cwd), opts, adapter, cwd);
 
-  const proc = spawn(cmd, {
-    cwd,
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-    stdin: adapter.stdinPrompt ? "pipe" : undefined,
-  });
+  try {
+    const proc = spawn(wrapped.cmd, {
+      cwd,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: adapter.stdinPrompt ? "pipe" : undefined,
+    });
 
-  let stdout = "";
-  let stderr = "";
-  let timedOut = false;
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
 
-  const timer = setTimeout(() => {
-    timedOut = true;
-    killProcessTree(proc.pid);
-  }, timeoutMs);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killProcessTree(proc.pid);
+    }, timeoutMs);
 
-  // Feed prompt for stdin-based tools
-  if (adapter.stdinPrompt && proc.stdin) {
-    proc.stdin.write(prompt + "\n");
-    proc.stdin.end();
+    // Feed prompt for stdin-based tools. When sandboxed, stdin flows through
+    // sandbox-exec to the wrapped backend process.
+    if (adapter.stdinPrompt && proc.stdin) {
+      proc.stdin.write(prompt + "\n");
+      proc.stdin.end();
+    }
+
+    const stdoutPromise = Bun.readableStreamToText(proc.stdout);
+    const stderrPromise = Bun.readableStreamToText(proc.stderr);
+    const [exitCode, outText, errText] = await Promise.all([
+      proc.exited,
+      stdoutPromise,
+      stderrPromise,
+    ]);
+    stdout = outText;
+    stderr = errText;
+
+    clearTimeout(timer);
+    const durationMs = Date.now() - start;
+
+    let output = stdout.trim();
+    let cost: number | null = null;
+    let tokens: number | null = null;
+    let parseError: string | null = null;
+
+    const parsed = adapter.parse(stdout);
+    output = parsed.output;
+    cost = parsed.cost;
+    tokens = parsed.tokens;
+    parseError = parsed.error;
+
+    const noAssistantOutput = !output && !parseError;
+    const finalOutput = output || parseError || stderr.trim() || (noAssistantOutput ? "No assistant output was produced by the backend." : stdout.trim());
+
+    return {
+      ok: isSuccessfulRun({ timedOut, parseError, noAssistantOutput, exitCode }),
+      backend,
+      output: finalOutput,
+      cost,
+      tokens,
+      durationMs,
+      exitCode,
+      timedOut,
+    };
+  } finally {
+    wrapped.cleanup();
   }
-
-  const stdoutPromise = Bun.readableStreamToText(proc.stdout);
-  const stderrPromise = Bun.readableStreamToText(proc.stderr);
-  const [exitCode, outText, errText] = await Promise.all([
-    proc.exited,
-    stdoutPromise,
-    stderrPromise,
-  ]);
-  stdout = outText;
-  stderr = errText;
-
-  clearTimeout(timer);
-  const durationMs = Date.now() - start;
-
-  let output = stdout.trim();
-  let cost: number | null = null;
-  let tokens: number | null = null;
-  let parseError: string | null = null;
-
-  const parsed = adapter.parse(stdout);
-  output = parsed.output;
-  cost = parsed.cost;
-  tokens = parsed.tokens;
-  parseError = parsed.error;
-
-  const noAssistantOutput = !output && !parseError;
-  const finalOutput = output || parseError || stderr.trim() || (noAssistantOutput ? "No assistant output was produced by the backend." : stdout.trim());
-
-  return {
-    ok: isSuccessfulRun({ timedOut, parseError, noAssistantOutput, exitCode }),
-    backend,
-    output: finalOutput,
-    cost,
-    tokens,
-    durationMs,
-    exitCode,
-    timedOut,
-  };
 }
 
 export function isSuccessfulRun(input: { timedOut: boolean; parseError: string | null; noAssistantOutput: boolean; exitCode: number | null }) {
@@ -182,6 +192,47 @@ function markFailed(result: ExecResult, message: string): ExecResult {
     output: result.output ? `${result.output}\n\n${message}` : message,
   };
 }
+
+export function maybeWrapWithSandbox(
+  cmd: string[],
+  opts: ExecOptions & { backend: Backend },
+  adapter: BackendAdapter,
+  cwd: string,
+): { cmd: string[]; cleanup: () => void; sandboxed: boolean; reason?: string } {
+  if (opts.mode === "write") return { cmd, cleanup: noop, sandboxed: false, reason: "write mode uses worktree containment" };
+  if (process.platform !== "darwin") return { cmd, cleanup: noop, sandboxed: false, reason: `unsupported platform: ${process.platform}` };
+  if (adapter.selfSandboxed) return { cmd, cleanup: noop, sandboxed: false, reason: "backend self-sandboxed" };
+
+  sandboxProbe ??= probeDarwinSandboxWriteDenial();
+  if (!sandboxProbe.ok) return { cmd, cleanup: noop, sandboxed: false, reason: sandboxProbe.reason };
+
+  const profilePath = writeDarwinSandboxProfile({
+    workdir: cwd,
+    denyWriteRoots: sandboxCredentialRoots(),
+    denyReadRoots: sandboxCredentialRoots(),
+  });
+
+  return {
+    cmd: [DARWIN_SANDBOX_EXEC, "-f", profilePath, ...cmd],
+    cleanup: () => cleanupSandboxProfile(profilePath),
+    sandboxed: true,
+  };
+}
+
+// Credential directories a read-only run should never read or write, kept
+// outside the project so ordinary source reads are unaffected. (The project
+// dir itself is always write-denied via `workdir`.)
+function sandboxCredentialRoots() {
+  const home = homedir();
+  return [
+    join(home, ".ssh"),
+    join(home, ".aws"),
+    join(home, ".gnupg"),
+    join(home, ".config", "gcloud"),
+  ].filter((path) => existsSync(path));
+}
+
+function noop() {}
 
 function killProcessTree(pid: number | undefined) {
   if (!pid) return;
