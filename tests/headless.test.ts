@@ -149,6 +149,22 @@ describe("opencode backend helpers", () => {
     expect(() => nextOpenCodeEnv({ HEADLESS_DEPTH: "2" })).toThrow("HEADLESS_DEPTH=2");
   });
 
+  test("forwards provider API keys (incl. ZHIPU for z.ai/GLM) but not unrelated secrets", () => {
+    const env = nextOpenCodeEnv({
+      PATH: "/bin",
+      HOME: "/home/test",
+      ANTHROPIC_API_KEY: "ak",
+      ZHIPU_API_KEY: "zk",
+      OPENAI_API_KEY: "ok",
+      MY_FAKE_TOKEN: "secret",
+    });
+    // opencode auto-detects <PROVIDER>_API_KEY; env-based auth must reach it.
+    expect(env.ANTHROPIC_API_KEY).toBe("ak");
+    expect(env.ZHIPU_API_KEY).toBe("zk");
+    expect(env.OPENAI_API_KEY).toBe("ok");
+    expect(env.MY_FAKE_TOKEN).toBeUndefined();
+  });
+
   test("injects read-only OpenCode config denies into child env", () => {
     const env = nextOpenCodeEnv({ PATH: "/bin", HOME: "/home/test", MY_FAKE_TOKEN: "secret" });
     const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT || "{}");

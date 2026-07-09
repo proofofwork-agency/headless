@@ -61,6 +61,15 @@ export function buildOpenCodeCommand(opts: ExecOptions, cwd: string) {
   return cmd;
 }
 
+// opencode is multi-provider and auto-detects <PROVIDER>_API_KEY env vars.
+// The names come from the models.dev catalog and are NOT always <NAME>_API_KEY —
+// notably z.ai / GLM ("zai", "zai-coding-plan") use ZHIPU_API_KEY. Forward the
+// common provider key prefixes so env-based auth works under --pure.
+export const OPENCODE_CREDENTIAL_PREFIXES = [
+  "OPENCODE_", "ANTHROPIC_", "OPENAI_", "XAI_", "GOOGLE_", "GEMINI_",
+  "OPENROUTER_", "ZHIPU_", "ZAI_", "GROQ_", "DEEPSEEK_", "MISTRAL_", "DASHSCOPE_",
+];
+
 export function nextOpenCodeEnv(env: NodeJS.ProcessEnv = process.env) {
   const currentDepth = Number.parseInt(env.HEADLESS_DEPTH || "0", 10);
   const depth = Number.isFinite(currentDepth) ? currentDepth : 0;
@@ -68,7 +77,7 @@ export function nextOpenCodeEnv(env: NodeJS.ProcessEnv = process.env) {
     throw new Error(`Refusing to spawn OpenCode backend at HEADLESS_DEPTH=${depth}`);
   }
   return {
-    ...buildAdapterEnv(env, ["OPENCODE_"]),
+    ...buildAdapterEnv(env, OPENCODE_CREDENTIAL_PREFIXES),
     HEADLESS_PARENT_BACKEND: "opencode",
     HEADLESS_DEPTH: String(depth + 1),
     OPENCODE_CONFIG_CONTENT,
