@@ -3,9 +3,10 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { join } from "path";
 import { tmpdir } from "os";
 import { normalizeBackend } from "../src/backends/ids";
+import { backendAdapters, buildBackendEnv } from "../src/backends/registry";
 import { buildGrokCommand, parseGrokJsonl } from "../src/backends/grok";
 import { parseClaudeStreamJson, parseCodexJson, parseGenericAgentJson } from "../src/backends/json";
-import { buildOpenCodeCommand, nextOpenCodeEnv, parseOpenCodeJsonl } from "../src/backends/opencode";
+import { buildOpenCodeCommand, nextOpenCodeEnv, OPENCODE_CONFIG_CONTENT, parseOpenCodeJsonl } from "../src/backends/opencode";
 import {
   appendEvent,
   appendNote,
@@ -118,6 +119,29 @@ describe("opencode backend helpers", () => {
     expect(nextOpenCodeEnv({ HEADLESS_DEPTH: "1" }).HEADLESS_DEPTH).toBe("2");
     expect(() => nextOpenCodeEnv({ HEADLESS_DEPTH: "2" })).toThrow("HEADLESS_DEPTH=2");
   });
+
+  test("injects read-only OpenCode config denies into child env", () => {
+    const env = nextOpenCodeEnv({ PATH: "/bin", HOME: "/home/test", MY_FAKE_TOKEN: "secret" });
+    const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT || "{}");
+
+    expect(env.OPENCODE_CONFIG_CONTENT).toBe(OPENCODE_CONFIG_CONTENT);
+    expect(env.MY_FAKE_TOKEN).toBeUndefined();
+    expect(config.tools).toMatchObject({
+      bash: false,
+      edit: false,
+      write: false,
+      patch: false,
+      webfetch: false,
+    });
+    expect(config.permission).toMatchObject({
+      "*": "deny",
+      edit: "deny",
+      write: "deny",
+      patch: "deny",
+      webfetch: "deny",
+    });
+    expect(config.permission.bash).toEqual({ "*": "deny" });
+  });
 });
 
 describe("grok and generic backend helpers", () => {
@@ -189,6 +213,61 @@ describe("grok and generic backend helpers", () => {
     expect(parsed.output).toBe("pong");
     expect(parsed.tokens).toBe(10);
   });
+
+  test("builds Claude Code read-only stream-json command", () => {
+    expect(backendAdapters["claude-code"].buildCommand({ backend: "claude-code", prompt: "inspect" }, "/repo")).toEqual([
+      "claude",
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--allowedTools",
+      "Read,Grep,Glob,LS",
+    ]);
+  });
+
+  test("builds Codex read-only sandbox command", () => {
+    expect(backendAdapters.codex.buildCommand({ backend: "codex", prompt: "inspect" }, "/repo")).toEqual([
+      "codex",
+      "exec",
+      "--json",
+      "--sandbox",
+      "read-only",
+      "--skip-git-repo-check",
+      "--ignore-user-config",
+      "--ignore-rules",
+      "--ephemeral",
+      "-",
+    ]);
+  });
+
+  test("allowlists base env, backend credentials, and HEADLESS markers only", () => {
+    const env = buildBackendEnv(backendAdapters.codex, {
+      PATH: "/bin",
+      HOME: "/home/test",
+      TMPDIR: "/tmp",
+      TERM: "xterm",
+      SHELL: "/bin/zsh",
+      LANG: "en_US.UTF-8",
+      LC_ALL: "C",
+      OPENAI_API_KEY: "ok",
+      HEADLESS_DEPTH: "1",
+      MY_FAKE_TOKEN: "secret",
+    });
+
+    expect(env).toMatchObject({
+      PATH: "/bin",
+      HOME: "/home/test",
+      TMPDIR: "/tmp",
+      TERM: "xterm",
+      SHELL: "/bin/zsh",
+      LANG: "en_US.UTF-8",
+      LC_ALL: "C",
+      OPENAI_API_KEY: "ok",
+      HEADLESS_DEPTH: "1",
+    });
+    expect(env.MY_FAKE_TOKEN).toBeUndefined();
+  });
 });
 
 describe("runner process behavior", () => {
@@ -221,6 +300,38 @@ console.log(JSON.stringify({ type: "text", part: { type: "text", text: "ok" } })
     expect(captured.argv).toContain(bin);
     expect(captured.depth).toBe("2");
     expect(captured.parent).toBe("opencode");
+  });
+
+  test("does not pass unrelated secret env vars to child process", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "headless-bin-"));
+    const capture = join(bin, "env-capture.json");
+    await writeExecutable(
+      join(bin, "opencode"),
+      `#!/usr/bin/env bun
+await Bun.write(${JSON.stringify(capture)}, JSON.stringify({
+  fake: process.env.MY_FAKE_TOKEN ?? null,
+  path: process.env.PATH ?? null,
+  home: process.env.HOME ?? null,
+  headless: process.env.HEADLESS_DEPTH ?? null,
+  config: process.env.OPENCODE_CONFIG_CONTENT ?? null,
+}));
+console.log(JSON.stringify({ type: "text", part: { type: "text", text: "ok" } }));
+`,
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+    process.env.HOME = bin;
+    process.env.HEADLESS_DEPTH = "1";
+    process.env.MY_FAKE_TOKEN = "secret";
+
+    const result = await exec({ backend: "opencode", prompt: "inspect", cwd: bin });
+    const captured = JSON.parse(await Bun.file(capture).text());
+
+    expect(result.ok).toBe(true);
+    expect(captured.fake).toBe(null);
+    expect(captured.path).toContain(bin);
+    expect(captured.home).toBe(bin);
+    expect(captured.headless).toBe("2");
+    expect(JSON.parse(captured.config).permission.edit).toBe("deny");
   });
 
   test("returns timedOut when child exceeds timeout", async () => {

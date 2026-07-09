@@ -1,6 +1,6 @@
 import { spawn } from "bun";
 import type { ExecOptions, ExecResult, Backend } from "../index";
-import { assertModeAllowed, backendAdapters } from "../backends/registry";
+import { assertModeAllowed, backendAdapters, buildBackendEnv } from "../backends/registry";
 
 const DEFAULT_TIMEOUT = 180_000;
 
@@ -12,7 +12,7 @@ export async function runHeadless(opts: ExecOptions & { backend: Backend }): Pro
   const timeoutMs = opts.timeoutMs || adapter?.metadata.timeoutMs || DEFAULT_TIMEOUT;
   const prompt = opts.prompt;
 
-  let env = { ...process.env };
+  let env: NodeJS.ProcessEnv;
 
   if (!adapter) {
     throw new Error(`Backend ${backend} not yet implemented in simple runner`);
@@ -20,7 +20,7 @@ export async function runHeadless(opts: ExecOptions & { backend: Backend }): Pro
 
   try {
     assertModeAllowed(backend, opts.mode);
-    if (adapter.prepareEnv) env = adapter.prepareEnv(env);
+    env = buildBackendEnv(adapter);
   } catch (error) {
     return failedResult(backend, error, Date.now() - start);
   }

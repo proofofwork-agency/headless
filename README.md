@@ -76,6 +76,8 @@ Implemented and tested:
 - tamper-evident ledger seq/hash chain with guarded reads
 - backend adapter registry for command construction and parsing
 - mode policy rejection before subprocess launch for backends that cannot write
+- child process environment allowlisting for all backends
+- OpenCode read-only runs inject config-level tool and permission denies for write/edit/patch/bash/web tools
 - OpenCode plugin tool surface
 - OpenCode pure worker command construction and JSON parsing
 - Grok CLI command construction and streaming JSON parsing
@@ -86,9 +88,9 @@ Implemented and tested:
 
 Known gaps:
 
-- containment is not yet enforced with worktrees or a sandbox
+- containment is not yet enforced with worktrees or an OS sandbox
 - ledger integrity has no MAC/signature and therefore does not defend against an attacker who can rewrite the whole ledger
-- `mode` enforces backend capability before launch, but does not yet provide filesystem isolation
+- `mode` enforces backend capability before launch, and OpenCode read-only runs deny write/edit/patch/bash/web tools through `OPENCODE_CONFIG_CONTENT`; this is defense in depth, not filesystem isolation
 - streaming is parsed after process completion, not exposed live
 - Claude/Codex parser fixtures are local representative fixtures, not live authenticated CLI golden files
 - OpenCode plugin API is still pre-1.0 and may change

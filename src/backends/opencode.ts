@@ -1,4 +1,5 @@
 import type { ExecOptions } from "../index";
+import { buildAdapterEnv } from "./env";
 import { collectText, formatError, numberValue, objectValue, tokenCount } from "./json";
 
 export type OpenCodeJsonlParseResult = {
@@ -7,6 +8,46 @@ export type OpenCodeJsonlParseResult = {
   tokens: number | null;
   error: string | null;
 };
+
+export const OPENCODE_READ_ONLY_CONFIG = {
+  tools: {
+    read: true,
+    glob: true,
+    grep: true,
+    list: true,
+    bash: false,
+    edit: false,
+    write: false,
+    patch: false,
+    todowrite: false,
+    task: false,
+    webfetch: false,
+    websearch: false,
+    skill: false,
+    lsp: false,
+    external_directory: false,
+  },
+  permission: {
+    "*": "deny",
+    read: "allow",
+    glob: "allow",
+    grep: "allow",
+    list: "allow",
+    bash: { "*": "deny" },
+    edit: "deny",
+    write: "deny",
+    patch: "deny",
+    todowrite: "deny",
+    task: "deny",
+    webfetch: "deny",
+    websearch: "deny",
+    skill: "deny",
+    lsp: "deny",
+    external_directory: "deny",
+  },
+} as const;
+
+export const OPENCODE_CONFIG_CONTENT = JSON.stringify(OPENCODE_READ_ONLY_CONFIG);
 
 export function buildOpenCodeCommand(opts: ExecOptions, cwd: string) {
   const cmd = ["opencode", "run", "--pure", "--format", "json", "--dir", cwd];
@@ -27,9 +68,10 @@ export function nextOpenCodeEnv(env: NodeJS.ProcessEnv = process.env) {
     throw new Error(`Refusing to spawn OpenCode backend at HEADLESS_DEPTH=${depth}`);
   }
   return {
-    ...env,
+    ...buildAdapterEnv(env, ["OPENCODE_"]),
     HEADLESS_PARENT_BACKEND: "opencode",
     HEADLESS_DEPTH: String(depth + 1),
+    OPENCODE_CONFIG_CONTENT,
   };
 }
 
