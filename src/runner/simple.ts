@@ -203,7 +203,10 @@ export function maybeWrapWithSandbox(
   if (process.platform !== "darwin") return { cmd, cleanup: noop, sandboxed: false, reason: `unsupported platform: ${process.platform}` };
   if (adapter.selfSandboxed) return { cmd, cleanup: noop, sandboxed: false, reason: "backend self-sandboxed" };
 
-  sandboxProbe ??= probeDarwinSandboxWriteDenial();
+  // Cache only a SUCCESSFUL probe (the sandbox won't disappear once proven).
+  // Re-probe whenever we don't yet have a success, so one transient failure
+  // does not latch the sandbox off for the whole process lifetime.
+  if (!sandboxProbe?.ok) sandboxProbe = probeDarwinSandboxWriteDenial();
   if (!sandboxProbe.ok) return { cmd, cleanup: noop, sandboxed: false, reason: sandboxProbe.reason };
 
   const profilePath = writeDarwinSandboxProfile({

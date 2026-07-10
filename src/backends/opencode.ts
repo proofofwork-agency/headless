@@ -75,8 +75,11 @@ export function buildOpenCodeCommand(opts: ExecOptions, cwd: string) {
 // OPENCODE_DISABLE_* are applied by opencode and could override our injected
 // read-only denies — a caller must never be able to set them through Headless.
 export const OPENCODE_CREDENTIAL_PREFIXES = [
-  "OPENCODE_API_KEY", "ANTHROPIC_", "OPENAI_", "XAI_", "GOOGLE_", "GEMINI_",
-  "OPENROUTER_", "ZHIPU_", "ZAI_", "GROQ_", "DEEPSEEK_", "MISTRAL_", "DASHSCOPE_",
+  "OPENCODE_API_KEY", "ANTHROPIC_", "OPENAI_", "XAI_", "GEMINI_", "OPENROUTER_",
+  "ZHIPU_", "ZAI_", "GROQ_", "DEEPSEEK_", "MISTRAL_", "DASHSCOPE_",
+  // Google is scoped to the actual credential vars rather than the broad
+  // "GOOGLE_" prefix, which would over-match unrelated GOOGLE_* env.
+  "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_GENAI",
 ];
 
 export function nextOpenCodeEnv(env: NodeJS.ProcessEnv = process.env) {
