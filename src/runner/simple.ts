@@ -270,8 +270,19 @@ async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: nu
 
 function killProcessTree(pid: number | undefined) {
   if (!pid) return;
+  // Recursively signal the WHOLE descendant tree, not just direct children:
+  // `pkill -P` reaches one level, but a sandboxed backend's real workers are
+  // grandchildren under sandbox-exec. TERM the tree (deepest first), then KILL
+  // any survivors after a short grace. Runs detached so the grace doesn't block.
+  const script = [
+    'kt() { for c in $(pgrep -P "$1" 2>/dev/null); do kt "$c"; done; kill -TERM "$1" 2>/dev/null || true; }',
+    'kt "$1"',
+    'sleep 2',
+    'kk() { for c in $(pgrep -P "$1" 2>/dev/null); do kk "$c"; done; kill -KILL "$1" 2>/dev/null || true; }',
+    'kk "$1"',
+  ].join("; ");
   try {
-    spawn(["sh", "-c", "pkill -TERM -P \"$1\" 2>/dev/null || true; kill -TERM \"$1\" 2>/dev/null || true", "sh", String(pid)], {
+    spawn(["sh", "-c", script, "sh", String(pid)], {
       stdout: "ignore",
       stderr: "ignore",
     });
