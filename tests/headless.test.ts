@@ -776,6 +776,40 @@ describe("native ledger runtime", () => {
     expect(readLedger(session).at(-1)?.hash).toBe(note?.hash);
   });
 
+  test("redacts secrets in non-content fields (artifact summary/evidence), not just content", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "deep-redaction-session" });
+
+    recordArtifact({
+      cwd,
+      sessionId: session.sessionId,
+      kind: "patch_summary",
+      title: "Deploy",
+      summary: "prod key sk-ABCDEFGHIJKLMNOP1234 must not persist",
+      status: "passed",
+      evidence: ["also github_pat_ABCDEFGHIJKLMNOPQRSTUV token"],
+    });
+    const event = readLedger(session).at(-1);
+    const serialized = JSON.stringify(event);
+
+    // No raw secret anywhere in the stored event (content, artifact.*, meta.*).
+    expect(serialized).not.toContain("sk-ABCDEFGHIJKLMNOP1234");
+    expect(serialized).not.toContain("github_pat_ABCDEFGHIJKLMNOPQRSTUV");
+    expect(event?.artifact?.summary).toContain("[REDACTED_OPENAI_KEY]");
+    expect(JSON.stringify(event?.artifact?.evidence)).toContain("[REDACTED_GITHUB_PAT]");
+    expect(event?.meta?.redacted).toBe(true);
+    // Redacted form still verifies (redaction happened before hashing).
+    expect(() => readLedger(session)).not.toThrow();
+  });
+
+  test("redaction covers additional real secret formats", async () => {
+    const { redactAndTruncate } = await import("../src/runtime/redaction");
+    expect(redactAndTruncate("key AIzaSyD-ABCDEFGHIJKLMNOPQRSTUVWXYZ01234").text).toContain("[REDACTED_GOOGLE_API_KEY]");
+    expect(redactAndTruncate("github_pat_11ABCDEFG0abcdefghijklmnop").text).toContain("[REDACTED_GITHUB_PAT]");
+    expect(redactAndTruncate("xapp-1-A000BBB-123456789").text).toContain("[REDACTED_SLACK_APP_TOKEN]");
+    expect(redactAndTruncate("Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l").text).toContain("[REDACTED_BASIC_AUTH]");
+  });
+
   test("truncates oversized ledger content with metadata", () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
     const session = getOrCreateSession({ cwd, sessionId: "truncate-session" });

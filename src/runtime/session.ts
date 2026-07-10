@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmdirSync } from "fs";
 import { dirname, join } from "path";
 import type { EventInput, HeadlessEvent } from "./events";
 import { atomicWriteFile } from "./atomic-write";
-import { redactAndTruncate, type RedactionResult } from "./redaction";
+import { redactDeep } from "./redaction";
 
 export type HeadlessSession = {
   root: string;
@@ -90,7 +90,11 @@ function ensureSessionStarted(session: HeadlessSession, source: string) {
   withLedgerLock(session, () => {
     const existing = readLedgerUnlocked(session);
     if (existing.length > 0) return;
-    const redacted = redactContent("Headless session started.", { root: session.root });
+    const seed = redactDeep({ content: "Headless session started.", meta: { root: session.root } });
+    const genesis = seed.value as { content: string; meta: Record<string, unknown> };
+    const meta = seed.redacted || seed.truncated
+      ? { ...genesis.meta, redacted: seed.redacted, truncated: seed.truncated }
+      : genesis.meta;
     const eventWithoutHash: Omit<HeadlessEvent, "hash"> = {
       schema: "v1",
       id: crypto.randomUUID(),
@@ -100,8 +104,8 @@ function ensureSessionStarted(session: HeadlessSession, source: string) {
       prevHash: null,
       type: "session_started",
       source,
-      content: redacted.content,
-      meta: redacted.meta,
+      content: genesis.content,
+      meta,
     };
     const event = { ...eventWithoutHash, hash: hashEvent(eventWithoutHash) };
     const existingRaw = existsSync(session.ledgerPath) ? readFileSync(session.ledgerPath, "utf8") : "";
@@ -193,27 +197,15 @@ function hashEvent(event: Omit<HeadlessEvent, "hash">) {
 }
 
 function redactEventInput(input: EventInput): EventInput {
-  if (input.content === undefined) return input;
+  // Redact secrets from ALL string fields (content, meta, artifact, handoff,
+  // result, ...), not just `content` — a secret in any field must never reach
+  // the ledger in cleartext. Runs before the hash so stored == verified form.
+  const { value, redacted, truncated } = redactDeep(input);
+  if (!redacted && !truncated) return input;
+  const next = value as EventInput;
   return {
-    ...input,
-    ...redactContent(input.content, input.meta),
-  };
-}
-
-function redactContent(content: string, meta?: Record<string, unknown>): { content: string; meta?: Record<string, unknown> } {
-  const redacted = redactAndTruncate(content);
-  if (!redacted.redacted && !redacted.truncated) return { content, meta };
-  return {
-    content: redacted.text,
-    meta: redactionMeta(meta, redacted),
-  };
-}
-
-function redactionMeta(meta: Record<string, unknown> | undefined, redacted: RedactionResult) {
-  return {
-    ...(meta ?? {}),
-    redacted: redacted.redacted,
-    truncated: redacted.truncated,
+    ...next,
+    meta: { ...(next.meta ?? {}), redacted, truncated },
   };
 }
 
