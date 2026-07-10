@@ -816,63 +816,46 @@ describe("native ledger runtime", () => {
     expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
   });
 
-  test("allows legacy unchained ledger entries only before the chained prefix starts", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
-    const session = getOrCreateSession({ cwd, sessionId: "legacy-prefix-session" });
-    const chained = readFileSync(session.ledgerPath, "utf8");
-    const legacy = JSON.stringify({
-      schema: "v1",
-      id: "legacy",
-      timestamp: Date.now(),
-      sessionId: session.sessionId,
-      type: "note",
-      source: "test",
-      content: "legacy prefix",
-    });
-    writeFileSync(session.ledgerPath, `${legacy}\n${chained}`, "utf8");
-
-    expect(readLedger(session).map((event) => event.id)).toEqual(["legacy", expect.any(String)]);
+  const UNCHAINED_EVENT = JSON.stringify({
+    schema: "v1",
+    id: "forged",
+    timestamp: 1,
+    sessionId: "x",
+    type: "note",
+    source: "attacker",
+    content: "forged event with no seq/prevHash/hash",
   });
 
-  test("rejects legacy unchained ledger entries appended after a chained event", () => {
+  test("rejects an unchained event as a leading line", () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
-    const session = getOrCreateSession({ cwd, sessionId: "legacy-tail-session" });
-    const legacy = JSON.stringify({
-      schema: "v1",
-      id: "legacy-tail",
-      timestamp: Date.now(),
-      sessionId: session.sessionId,
-      type: "note",
-      source: "test",
-      content: "legacy tail",
-    });
-    writeFileSync(session.ledgerPath, `${readFileSync(session.ledgerPath, "utf8")}${legacy}\n`, "utf8");
-
+    const session = getOrCreateSession({ cwd, sessionId: "unchained-prefix" });
+    writeFileSync(session.ledgerPath, `${UNCHAINED_EVENT}\n${readFileSync(session.ledgerPath, "utf8")}`, "utf8");
     expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
   });
 
-  test("append after a legacy prefix numbers the chained event so it round-trips", () => {
+  test("rejects an unchained event appended as a trailing line", () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
-    const session = getOrCreateSession({ cwd, sessionId: "legacy-append-session" });
-    const chained = readFileSync(session.ledgerPath, "utf8");
-    const legacy = JSON.stringify({
-      schema: "v1",
-      id: "legacy",
-      timestamp: Date.now(),
-      sessionId: session.sessionId,
-      type: "note",
-      source: "test",
-      content: "legacy prefix",
-    });
-    // Ledger becomes: [legacy(unchained), session_started(seq 1)].
-    writeFileSync(session.ledgerPath, `${legacy}\n${chained}`, "utf8");
+    const session = getOrCreateSession({ cwd, sessionId: "unchained-tail" });
+    writeFileSync(session.ledgerPath, `${readFileSync(session.ledgerPath, "utf8")}${UNCHAINED_EVENT}\n`, "utf8");
+    expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
+  });
 
-    const appended = appendNote({ cwd, sessionId: session.sessionId, text: "after legacy" });
-    // seq counts only chained events (session_started=1), so this is 2 — not 3.
-    expect(appended.seq).toBe(2);
-    const events = readLedger(session);
-    expect(events.map((event) => event.id)).toEqual(["legacy", expect.any(String), appended.id]);
-    expect(events.at(-1)?.content).toBe("after legacy");
+  test("rejects a fully-unchained (forged) ledger — no hashing required to bypass was the hole", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "forged-session" });
+    // Attacker replaces the entire ledger with chain-less lines. Previously this
+    // passed verification (all events looked "legacy"); it must now fail.
+    writeFileSync(session.ledgerPath, `${UNCHAINED_EVENT}\n${UNCHAINED_EVENT}\n${UNCHAINED_EVENT}\n`, "utf8");
+    expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
+  });
+
+  test("rejects a dot-only sessionId that would redirect the ledger out of sessions/", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: ".." });
+    // ".." is rejected and a fresh session id is generated instead, so the
+    // ledger stays under sessions/<generated-id>, not redirected to .headless/.
+    expect(session.sessionId).not.toBe("..");
+    expect(session.sessionDir).toContain(join("sessions", session.sessionId));
   });
 
   test("derives task state from handoff, handled note, artifact, and finality entries", () => {

@@ -152,15 +152,20 @@ function newSessionId() {
 function sanitizeSessionId(value?: string | null) {
   const trimmed = value?.trim();
   if (!trimmed) return null;
-  return trimmed.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 120);
+  const cleaned = trimmed.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 120);
+  // Reject dot-only ids ("."/".."/...): as a path segment they would redirect
+  // the ledger out of the sessions directory.
+  if (/^\.+$/.test(cleaned)) return null;
+  return cleaned;
 }
 
 function verifyEvent(session: HeadlessSession, event: HeadlessEvent, previous: HeadlessEvent | undefined, expectedSeq: number, lineNumber: number) {
+  // Every event must be part of the hash chain. Allowing "unchained" events
+  // through (as an earlier legacy-compat shortcut did) let an attacker rewrite
+  // the whole ledger with chain-less lines and pass verification with no hashing
+  // at all — so any line missing seq/prevHash/hash is now an integrity failure.
   if (!isChainedEvent(event)) {
-    if (previous && isChainedEvent(previous)) {
-      throw new LedgerIntegrityError(`Legacy unchained ledger event after chained event at ${session.ledgerPath}:${lineNumber}.`);
-    }
-    return;
+    throw new LedgerIntegrityError(`Unchained ledger event at ${session.ledgerPath}:${lineNumber} (missing seq/prevHash/hash).`);
   }
   if (event.seq !== expectedSeq) {
     throw new LedgerIntegrityError(`Ledger sequence mismatch at ${session.ledgerPath}:${lineNumber}: expected ${expectedSeq}, got ${event.seq ?? "missing"}`);
