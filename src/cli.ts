@@ -25,7 +25,11 @@ async function main() {
   }
 
   if (sub === "exec" || sub === "run") {
-    const backendInput = getArg(args, "--backend") || "opencode";
+    // Everything after a literal `--` is the prompt, never a Headless flag.
+    // Parse flags only from the segment BEFORE the delimiter so prompt content
+    // (e.g. `-- --backend codex ...`) can't mutate backend/mode/timeout/output.
+    const flagArgs = flagArgsBeforeSeparator(args);
+    const backendInput = getArg(flagArgs, "--backend") || "opencode";
     let backend: ReturnType<typeof normalizeBackend>;
     try {
       backend = normalizeBackend(backendInput);
@@ -36,12 +40,12 @@ async function main() {
     if (!prompt) {
       throw new CliUsageError(`Usage: headless exec --backend <${backendChoices().join("|")}> "your prompt"`);
     }
-    const model = getArg(args, "--model");
-    const agent = getArg(args, "--agent");
-    const mode = getMode(args);
-    const cwd = getArg(args, "--cwd");
-    const timeoutMs = parseIntegerArg(args, "--timeout-ms");
-    const asJson = args.includes("--json") || args.includes("-j");
+    const model = getArg(flagArgs, "--model");
+    const agent = getArg(flagArgs, "--agent");
+    const mode = getMode(flagArgs);
+    const cwd = getArg(flagArgs, "--cwd");
+    const timeoutMs = parseIntegerArg(flagArgs, "--timeout-ms");
+    const asJson = flagArgs.includes("--json") || flagArgs.includes("-j");
     const res = await exec({
       backend,
       prompt,
@@ -135,6 +139,13 @@ async function readVersion(): Promise<string> {
   } catch {
     return "0.0.0";
   }
+}
+
+// Flags are only parsed from the segment before a literal `--`; everything
+// after it is the (verbatim) prompt and must never be read as a Headless flag.
+export function flagArgsBeforeSeparator(argv: string[]): string[] {
+  const i = argv.indexOf("--");
+  return i === -1 ? argv : argv.slice(0, i);
 }
 
 function getArg(argv: string[], name: string): string | undefined {

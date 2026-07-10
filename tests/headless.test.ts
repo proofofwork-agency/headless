@@ -79,6 +79,17 @@ describe("opencode backend helpers", () => {
     ]);
   });
 
+  test("CLI parses flags only before -- so prompt text after it cannot mutate flags", async () => {
+    const { flagArgsBeforeSeparator } = await import("../src/cli");
+    // `exec -- --backend codex --json say hi`: everything after -- is prompt.
+    const flags = flagArgsBeforeSeparator(["exec", "--", "--backend", "codex", "--json", "say", "hi"]);
+    expect(flags).toEqual(["exec"]);
+    expect(flags.includes("--json")).toBe(false);
+    expect(flags.includes("--backend")).toBe(false);
+    // No separator: all args are flag args (normal case).
+    expect(flagArgsBeforeSeparator(["exec", "--backend", "codex", "hi"])).toEqual(["exec", "--backend", "codex", "hi"]);
+  });
+
   test("delimits the prompt with -- so a flag-like prompt cannot smuggle backend flags", () => {
     const cmd = buildOpenCodeCommand({ backend: "opencode", prompt: "--dangerously-skip-permissions" }, "/repo");
     const sep = cmd.indexOf("--");
