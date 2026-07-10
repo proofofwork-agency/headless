@@ -284,6 +284,28 @@ describe("grok and generic backend helpers", () => {
     expect(parsed.output).toBe("hello");
   });
 
+  test("parser is bounded against a malicious backend (depth + byte caps)", async () => {
+    const { collectText, textCollector, appendText } = await import("../src/backends/json");
+
+    // Depth cap: a string buried past the recursion limit is not collected (and
+    // does not overflow the stack), while a shallow one still is.
+    let deep: unknown = { text: "too-deep" };
+    for (let i = 0; i < 100; i += 1) deep = { message: deep };
+    const deepOut = textCollector();
+    expect(() => collectText(deep, deepOut)).not.toThrow();
+    expect(deepOut.join(" ")).not.toContain("too-deep");
+    const shallowOut = textCollector();
+    collectText({ message: { text: "shallow" } }, shallowOut);
+    expect(shallowOut.join(" ")).toContain("shallow");
+
+    // Byte cap: once the collector exceeds its budget, further text is dropped.
+    const capped = textCollector();
+    appendText(capped, "a".repeat(9_000_000));
+    appendText(capped, "b".repeat(100));
+    expect(capped.length).toBe(1);
+    expect(capped.join("").includes("b")).toBe(false);
+  });
+
   test("token accounting prefers explicit total over split subset fields", () => {
     expect(tokenCount({ total_tokens: 10, input_tokens: 4, output_tokens: 5, cache: { read: 100, write: 100 } })).toBe(10);
     expect(tokenCount({ input_tokens: 4, output_tokens: 5, reasoning_tokens: 2, cache: { read: 100, write: 100 } })).toBe(11);

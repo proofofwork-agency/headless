@@ -8,6 +8,7 @@ import { cleanupSandboxProfile, DARWIN_SANDBOX_EXEC, probeDarwinSandboxWriteDeni
 import { captureWriteDiff, createWriteWorktree, planWriteWorktree, removeWriteWorktree, type WriteDiff } from "../runtime/worktree";
 
 const DEFAULT_TIMEOUT = 180_000;
+const STREAM_CAP_BYTES = 16_000_000;
 let sandboxProbe: ReturnType<typeof probeDarwinSandboxWriteDenial> | null = null;
 
 export async function runHeadless(opts: ExecOptions & { backend: Backend }): Promise<ExecResult> {
@@ -126,12 +127,13 @@ async function runBackendProcess(
       proc.stdin.end();
     }
 
-    const stdoutPromise = Bun.readableStreamToText(proc.stdout);
-    const stderrPromise = Bun.readableStreamToText(proc.stderr);
+    // Read with a byte cap so a backend flooding stdout/stderr cannot OOM the
+    // runner: on overflow we stop reading and kill the process tree.
+    const onOverflow = () => killProcessTree(proc.pid);
     const [exitCode, outText, errText] = await Promise.all([
       proc.exited,
-      stdoutPromise,
-      stderrPromise,
+      readStreamCapped(proc.stdout, STREAM_CAP_BYTES, onOverflow),
+      readStreamCapped(proc.stderr, STREAM_CAP_BYTES, onOverflow),
     ]);
     stdout = outText;
     stderr = errText;
@@ -236,6 +238,35 @@ function sandboxCredentialRoots() {
 }
 
 function noop() {}
+
+async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number, onOverflow: () => void): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let out = "";
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        onOverflow();
+        try {
+          await reader.cancel();
+        } catch {}
+        break;
+      }
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {}
+  }
+  return out;
+}
 
 function killProcessTree(pid: number | undefined) {
   if (!pid) return;
