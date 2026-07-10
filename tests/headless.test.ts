@@ -850,6 +850,35 @@ describe("native ledger runtime", () => {
     expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
   });
 
+  test("with HEADLESS_LEDGER_KEY, a recomputed (plain-SHA) forged chain is rejected — tamper-proof", async () => {
+    const { createHash } = await import("crypto");
+    const prev = process.env.HEADLESS_LEDGER_KEY;
+    process.env.HEADLESS_LEDGER_KEY = "out-of-band-secret";
+    try {
+      const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+      const session = getOrCreateSession({ cwd, sessionId: "hmac-session" });
+      appendNote({ cwd, sessionId: session.sessionId, text: "original action" });
+      // A clean read verifies with the key.
+      expect(() => readLedger(session)).not.toThrow();
+
+      // Attacker edits the note and re-forges the chain the only way they can
+      // without the key: a plain SHA-256 over the event.
+      const lines = readFileSync(session.ledgerPath, "utf8").trim().split("\n");
+      const ev = JSON.parse(lines[1]);
+      ev.content = "covered up";
+      const { hash: _drop, ...withoutHash } = ev;
+      ev.hash = createHash("sha256").update(JSON.stringify(withoutHash)).digest("hex");
+      lines[1] = JSON.stringify(ev);
+      writeFileSync(session.ledgerPath, `${lines.join("\n")}\n`, "utf8");
+
+      // Verified WITH the key, the plain-SHA forgery does not match the HMAC.
+      expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
+    } finally {
+      if (prev === undefined) delete process.env.HEADLESS_LEDGER_KEY;
+      else process.env.HEADLESS_LEDGER_KEY = prev;
+    }
+  });
+
   const UNCHAINED_EVENT = JSON.stringify({
     schema: "v1",
     id: "forged",

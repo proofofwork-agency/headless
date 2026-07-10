@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHash, createHmac } from "crypto";
 import { existsSync, mkdirSync, readFileSync, rmdirSync } from "fs";
 import { dirname, join } from "path";
 import type { EventInput, HeadlessEvent } from "./events";
@@ -192,8 +192,18 @@ function isChainedEvent(event: HeadlessEvent) {
   return !!event.hash || event.seq !== undefined || event.prevHash !== undefined;
 }
 
+// When HEADLESS_LEDGER_KEY is set, events are chained with a keyed HMAC-SHA256
+// instead of a plain SHA-256. If the key is held out-of-band (a secret manager,
+// a remote verifier — anywhere an attacker with write access to the ledger file
+// cannot read it), the chain becomes tamper-PROOF: an attacker cannot recompute
+// valid hashes to hide an edit. Without the key it is the current tamper-EVIDENT
+// SHA-256 chain. The key must stay constant for a given ledger.
 function hashEvent(event: Omit<HeadlessEvent, "hash">) {
-  return createHash("sha256").update(JSON.stringify(event)).digest("hex");
+  const data = JSON.stringify(event);
+  const key = process.env.HEADLESS_LEDGER_KEY;
+  return key
+    ? createHmac("sha256", key).update(data).digest("hex")
+    : createHash("sha256").update(data).digest("hex");
 }
 
 function redactEventInput(input: EventInput): EventInput {
