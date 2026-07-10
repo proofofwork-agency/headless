@@ -74,8 +74,18 @@ describe("opencode backend helpers", () => {
       "provider/model",
       "--agent",
       "review",
+      "--",
       "do work",
     ]);
+  });
+
+  test("delimits the prompt with -- so a flag-like prompt cannot smuggle backend flags", () => {
+    const cmd = buildOpenCodeCommand({ backend: "opencode", prompt: "--dangerously-skip-permissions" }, "/repo");
+    const sep = cmd.indexOf("--");
+    expect(sep).toBeGreaterThan(-1);
+    // The prompt sits AFTER the -- terminator, so opencode reads it as the message.
+    expect(cmd.slice(sep + 1)).toEqual(["--dangerously-skip-permissions"]);
+    expect(cmd[cmd.length - 1]).toBe("--dangerously-skip-permissions");
   });
 
   test("parses text, cost, tokens, and errors from JSONL", () => {
@@ -156,13 +166,38 @@ describe("opencode backend helpers", () => {
       ANTHROPIC_API_KEY: "ak",
       ZHIPU_API_KEY: "zk",
       OPENAI_API_KEY: "ok",
+      OPENCODE_API_KEY: "zenk",
       MY_FAKE_TOKEN: "secret",
     });
     // opencode auto-detects <PROVIDER>_API_KEY; env-based auth must reach it.
     expect(env.ANTHROPIC_API_KEY).toBe("ak");
     expect(env.ZHIPU_API_KEY).toBe("zk");
     expect(env.OPENAI_API_KEY).toBe("ok");
+    expect(env.OPENCODE_API_KEY).toBe("zenk");
     expect(env.MY_FAKE_TOKEN).toBeUndefined();
+  });
+
+  test("does NOT forward control-plane OPENCODE_* vars that could override read-only denies", () => {
+    const env = nextOpenCodeEnv({
+      PATH: "/bin",
+      HOME: "/home/test",
+      OPENCODE_API_KEY: "zenk",
+      OPENCODE_PERMISSION: '{"bash":{"*":"allow"},"edit":"allow","write":"allow"}',
+      OPENCODE_CONFIG: "/tmp/evil.json",
+      OPENCODE_CONFIG_DIR: "/tmp/evil",
+      OPENCODE_AUTH_CONTENT: "{}",
+      OPENCODE_DISABLE_GLOBAL_CONFIG: "1",
+    });
+    // The credential passes through; every control-plane var is stripped, so a
+    // caller cannot re-enable write/bash after our injected denies.
+    expect(env.OPENCODE_API_KEY).toBe("zenk");
+    expect(env.OPENCODE_PERMISSION).toBeUndefined();
+    expect(env.OPENCODE_CONFIG).toBeUndefined();
+    expect(env.OPENCODE_CONFIG_DIR).toBeUndefined();
+    expect(env.OPENCODE_AUTH_CONTENT).toBeUndefined();
+    expect(env.OPENCODE_DISABLE_GLOBAL_CONFIG).toBeUndefined();
+    // Our own read-only config is still injected (and wins).
+    expect(env.OPENCODE_CONFIG_CONTENT).toBe(OPENCODE_CONFIG_CONTENT);
   });
 
   test("injects read-only OpenCode config denies into child env", () => {
