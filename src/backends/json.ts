@@ -172,14 +172,20 @@ export function parseJsonValues(stdout: string) {
   return values;
 }
 
-export function collectText(value: unknown, output: string[]) {
+// Bound the parser against a malicious/broken backend: cap recursion depth
+// (a deeply-nested JSON object would otherwise overflow the stack) and cap the
+// total extracted text (see appendText) so output can't grow unbounded.
+const MAX_COLLECT_DEPTH = 64;
+
+export function collectText(value: unknown, output: string[], depth = 0) {
+  if (depth > MAX_COLLECT_DEPTH) return;
   if (typeof value === "string") {
     appendText(output, value);
     return;
   }
 
   if (Array.isArray(value)) {
-    for (const item of value) collectText(item, output);
+    for (const item of value) collectText(item, output, depth + 1);
     return;
   }
 
@@ -194,10 +200,10 @@ export function collectText(value: unknown, output: string[]) {
   }
 
   for (const key of ["part", "message", "response", "output"] as const) {
-    collectText(record[key], output);
+    collectText(record[key], output, depth + 1);
   }
   if (typeof record.content !== "string") {
-    collectText(record.content, output);
+    collectText(record.content, output, depth + 1);
   }
 }
 
@@ -250,16 +256,24 @@ export function formatError(value: unknown): string | null {
   );
 }
 
+// Cap the total extracted text so a backend emitting hundreds of MB of JSONL
+// cannot blow up the runner's memory through the collector.
+const MAX_COLLECTED_BYTES = 8_000_000;
+
+type TextCollector = string[] & { seen?: Set<string>; bytes?: number };
+
 export function textCollector(): string[] {
-  return Object.assign([], { seen: new Set<string>() }) as string[] & { seen: Set<string> };
+  return Object.assign([], { seen: new Set<string>(), bytes: 0 }) as TextCollector;
 }
 
 export function appendText(output: string[], value: string) {
   if (!value.trim()) return;
-  const maybeSeen = (output as string[] & { seen?: Set<string> }).seen;
-  if (maybeSeen) {
-    if (maybeSeen.has(value)) return;
-    maybeSeen.add(value);
+  const collector = output as TextCollector;
+  if (collector.bytes !== undefined && collector.bytes >= MAX_COLLECTED_BYTES) return;
+  if (collector.seen) {
+    if (collector.seen.has(value)) return;
+    collector.seen.add(value);
   }
+  if (collector.bytes !== undefined) collector.bytes += value.length;
   output.push(value);
 }

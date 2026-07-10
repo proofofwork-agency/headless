@@ -195,7 +195,7 @@ When run through the runtime/orchestrator (the plugin tools and `headlessRun`/`d
 ```
 
 - **Typed events**: `session_started`, `note`, `artifact`, `run_started`, `worker_spawned`, `headless_result`, `handoff`, `finality_proposal`.
-- **Tamper-evident**: each event carries `seq`, `prevHash`, and `sha256` `hash`. Reads verify the whole chain and throw `LedgerIntegrityError` if a line is malformed, reordered, inserted, or modified. (Tamper-*evident*, not tamper-*proof* — there is no secret MAC key yet.)
+- **Tamper-evident, optionally tamper-proof**: each event carries `seq`, `prevHash`, and a chained `hash`. Reads verify the whole chain and throw `LedgerIntegrityError` if a line is malformed, reordered, inserted, or modified. By default the hash is a plain `sha256` (tamper-*evident*: an attacker who rewrites the file can recompute a valid chain). Set **`HEADLESS_LEDGER_KEY`** to switch the chain to a keyed **HMAC-SHA256** — if that key is held out-of-band (a secret manager, a remote verifier — anywhere an attacker with write access to the file cannot read it), the ledger becomes tamper-*proof*: forged edits can't produce valid hashes. The key must stay constant for a given ledger.
 - **Secret redaction on write**: 13 secret patterns (private keys, `sk-`/Bearer/Slack/GitHub/AWS/JWT/Stripe/GCP keys, generic `key=…`) are redacted **before** hashing, and content over 20k chars is truncated. The live caller still receives the raw output; only the durable ledger is sanitized.
 - **Atomic + locked writes**: appends go through a mkdir lock and a `tmp → fsync → rename → chmod 600` atomic rewrite, so concurrent readers never see a torn line.
 - **Read models** derive recent context, task lanes, artifacts, finality blockers, and run status by replaying the log.

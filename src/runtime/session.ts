@@ -1,9 +1,9 @@
-import { createHash } from "crypto";
+import { createHash, createHmac } from "crypto";
 import { existsSync, mkdirSync, readFileSync, rmdirSync } from "fs";
 import { dirname, join } from "path";
 import type { EventInput, HeadlessEvent } from "./events";
 import { atomicWriteFile } from "./atomic-write";
-import { redactAndTruncate, type RedactionResult } from "./redaction";
+import { redactDeep } from "./redaction";
 
 export type HeadlessSession = {
   root: string;
@@ -90,7 +90,11 @@ function ensureSessionStarted(session: HeadlessSession, source: string) {
   withLedgerLock(session, () => {
     const existing = readLedgerUnlocked(session);
     if (existing.length > 0) return;
-    const redacted = redactContent("Headless session started.", { root: session.root });
+    const seed = redactDeep({ content: "Headless session started.", meta: { root: session.root } });
+    const genesis = seed.value as { content: string; meta: Record<string, unknown> };
+    const meta = seed.redacted || seed.truncated
+      ? { ...genesis.meta, redacted: seed.redacted, truncated: seed.truncated }
+      : genesis.meta;
     const eventWithoutHash: Omit<HeadlessEvent, "hash"> = {
       schema: "v1",
       id: crypto.randomUUID(),
@@ -100,8 +104,8 @@ function ensureSessionStarted(session: HeadlessSession, source: string) {
       prevHash: null,
       type: "session_started",
       source,
-      content: redacted.content,
-      meta: redacted.meta,
+      content: genesis.content,
+      meta,
     };
     const event = { ...eventWithoutHash, hash: hashEvent(eventWithoutHash) };
     const existingRaw = existsSync(session.ledgerPath) ? readFileSync(session.ledgerPath, "utf8") : "";
@@ -152,15 +156,20 @@ function newSessionId() {
 function sanitizeSessionId(value?: string | null) {
   const trimmed = value?.trim();
   if (!trimmed) return null;
-  return trimmed.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 120);
+  const cleaned = trimmed.replace(/[^a-zA-Z0-9_.-]/g, "_").slice(0, 120);
+  // Reject dot-only ids ("."/".."/...): as a path segment they would redirect
+  // the ledger out of the sessions directory.
+  if (/^\.+$/.test(cleaned)) return null;
+  return cleaned;
 }
 
 function verifyEvent(session: HeadlessSession, event: HeadlessEvent, previous: HeadlessEvent | undefined, expectedSeq: number, lineNumber: number) {
+  // Every event must be part of the hash chain. Allowing "unchained" events
+  // through (as an earlier legacy-compat shortcut did) let an attacker rewrite
+  // the whole ledger with chain-less lines and pass verification with no hashing
+  // at all — so any line missing seq/prevHash/hash is now an integrity failure.
   if (!isChainedEvent(event)) {
-    if (previous && isChainedEvent(previous)) {
-      throw new LedgerIntegrityError(`Legacy unchained ledger event after chained event at ${session.ledgerPath}:${lineNumber}.`);
-    }
-    return;
+    throw new LedgerIntegrityError(`Unchained ledger event at ${session.ledgerPath}:${lineNumber} (missing seq/prevHash/hash).`);
   }
   if (event.seq !== expectedSeq) {
     throw new LedgerIntegrityError(`Ledger sequence mismatch at ${session.ledgerPath}:${lineNumber}: expected ${expectedSeq}, got ${event.seq ?? "missing"}`);
@@ -183,32 +192,30 @@ function isChainedEvent(event: HeadlessEvent) {
   return !!event.hash || event.seq !== undefined || event.prevHash !== undefined;
 }
 
+// When HEADLESS_LEDGER_KEY is set, events are chained with a keyed HMAC-SHA256
+// instead of a plain SHA-256. If the key is held out-of-band (a secret manager,
+// a remote verifier — anywhere an attacker with write access to the ledger file
+// cannot read it), the chain becomes tamper-PROOF: an attacker cannot recompute
+// valid hashes to hide an edit. Without the key it is the current tamper-EVIDENT
+// SHA-256 chain. The key must stay constant for a given ledger.
 function hashEvent(event: Omit<HeadlessEvent, "hash">) {
-  return createHash("sha256").update(JSON.stringify(event)).digest("hex");
+  const data = JSON.stringify(event);
+  const key = process.env.HEADLESS_LEDGER_KEY;
+  return key
+    ? createHmac("sha256", key).update(data).digest("hex")
+    : createHash("sha256").update(data).digest("hex");
 }
 
 function redactEventInput(input: EventInput): EventInput {
-  if (input.content === undefined) return input;
+  // Redact secrets from ALL string fields (content, meta, artifact, handoff,
+  // result, ...), not just `content` — a secret in any field must never reach
+  // the ledger in cleartext. Runs before the hash so stored == verified form.
+  const { value, redacted, truncated } = redactDeep(input);
+  if (!redacted && !truncated) return input;
+  const next = value as EventInput;
   return {
-    ...input,
-    ...redactContent(input.content, input.meta),
-  };
-}
-
-function redactContent(content: string, meta?: Record<string, unknown>): { content: string; meta?: Record<string, unknown> } {
-  const redacted = redactAndTruncate(content);
-  if (!redacted.redacted && !redacted.truncated) return { content, meta };
-  return {
-    content: redacted.text,
-    meta: redactionMeta(meta, redacted),
-  };
-}
-
-function redactionMeta(meta: Record<string, unknown> | undefined, redacted: RedactionResult) {
-  return {
-    ...(meta ?? {}),
-    redacted: redacted.redacted,
-    truncated: redacted.truncated,
+    ...next,
+    meta: { ...(next.meta ?? {}), redacted, truncated },
   };
 }
 

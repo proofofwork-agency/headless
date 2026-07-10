@@ -74,8 +74,29 @@ describe("opencode backend helpers", () => {
       "provider/model",
       "--agent",
       "review",
+      "--",
       "do work",
     ]);
+  });
+
+  test("CLI parses flags only before -- so prompt text after it cannot mutate flags", async () => {
+    const { flagArgsBeforeSeparator } = await import("../src/cli");
+    // `exec -- --backend codex --json say hi`: everything after -- is prompt.
+    const flags = flagArgsBeforeSeparator(["exec", "--", "--backend", "codex", "--json", "say", "hi"]);
+    expect(flags).toEqual(["exec"]);
+    expect(flags.includes("--json")).toBe(false);
+    expect(flags.includes("--backend")).toBe(false);
+    // No separator: all args are flag args (normal case).
+    expect(flagArgsBeforeSeparator(["exec", "--backend", "codex", "hi"])).toEqual(["exec", "--backend", "codex", "hi"]);
+  });
+
+  test("delimits the prompt with -- so a flag-like prompt cannot smuggle backend flags", () => {
+    const cmd = buildOpenCodeCommand({ backend: "opencode", prompt: "--dangerously-skip-permissions" }, "/repo");
+    const sep = cmd.indexOf("--");
+    expect(sep).toBeGreaterThan(-1);
+    // The prompt sits AFTER the -- terminator, so opencode reads it as the message.
+    expect(cmd.slice(sep + 1)).toEqual(["--dangerously-skip-permissions"]);
+    expect(cmd[cmd.length - 1]).toBe("--dangerously-skip-permissions");
   });
 
   test("parses text, cost, tokens, and errors from JSONL", () => {
@@ -156,13 +177,38 @@ describe("opencode backend helpers", () => {
       ANTHROPIC_API_KEY: "ak",
       ZHIPU_API_KEY: "zk",
       OPENAI_API_KEY: "ok",
+      OPENCODE_API_KEY: "zenk",
       MY_FAKE_TOKEN: "secret",
     });
     // opencode auto-detects <PROVIDER>_API_KEY; env-based auth must reach it.
     expect(env.ANTHROPIC_API_KEY).toBe("ak");
     expect(env.ZHIPU_API_KEY).toBe("zk");
     expect(env.OPENAI_API_KEY).toBe("ok");
+    expect(env.OPENCODE_API_KEY).toBe("zenk");
     expect(env.MY_FAKE_TOKEN).toBeUndefined();
+  });
+
+  test("does NOT forward control-plane OPENCODE_* vars that could override read-only denies", () => {
+    const env = nextOpenCodeEnv({
+      PATH: "/bin",
+      HOME: "/home/test",
+      OPENCODE_API_KEY: "zenk",
+      OPENCODE_PERMISSION: '{"bash":{"*":"allow"},"edit":"allow","write":"allow"}',
+      OPENCODE_CONFIG: "/tmp/evil.json",
+      OPENCODE_CONFIG_DIR: "/tmp/evil",
+      OPENCODE_AUTH_CONTENT: "{}",
+      OPENCODE_DISABLE_GLOBAL_CONFIG: "1",
+    });
+    // The credential passes through; every control-plane var is stripped, so a
+    // caller cannot re-enable write/bash after our injected denies.
+    expect(env.OPENCODE_API_KEY).toBe("zenk");
+    expect(env.OPENCODE_PERMISSION).toBeUndefined();
+    expect(env.OPENCODE_CONFIG).toBeUndefined();
+    expect(env.OPENCODE_CONFIG_DIR).toBeUndefined();
+    expect(env.OPENCODE_AUTH_CONTENT).toBeUndefined();
+    expect(env.OPENCODE_DISABLE_GLOBAL_CONFIG).toBeUndefined();
+    // Our own read-only config is still injected (and wins).
+    expect(env.OPENCODE_CONFIG_CONTENT).toBe(OPENCODE_CONFIG_CONTENT);
   });
 
   test("injects read-only OpenCode config denies into child env", () => {
@@ -236,6 +282,28 @@ describe("grok and generic backend helpers", () => {
     const parsed = parseGenericAgentJson(JSON.stringify({ content: "hello" }));
 
     expect(parsed.output).toBe("hello");
+  });
+
+  test("parser is bounded against a malicious backend (depth + byte caps)", async () => {
+    const { collectText, textCollector, appendText } = await import("../src/backends/json");
+
+    // Depth cap: a string buried past the recursion limit is not collected (and
+    // does not overflow the stack), while a shallow one still is.
+    let deep: unknown = { text: "too-deep" };
+    for (let i = 0; i < 100; i += 1) deep = { message: deep };
+    const deepOut = textCollector();
+    expect(() => collectText(deep, deepOut)).not.toThrow();
+    expect(deepOut.join(" ")).not.toContain("too-deep");
+    const shallowOut = textCollector();
+    collectText({ message: { text: "shallow" } }, shallowOut);
+    expect(shallowOut.join(" ")).toContain("shallow");
+
+    // Byte cap: once the collector exceeds its budget, further text is dropped.
+    const capped = textCollector();
+    appendText(capped, "a".repeat(9_000_000));
+    appendText(capped, "b".repeat(100));
+    expect(capped.length).toBe(1);
+    expect(capped.join("").includes("b")).toBe(false);
   });
 
   test("token accounting prefers explicit total over split subset fields", () => {
@@ -730,6 +798,40 @@ describe("native ledger runtime", () => {
     expect(readLedger(session).at(-1)?.hash).toBe(note?.hash);
   });
 
+  test("redacts secrets in non-content fields (artifact summary/evidence), not just content", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "deep-redaction-session" });
+
+    recordArtifact({
+      cwd,
+      sessionId: session.sessionId,
+      kind: "patch_summary",
+      title: "Deploy",
+      summary: "prod key sk-ABCDEFGHIJKLMNOP1234 must not persist",
+      status: "passed",
+      evidence: ["also github_pat_ABCDEFGHIJKLMNOPQRSTUV token"],
+    });
+    const event = readLedger(session).at(-1);
+    const serialized = JSON.stringify(event);
+
+    // No raw secret anywhere in the stored event (content, artifact.*, meta.*).
+    expect(serialized).not.toContain("sk-ABCDEFGHIJKLMNOP1234");
+    expect(serialized).not.toContain("github_pat_ABCDEFGHIJKLMNOPQRSTUV");
+    expect(event?.artifact?.summary).toContain("[REDACTED_OPENAI_KEY]");
+    expect(JSON.stringify(event?.artifact?.evidence)).toContain("[REDACTED_GITHUB_PAT]");
+    expect(event?.meta?.redacted).toBe(true);
+    // Redacted form still verifies (redaction happened before hashing).
+    expect(() => readLedger(session)).not.toThrow();
+  });
+
+  test("redaction covers additional real secret formats", async () => {
+    const { redactAndTruncate } = await import("../src/runtime/redaction");
+    expect(redactAndTruncate("key AIzaSyD-ABCDEFGHIJKLMNOPQRSTUVWXYZ01234").text).toContain("[REDACTED_GOOGLE_API_KEY]");
+    expect(redactAndTruncate("github_pat_11ABCDEFG0abcdefghijklmnop").text).toContain("[REDACTED_GITHUB_PAT]");
+    expect(redactAndTruncate("xapp-1-A000BBB-123456789").text).toContain("[REDACTED_SLACK_APP_TOKEN]");
+    expect(redactAndTruncate("Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l").text).toContain("[REDACTED_BASIC_AUTH]");
+  });
+
   test("truncates oversized ledger content with metadata", () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
     const session = getOrCreateSession({ cwd, sessionId: "truncate-session" });
@@ -770,63 +872,75 @@ describe("native ledger runtime", () => {
     expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
   });
 
-  test("allows legacy unchained ledger entries only before the chained prefix starts", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
-    const session = getOrCreateSession({ cwd, sessionId: "legacy-prefix-session" });
-    const chained = readFileSync(session.ledgerPath, "utf8");
-    const legacy = JSON.stringify({
-      schema: "v1",
-      id: "legacy",
-      timestamp: Date.now(),
-      sessionId: session.sessionId,
-      type: "note",
-      source: "test",
-      content: "legacy prefix",
-    });
-    writeFileSync(session.ledgerPath, `${legacy}\n${chained}`, "utf8");
+  test("with HEADLESS_LEDGER_KEY, a recomputed (plain-SHA) forged chain is rejected — tamper-proof", async () => {
+    const { createHash } = await import("crypto");
+    const prev = process.env.HEADLESS_LEDGER_KEY;
+    process.env.HEADLESS_LEDGER_KEY = "out-of-band-secret";
+    try {
+      const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+      const session = getOrCreateSession({ cwd, sessionId: "hmac-session" });
+      appendNote({ cwd, sessionId: session.sessionId, text: "original action" });
+      // A clean read verifies with the key.
+      expect(() => readLedger(session)).not.toThrow();
 
-    expect(readLedger(session).map((event) => event.id)).toEqual(["legacy", expect.any(String)]);
+      // Attacker edits the note and re-forges the chain the only way they can
+      // without the key: a plain SHA-256 over the event.
+      const lines = readFileSync(session.ledgerPath, "utf8").trim().split("\n");
+      const ev = JSON.parse(lines[1]);
+      ev.content = "covered up";
+      const { hash: _drop, ...withoutHash } = ev;
+      ev.hash = createHash("sha256").update(JSON.stringify(withoutHash)).digest("hex");
+      lines[1] = JSON.stringify(ev);
+      writeFileSync(session.ledgerPath, `${lines.join("\n")}\n`, "utf8");
+
+      // Verified WITH the key, the plain-SHA forgery does not match the HMAC.
+      expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
+    } finally {
+      if (prev === undefined) delete process.env.HEADLESS_LEDGER_KEY;
+      else process.env.HEADLESS_LEDGER_KEY = prev;
+    }
   });
 
-  test("rejects legacy unchained ledger entries appended after a chained event", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
-    const session = getOrCreateSession({ cwd, sessionId: "legacy-tail-session" });
-    const legacy = JSON.stringify({
-      schema: "v1",
-      id: "legacy-tail",
-      timestamp: Date.now(),
-      sessionId: session.sessionId,
-      type: "note",
-      source: "test",
-      content: "legacy tail",
-    });
-    writeFileSync(session.ledgerPath, `${readFileSync(session.ledgerPath, "utf8")}${legacy}\n`, "utf8");
+  const UNCHAINED_EVENT = JSON.stringify({
+    schema: "v1",
+    id: "forged",
+    timestamp: 1,
+    sessionId: "x",
+    type: "note",
+    source: "attacker",
+    content: "forged event with no seq/prevHash/hash",
+  });
 
+  test("rejects an unchained event as a leading line", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "unchained-prefix" });
+    writeFileSync(session.ledgerPath, `${UNCHAINED_EVENT}\n${readFileSync(session.ledgerPath, "utf8")}`, "utf8");
     expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
   });
 
-  test("append after a legacy prefix numbers the chained event so it round-trips", () => {
+  test("rejects an unchained event appended as a trailing line", () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
-    const session = getOrCreateSession({ cwd, sessionId: "legacy-append-session" });
-    const chained = readFileSync(session.ledgerPath, "utf8");
-    const legacy = JSON.stringify({
-      schema: "v1",
-      id: "legacy",
-      timestamp: Date.now(),
-      sessionId: session.sessionId,
-      type: "note",
-      source: "test",
-      content: "legacy prefix",
-    });
-    // Ledger becomes: [legacy(unchained), session_started(seq 1)].
-    writeFileSync(session.ledgerPath, `${legacy}\n${chained}`, "utf8");
+    const session = getOrCreateSession({ cwd, sessionId: "unchained-tail" });
+    writeFileSync(session.ledgerPath, `${readFileSync(session.ledgerPath, "utf8")}${UNCHAINED_EVENT}\n`, "utf8");
+    expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
+  });
 
-    const appended = appendNote({ cwd, sessionId: session.sessionId, text: "after legacy" });
-    // seq counts only chained events (session_started=1), so this is 2 — not 3.
-    expect(appended.seq).toBe(2);
-    const events = readLedger(session);
-    expect(events.map((event) => event.id)).toEqual(["legacy", expect.any(String), appended.id]);
-    expect(events.at(-1)?.content).toBe("after legacy");
+  test("rejects a fully-unchained (forged) ledger — no hashing required to bypass was the hole", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: "forged-session" });
+    // Attacker replaces the entire ledger with chain-less lines. Previously this
+    // passed verification (all events looked "legacy"); it must now fail.
+    writeFileSync(session.ledgerPath, `${UNCHAINED_EVENT}\n${UNCHAINED_EVENT}\n${UNCHAINED_EVENT}\n`, "utf8");
+    expect(() => readLedger(session)).toThrow(LedgerIntegrityError);
+  });
+
+  test("rejects a dot-only sessionId that would redirect the ledger out of sessions/", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "headless-ledger-"));
+    const session = getOrCreateSession({ cwd, sessionId: ".." });
+    // ".." is rejected and a fresh session id is generated instead, so the
+    // ledger stays under sessions/<generated-id>, not redirected to .headless/.
+    expect(session.sessionId).not.toBe("..");
+    expect(session.sessionDir).toContain(join("sessions", session.sessionId));
   });
 
   test("derives task state from handoff, handled note, artifact, and finality entries", () => {
