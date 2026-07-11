@@ -3,6 +3,7 @@ import { decodeOpenCodeEvent } from "./event-decoder";
 import type { SessionDriverRuntime } from "./base";
 import { safeSessionOption } from "./options";
 import { safeAgentName } from "../validation";
+import { parseOpenCodeJsonl } from "../../backends/opencode";
 
 export class OpenCodeSessionDriver extends CommandSessionDriver {
   constructor(options: CommandSessionDriverOptions) {
@@ -23,16 +24,30 @@ export class OpenCodeSessionDriver extends CommandSessionDriver {
       decoder: decodeOpenCodeEvent,
       buildInitial: (runtime, prompt) => openCodeCommand(runtime, prompt),
       buildResume: (runtime, prompt, nativeSessionId) => openCodeCommand(runtime, prompt, nativeSessionId),
-      retryAfterInitialization: isCompletedDatabaseMigration,
+      retryAfterInitialization: isColdStartWithoutOutput,
     }, options.executor, options);
   }
 }
 
-function isCompletedDatabaseMigration(result: { exitCode: number | null; stdout?: string; stderr?: string }) {
-  if (result.exitCode !== 0 || result.stdout?.trim()) return false;
-  const diagnostic = result.stderr ?? "";
-  return diagnostic.includes("sqlite-migration:done")
-    && diagnostic.includes("Database migration complete.");
+/**
+ * True when an opencode run finished cleanly but produced **no assistant text** —
+ * opencode's one-time, fresh-data-dir cold start. The driver retries once in the
+ * same (now-warm) worker, which yields the real turn. Two shapes are covered:
+ *  - opencode ≤ 1.15: the DB-migration run exits 0 with empty stdout and a
+ *    `sqlite-migration:done` / `Database migration complete.` banner on stderr.
+ *  - opencode ≥ 1.17: the init run emits `step_start`/`step_finish` on stdout but
+ *    no `text` part (the banner is gone), so key off the parsed output instead.
+ */
+function isColdStartWithoutOutput(result: { exitCode: number | null; stdout?: string; stderr?: string }) {
+  if (result.exitCode !== 0) return false;
+  const stdout = result.stdout ?? "";
+  if (!stdout.trim()) {
+    const diagnostic = result.stderr ?? "";
+    return diagnostic.includes("Performing one time database migration")
+      || (diagnostic.includes("sqlite-migration:done") && diagnostic.includes("Database migration complete."));
+  }
+  // A clean run that carried no assistant text back is the cold-start init turn.
+  return parseOpenCodeJsonl(stdout).output.trim() === "";
 }
 
 function openCodeCommand(runtime: SessionDriverRuntime, prompt: string, nativeSessionId?: string) {

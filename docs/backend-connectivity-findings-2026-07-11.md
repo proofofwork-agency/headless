@@ -194,3 +194,34 @@ was **intentionally not shipped in this pass** because:
 A blanket removal of the `|| stderrRead.text.trim()` fallback at `simple.ts:387` was also rejected:
 it would hide genuine stderr-only failures behind the generic "No assistant output" message. Revisit
 the retry (guarded specifically on the migration predicate) once opencode's `run` output is fixed.
+
+## Update 4 — RESOLVED: opencode 1.15.3 → 1.17.18 fixes output; cold-start retry generalized; Path B verified
+
+`opencode upgrade` (1.15.3 → **1.17.18**) fixes the output defect: `opencode run --pure --format
+json` now emits the full event set (`step_start`, `text`, `step_finish`) with the assistant answer
+on stdout — confirmed for `glm-4.7`, `glm-5-turbo`, `glm-4.5-air`, and the configured default
+`glm-5.2` (all return `READY`). The registry's pinned `1.15.3` is a **minimum** (`probe.ts:37`),
+so 1.17.18 passes the probe with no registry change; the required help-flags are still present.
+
+**One headless change was still needed.** 1.17.18 changed the cold-start shape: the first run on a
+**fresh worker data dir** no longer prints the migration banner — it emits `step_start`/`step_finish`
+but **no `text` part** (verified: RUN-1 on a fresh dir → empty answer; RUN-2 on the warm dir →
+`READY`). Path B's retry predicate keyed on the old banner, so it would not fire. Generalized
+`session-drivers/opencode.ts` — `isCompletedDatabaseMigration` → **`isColdStartWithoutOutput`** —
+to retry when a clean (exit 0) run carried **no assistant text**, covering both shapes:
+- ≤1.15: empty stdout + `sqlite-migration:done` / `Database migration complete.` on stderr;
+- ≥1.17: `parseOpenCodeJsonl(stdout).output` is empty (step markers only).
+The one-shot command driver already retries once in the same warm worker (`command-driver.ts:178`).
+
+**Verified end-to-end** (`scripts/native-subscription-smoke.ts`, `HEADLESS_NATIVE_SMOKE=1`,
+opencode-only): a contained **native-login** opencode session turn now **PASSES** —
+`status: passed`, `backendVersion: 1.17.18`, `driverKind: opencode-session`, `network:
+provider-direct`, API keys cleared, secrets denied. A *cold-cache* first turn can exceed a 60 s
+budget (fresh models.dev catalog fetch under the sandbox); warm turns complete in ~5 s. Real goal
+timeouts are generous (fleet `goalTimeoutMs` default 1 h), so this is a first-run latency note, not
+a blocker — optionally seed the worker's opencode cache to remove it (former fix "D").
+
+**Net:** goals and the TUI (Path B) now get real coder replies under required containment. Path A
+(plain `headless exec`, one-shot) still lacks a retry, so a fresh-worker `exec` returns no text on
+its single cold-start run; porting the same `isColdStartWithoutOutput` guard into
+`runBackendProcess` is the remaining follow-up for the CLI exec path.

@@ -588,6 +588,35 @@ describe("native command session drivers", () => {
     expect(executor.executions[1].timeoutMs).toBeLessThanOrEqual(executor.executions[0].timeoutMs);
   });
 
+  test("OpenCode retries a 1.17-style cold start that produced no assistant text", async () => {
+    // opencode >= 1.17 dropped the migration banner: the fresh-data-dir init turn
+    // exits 0 emitting step markers but no `text` part. The driver must still retry
+    // once in the same (now-warm) worker and return the real turn.
+    const executor = new FakeExecutor({
+      execute: sequenceExecutions([
+        jsonl([
+          { type: "step_start", part: { id: "s1", type: "step-start" } },
+          { type: "step_finish", part: { id: "sf1", type: "step-finish", tokens: { input: 10, output: 0 } } },
+        ]),
+        jsonl([
+          { type: "session.created", sessionID: "oc-warm", event_id: "oc-session" },
+          { type: "message.part.updated", sessionID: "oc-warm", part: { id: "p1", type: "text", text: "ready", time: { end: 1 } } },
+          { type: "session.idle", sessionID: "oc-warm" },
+        ]),
+      ]),
+    });
+    const driver = new OpenCodeSessionDriver({
+      executor,
+      createId: ids("local", "turn-one"),
+    });
+    const handle = await driver.create({ cwd: "/repo" });
+
+    const turn = await driver.send(handle, "first", { timeoutMs: 5_000 });
+
+    expect(turn).toMatchObject({ status: "completed", output: "ready", nativeSessionId: "oc-warm" });
+    expect(executor.executions).toHaveLength(2);
+  });
+
   test("OpenCode never retries a completed migration more than once", async () => {
     const executor = new FakeExecutor({
       execute: sequenceExecutions([openCodeMigrationResult(), openCodeMigrationResult()]),
