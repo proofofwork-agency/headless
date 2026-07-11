@@ -22,6 +22,23 @@ export const SELECT_FG = "#d5ddff";
 /** Near-black ink for text printed on a saturated pill background. */
 export const INK = "#0b0b12";
 
+// ContextRelay-derived accents: the single dark strip background pinned at the
+// bottom, and per-agent identity colors used to tint backend names.
+export const STATUS_BAR_BG = "#27272a";
+export const CODEX_COLOR = "#60a5fa";
+export const CLAUDE_COLOR = "#a78bfa";
+
+/** Identity tint for a backend name, mirroring ContextRelay's agent colors. */
+export function backendTone(backend: string): string {
+  switch (backend) {
+    case "codex": return CODEX_COLOR;
+    case "claude-code": case "claude": return CLAUDE_COLOR;
+    case "opencode": return ACCENT;
+    case "grok-build": case "grok": return VIOLET;
+    default: return MUTED;
+  }
+}
+
 export type TuiView = "overview" | "fleet" | "goals" | "approvals" | "events" | "help";
 
 export const TUI_VIEWS: TuiView[] = ["overview", "fleet", "goals", "approvals", "events", "help"];

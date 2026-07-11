@@ -7,6 +7,7 @@ import {
   TuiController,
   restoreControlRoom,
   runReconnectLoop,
+  subscribeControlRoom,
   type ControlRoomClient,
 } from "../src/tui/controller";
 import {
@@ -167,6 +168,32 @@ describe("Headless TUI control room", () => {
     expect({ connects, consumes }).toEqual({ connects: 2, consumes: 2 });
     expect(delays).toEqual([10]);
     expect(retries).toEqual(["socket reset"]);
+  });
+
+  test("starts the activity log clear on launch by seeking to the live event head", async () => {
+    const waits: Array<Record<string, unknown>> = [];
+    let stop = false;
+    const client = new FakeClient({
+      // The head probe reports the current tail; a real daemon with days of
+      // history returns its highest cursor here without replaying any events.
+      "events.snapshot": () => ({ events: [], latestCursor: 8_675, nextCursor: 8_675 }),
+      "events.wait": (params) => {
+        waits.push(params);
+        stop = true;
+        return { events: [], nextCursor: params.afterCursor };
+      },
+    });
+
+    await subscribeControlRoom(
+      client,
+      { getState: () => initialControlRoomState("/project"), patchState: () => undefined },
+      () => stop,
+    );
+
+    // The first (and only) wait must resume from the head cursor, not 0 — so the
+    // log begins empty instead of replaying the entire ledger.
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toMatchObject({ afterCursor: 8_675 });
   });
 
   test("dispatches goal, leader, trust, fleet, approval, candidate, and policy actions", async () => {

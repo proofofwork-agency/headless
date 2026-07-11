@@ -440,7 +440,21 @@ export async function subscribeControlRoom(
   shouldStop: () => boolean,
   refresh?: () => Promise<unknown>,
 ) {
+  // Start from the live head so the activity log begins clear on launch instead
+  // of replaying the entire (possibly days-old) ledger. The daemon reports the
+  // current head as `latestCursor`; a max-cursor snapshot returns zero events
+  // (the store clamps the requested cursor to the head), so this is cheap.
   let cursor = 0;
+  try {
+    const head = await client.call<{ latestCursor?: number; nextCursor?: number }>(
+      "events.snapshot",
+      { afterCursor: Number.MAX_SAFE_INTEGER, limit: 1 },
+      2_500,
+    );
+    cursor = head.latestCursor ?? head.nextCursor ?? 0;
+  } catch {
+    // If the head probe fails, fall back to replaying from the beginning.
+  }
   let lastRefreshAt = 0;
   while (!shouldStop()) {
     const snapshot = await client.call<{ events: RunEvent[]; nextCursor: number }>(

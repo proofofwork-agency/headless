@@ -4,14 +4,13 @@ import { shortPath, truncateDisplay, type TuiControlRoomState } from "./model";
 import type { TabSegment } from "./layout";
 import {
   ACCENT,
-  BLUE,
   CHROME,
   connectionTone,
   ERR,
   INK,
   MUTED,
   OK,
-  SURFACE,
+  STATUS_BAR_BG,
   WARN,
   type TuiView,
 } from "./theme";
@@ -77,11 +76,11 @@ function TabLabel({ segment, active }: { segment: TabSegment; active: boolean })
   const base = segment.badge > 0 ? segment.label.slice(0, -String(segment.badge).length - 1) : segment.label;
   // No horizontal padding: the tab's hit-test columns are derived from the raw
   // label width, so the highlight must not change the rendered character count.
-  // Active tab = SURFACE fill + bright cyan ACCENT + bold + underline so it reads
-  // clearly against the dim inactive labels and links to its SURFACE panel.
+  // Active tab = ContextRelay's inverse pill (bold cyan ACCENT, fg/bg swapped) so
+  // it reads as a solid block against the dim inactive labels without widening.
   return (
     <Text>
-      <Text bold={active} underline={active} color={active ? ACCENT : MUTED} backgroundColor={active ? SURFACE : undefined}>{base}</Text>
+      <Text bold={active} inverse={active} color={active ? ACCENT : MUTED}>{base}</Text>
       {segment.badge > 0 ? (
         <>
           <Text color={CHROME}>·</Text>
@@ -92,11 +91,11 @@ function TabLabel({ segment, active }: { segment: TabSegment; active: boolean })
   );
 }
 
-export function SectionTitle({ title, hint, tone = BLUE, width }: { title: string; hint?: string; tone?: string; width: number }) {
+export function SectionTitle({ title, hint, tone = ACCENT, width }: { title: string; hint?: string; tone?: string; width: number }) {
   return (
     <Box justifyContent="space-between" width={width}>
       <Text wrap="truncate">
-        <Text color={tone}>▍</Text>
+        <Text color={tone}>◆ </Text>
         <Text bold color="white">{title}</Text>
       </Text>
       {hint ? <Text color={CHROME} wrap="truncate">{hint}</Text> : null}
@@ -121,11 +120,15 @@ export function StatusStrip({ state, working, width }: { state: TuiControlRoomSt
   const failed = /failed|error|lost/i.test(state.status);
   const tone = failed ? ERR : working ? WARN : OK;
   const label = failed ? "ERROR" : working ? "WORKING" : "READY";
+  // ContextRelay's single shaded strip: one dark bar pinned full-width, a status
+  // dot + bold tone label, then the live status text past a CHROME divider.
   return (
-    <Box paddingX={2} flexShrink={0}>
+    <Box paddingX={2} width={width} backgroundColor={STATUS_BAR_BG} flexShrink={0}>
       <Text wrap="truncate">
-        <Text bold backgroundColor={tone} color={INK}>{` ${label} `}</Text>
-        <Text color="white">{`  ${truncateDisplay(state.status, Math.max(8, width - label.length - 16))}`}</Text>
+        <Text color={tone}>{working ? "◐" : "●"}</Text>
+        <Text bold color={tone}>{` ${label}`}</Text>
+        <Text color={CHROME}>{"  │  "}</Text>
+        <Text color="white">{truncateDisplay(state.status, Math.max(8, width - label.length - 16))}</Text>
       </Text>
     </Box>
   );
@@ -170,7 +173,7 @@ export function Footer({ hints, right, width }: { hints: Array<[string, string]>
         {hints.map(([key, action], index) => (
           <React.Fragment key={`${key}-${action}`}>
             {index > 0 ? <Text color={CHROME}>  </Text> : null}
-            <Text color={BLUE}>{key}</Text>
+            <Text bold color={ACCENT}>{key}</Text>
             <Text color={MUTED}> {action}</Text>
           </React.Fragment>
         ))}
