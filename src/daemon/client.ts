@@ -61,10 +61,19 @@ export class HeadlessDaemonClient {
         socket.end();
         try {
           const response = DaemonResponseSchema.parse(safeJsonParse(buffer.slice(0, newline)));
-          if (response.id !== id) throw new HeadlessError("DAEMON_UNAVAILABLE", "Daemon response id mismatch.");
+          // The daemon mints a fresh response id when it cannot validate the
+          // request envelope, so on this single-request connection an error
+          // with a foreign id still describes this request's failure. Only a
+          // success envelope must never be accepted across an id mismatch.
+          if (response.id !== id && response.ok) {
+            throw new HeadlessError("DAEMON_UNAVAILABLE", "Daemon response id mismatch.");
+          }
           if (!response.ok) {
             const error = response.error;
-            throw new HeadlessError(error?.code ?? "INTERNAL_ERROR", error?.message ?? "Daemon request failed.", {
+            const staleDaemonHint = response.id !== id
+              ? " The daemon answered under a different request id, which usually means it is running an older build that could not parse this request; restart it with `headless daemon serve`."
+              : "";
+            throw new HeadlessError(error?.code ?? "INTERNAL_ERROR", `${error?.message ?? "Daemon request failed."}${staleDaemonHint}`, {
               retryable: error?.retryable,
               details: error?.details,
             });

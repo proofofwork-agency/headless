@@ -3,6 +3,7 @@ import type { Task } from "../contracts/durable";
 import type { RunEvent } from "../contracts/run";
 import type { TaskState } from "../runtime/read-model";
 import { redactAndTruncate } from "../runtime/redaction";
+import { eventTone, goalStateGlyph, ACCENT, BLUE, CHROME, ERR, MUTED, OK, WARN } from "./theme";
 
 export type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
 
@@ -60,20 +61,6 @@ export type TuiControlRoomState = {
   candidate: CandidateView | null;
 };
 
-export type ControlRoomView = {
-  narrow: boolean;
-  compact: boolean;
-  eventRows: number;
-  title: string;
-  projectLine: string;
-  fleetLines: string[];
-  goalLines: string[];
-  approvalLines: string[];
-  candidateLines: string[];
-  activityLines: string[];
-  queueLine: string;
-};
-
 const TERMINAL_GOAL_STATES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 
 export function initialControlRoomState(projectRoot: string): TuiControlRoomState {
@@ -100,7 +87,7 @@ export function initialControlRoomState(projectRoot: string): TuiControlRoomStat
   };
 }
 
-export function mergeRunEvents(current: readonly RunEvent[], incoming: readonly RunEvent[], limit = 240) {
+export function mergeRunEvents(current: readonly RunEvent[], incoming: readonly RunEvent[], limit = 480) {
   const byId = new Map(current.map((event) => [event.eventId, event]));
   for (const event of incoming) byId.set(event.eventId, event);
   return [...byId.values()]
@@ -114,98 +101,212 @@ export function selectActiveGoal(goals: readonly Goal[], preferred: string | nul
   return [...usable].sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt)[0]?.id ?? null;
 }
 
-export function buildControlRoomView(state: TuiControlRoomState, width: number, height: number): ControlRoomView {
-  const columns = boundedDimension(width, 96);
-  const rows = boundedDimension(height, 28);
-  const narrow = columns < 82;
-  const compact = rows < 24 || columns < 58;
-  const contentWidth = Math.max(16, narrow ? columns - 6 : Math.floor(columns / 2) - 7);
-  const activeFleet = state.fleetProfiles.find((profile) => profile.id === state.activeFleetProfileId)
+export function activeFleetProfile(state: Pick<TuiControlRoomState, "fleetProfiles" | "activeFleetProfileId">) {
+  return state.fleetProfiles.find((profile) => profile.id === state.activeFleetProfileId)
     ?? state.fleetProfiles[0]
     ?? null;
-  const activeGoal = state.goals.find((goal) => goal.id === state.activeGoalId) ?? null;
-  const pendingApprovals = state.approvals.filter((approval) => approval.status === "pending");
-  const feedWidth = Math.max(16, columns - 6);
+}
 
-  const healthById = new Map(state.fleetHealth.map((entry) => [entry.id, entry]));
-  const fleetLines = activeFleet?.agents.slice(0, compact ? 2 : 4).map((agent) => {
-    const health = healthById.get(agent.id);
-    const marker = health?.rateLimited ? "⏳" : health?.healthy === false ? "×" : health?.authenticated === false ? "!" : "•";
-    const auth = health?.authenticated === true ? "auth" : health?.authenticated === false ? "login?" : agent.authMode;
-    const load = health?.load === null || health?.load === undefined ? "" : ` load:${health.load}`;
-    return truncateDisplay(`${marker} ${agent.name} · ${agent.backend} · ${auth}${load}`, contentWidth);
-  }) ?? [truncateDisplay("No fleet profile configured", contentWidth)];
+export function activeGoal(state: Pick<TuiControlRoomState, "goals" | "activeGoalId">) {
+  return state.goals.find((goal) => goal.id === state.activeGoalId) ?? null;
+}
 
-  const goalLines = activeGoal
-    ? [
-        truncateDisplay(`${activeGoal.state} · ${activeGoal.objective}`, contentWidth),
-        truncateDisplay(`leader ${activeGoal.leaderAgentId ?? coordinatorLabel(activeGoal)} · ${state.turns.length} turns · ${state.messages.length} messages`, contentWidth),
-      ]
-    : [truncateDisplay("No active goal · enter free text to start one", contentWidth)];
+export function pendingApprovals(state: Pick<TuiControlRoomState, "approvals">) {
+  return state.approvals.filter((approval) => approval.status === "pending");
+}
 
-  const approvalLines = pendingApprovals.length === 0
-    ? [truncateDisplay("No pending approvals", contentWidth)]
-    : pendingApprovals.slice(0, compact ? 1 : 3).map((approval) => truncateDisplay(
-      `! ${approval.id} · ${approval.kind} · ${approval.summary}`,
-      contentWidth,
-    ));
+// ── Presentation model ──────────────────────────────────────────────────────
+// Pure builders consumed by the Ink views; kept renderer-free so they stay
+// unit-testable without a terminal.
 
-  const candidateLines = state.candidate
-    ? [
-        truncateDisplay(`${state.candidate.id} · ${state.candidate.status}`, contentWidth),
-        truncateDisplay(state.candidate.summary || "Candidate details loaded", contentWidth),
-        ...(state.candidate.files.length > 0
-          ? [truncateDisplay(`files ${state.candidate.files.join(", ")}`, contentWidth)]
-          : []),
-        ...(state.candidate.patchPreview
-          ? [truncateDisplay(`diff ${state.candidate.patchPreview}`, contentWidth)]
-          : []),
-        truncateDisplay(state.candidate.gates.map((gate) => `${gate.id}:${gate.status}`).join(" ") || "no gates reported", contentWidth),
-      ]
-    : [truncateDisplay("No candidate selected · /candidate <id>", contentWidth)];
+export type EventLine = {
+  id: string;
+  time: string;
+  tag: string;
+  tone: string;
+  text: string;
+};
 
-  const trust = state.projectTrust.nativeLoginAllowed ? "native✓" : "native–";
-  const bypass = state.projectTrust.bypassAllowed ? "bypass✓" : "bypass–";
-  const feedRows = Math.max(3, Math.min(14, rows - (narrow ? 18 : 13)));
-  const activityLines = recentActivityLines(state, compact ? 2 : 4)
-    .map((line) => truncateDisplay(line, feedWidth));
+export function formatEventLine(event: RunEvent): EventLine {
+  const detail = event.kind === "policy"
+    ? event.decision
+    : event.kind === "completion"
+      ? event.result.status
+      : event.kind === "lifecycle"
+        ? event.state
+        : undefined;
   return {
-    narrow,
-    compact,
-    eventRows: Math.max(1, feedRows - activityLines.length),
-    title: `HEADLESS · ${state.connection.toUpperCase()} · ${state.orchestration.enabled ? "AUTO" : "MANUAL"}`,
-    projectLine: truncateDisplay(`${state.projectRoot} · ${trust} · ${bypass}`, Math.max(16, columns - 6)),
-    fleetLines,
-    goalLines,
-    approvalLines,
-    candidateLines,
-    activityLines,
-    queueLine: truncateDisplay(
-      `queue ${state.orchestration.queuedJobs} · active ${state.orchestration.activeJobs} · tasks ${state.durableTasks.filter((task) => task.state === "pending").length} · approvals ${pendingApprovals.length} · policy ${activeFleet?.approvalPolicy ?? "ask"}`,
-      Math.max(16, columns - 6),
-    ),
+    id: event.eventId,
+    time: new Date(event.timestamp).toLocaleTimeString(undefined, { hour12: false }),
+    tag: event.kind === "lifecycle" ? event.state : event.kind,
+    tone: eventTone(event.kind, detail),
+    text: safeInline(eventSummary(event)),
   };
 }
 
-export function recentActivityLines(state: Pick<TuiControlRoomState, "messages" | "turns">, limit = 4) {
+export function eventSummary(event: RunEvent): string {
+  if (event.kind === "stdout" || event.kind === "stderr") return event.text;
+  if (event.kind === "lifecycle") return event.detail ?? "";
+  if (event.kind === "policy") return `${event.decision}: ${event.reason}`;
+  if (event.kind === "tool") return `${event.name}: ${event.summary}`;
+  if (event.kind === "artifact") return `${event.artifactKind}: ${event.summary}`;
+  if (event.kind === "usage") {
+    return `in ${event.usage.input ?? "?"} · out ${event.usage.output ?? "?"} · $${event.cost.amountUsd ?? "?"}`;
+  }
+  if (event.kind === "completion") return `${event.result.status}: ${event.result.output}`;
+  return "";
+}
+
+export type AgentRow = {
+  id: string;
+  name: string;
+  backend: string;
+  glyph: string;
+  tone: string;
+  auth: string;
+  authTone: string;
+  load: string;
+  detail: string;
+  enabled: boolean;
+};
+
+export function fleetAgentRows(state: Pick<TuiControlRoomState, "fleetProfiles" | "activeFleetProfileId" | "fleetHealth">): AgentRow[] {
+  const profile = activeFleetProfile(state);
+  if (!profile) return [];
+  const healthById = new Map(state.fleetHealth.map((entry) => [entry.id, entry]));
+  return profile.agents.map((agent) => {
+    const health = healthById.get(agent.id);
+    const tone = health?.rateLimited
+      ? WARN
+      : health?.healthy === false
+        ? ERR
+        : health?.healthy === true
+          ? OK
+          : MUTED;
+    const glyph = health?.rateLimited ? "◷" : health?.healthy === false ? "✗" : agent.enabled ? "●" : "○";
+    const auth = health?.authenticated === true ? "auth ✓" : health?.authenticated === false ? "login?" : agent.authMode;
+    return {
+      id: agent.id,
+      name: agent.name,
+      backend: agent.backend,
+      glyph,
+      tone,
+      auth,
+      authTone: health?.authenticated === false ? WARN : MUTED,
+      load: health?.load === null || health?.load === undefined ? "–" : String(health.load),
+      detail: safeInline(health?.detail ?? `priority ${agent.priority} · turns ≤${agent.maxConcurrentTurns}`),
+      enabled: agent.enabled,
+    };
+  });
+}
+
+export type GoalRow = {
+  id: string;
+  glyph: string;
+  tone: string;
+  state: string;
+  mode: string;
+  objective: string;
+  active: boolean;
+};
+
+export function goalRows(state: Pick<TuiControlRoomState, "goals" | "activeGoalId">): GoalRow[] {
+  return [...state.goals]
+    .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt)
+    .map((goal) => {
+      const { glyph, tone } = goalStateGlyph(goal.state);
+      return {
+        id: goal.id,
+        glyph,
+        tone,
+        state: goal.state,
+        mode: goal.mode,
+        objective: safeInline(goal.objective),
+        active: goal.id === state.activeGoalId,
+      };
+    });
+}
+
+export type ApprovalRow = {
+  id: string;
+  kind: string;
+  summary: string;
+  requestedBy: string;
+  age: string;
+  expiresIn: string | null;
+};
+
+export function approvalRows(state: Pick<TuiControlRoomState, "approvals">, now = Date.now()): ApprovalRow[] {
+  return pendingApprovals(state).map((approval) => ({
+    id: approval.id,
+    kind: approval.kind,
+    summary: safeInline(approval.summary),
+    requestedBy: approval.requestedBy,
+    age: formatAge(now - approval.createdAt),
+    expiresIn: approval.expiresAt ? formatAge(approval.expiresAt - now) : null,
+  }));
+}
+
+export type ActivityEntry = {
+  id: string;
+  glyph: string;
+  tone: string;
+  text: string;
+};
+
+export function activityEntries(state: Pick<TuiControlRoomState, "messages" | "turns">, limit = 6): ActivityEntry[] {
   const entries = [
     ...state.turns.map((turn) => ({
       at: turn.completedAt ?? turn.startedAt ?? turn.updatedAt,
       order: turn.sequence,
       kind: 0,
-      line: `T${turn.sequence} ${turn.agentId} · ${turn.state} · ${safeInline(turn.output ?? turn.input)}`,
+      entry: {
+        id: `turn-${turn.id}`,
+        glyph: turn.state === "succeeded" ? "✓" : turn.state === "failed" ? "✗" : turn.state === "running" ? "●" : "○",
+        tone: turn.state === "succeeded" ? OK : turn.state === "failed" ? ERR : turn.state === "running" ? ACCENT : MUTED,
+        text: `T${turn.sequence} ${turn.agentId} · ${turn.state} · ${safeInline(turn.output ?? turn.input)}`,
+      },
     })),
     ...state.messages.map((message) => ({
       at: message.createdAt,
       order: message.sequence,
       kind: 1,
-      line: `${message.acknowledgedAt === null ? "○" : "✓"} ${message.id} · ${message.senderId}→${message.recipientId} · ${message.kind} · ${safeInline(message.content)}`,
+      entry: {
+        id: `message-${message.id}`,
+        glyph: message.acknowledgedAt === null ? "◦" : "✓",
+        tone: message.acknowledgedAt === null ? BLUE : CHROME,
+        text: `${message.id} · ${message.senderId}→${message.recipientId} · ${message.kind} · ${safeInline(message.content)}`,
+      },
     })),
   ];
   return entries
     .sort((left, right) => left.at - right.at || left.order - right.order || left.kind - right.kind)
-    .slice(-Math.max(1, Math.min(16, Math.floor(limit))))
-    .map((entry) => entry.line);
+    .slice(-Math.max(1, Math.min(32, Math.floor(limit))))
+    .map((item) => item.entry);
+}
+
+/** Plain-string variant of the activity feed for logs and tests. */
+export function recentActivityLines(state: Pick<TuiControlRoomState, "messages" | "turns">, limit = 4) {
+  return activityEntries(state, Math.max(1, Math.min(16, Math.floor(limit)))).map((entry) => `${entry.glyph} ${entry.text}`);
+}
+
+export function formatAge(ms: number): string {
+  if (!Number.isFinite(ms)) return "–";
+  const total = Math.max(0, Math.floor(ms / 1000));
+  if (total < 60) return `${total}s`;
+  if (total < 3_600) return `${Math.floor(total / 60)}m`;
+  if (total < 86_400) return `${Math.floor(total / 3_600)}h${Math.floor((total % 3_600) / 60) > 0 ? ` ${Math.floor((total % 3_600) / 60)}m` : ""}`;
+  return `${Math.floor(total / 86_400)}d`;
+}
+
+export function shortPath(value: string, max = 38): string {
+  const home = process.env.HOME;
+  const collapsed = home && value.startsWith(home) ? `~${value.slice(home.length)}` : value;
+  if (collapsed.length <= max) return collapsed;
+  const parts = collapsed.split("/");
+  while (parts.length > 3 && parts.join("/").length > max) parts.splice(1, 1);
+  const joined = parts.length < collapsed.split("/").length ? [parts[0], "…", ...parts.slice(1)].join("/") : collapsed;
+  return joined.length <= max ? joined : `…${joined.slice(-(max - 1))}`;
 }
 
 export function truncateDisplay(value: string, width: number) {
@@ -215,20 +316,10 @@ export function truncateDisplay(value: string, width: number) {
   return `${value.slice(0, max - 1)}…`;
 }
 
-function boundedDimension(value: number, fallback: number) {
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
-}
-
-function coordinatorLabel(goal: Goal) {
-  if (goal.coordinator.kind === "human") return "human";
-  if (goal.coordinator.kind === "agent") return goal.coordinator.agentId;
-  return goal.coordinator.kind;
-}
-
-function safeInline(value: string) {
+export function safeInline(value: string) {
   return redactAndTruncate(value, 512).text
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, "")
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
     .replace(/\s+/g, " ")
     .trim() || "(empty)";

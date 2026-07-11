@@ -10,12 +10,30 @@ import {
   type ControlRoomClient,
 } from "../src/tui/controller";
 import {
-  buildControlRoomView,
+  activityEntries,
+  approvalRows,
+  fleetAgentRows,
+  formatEventLine,
+  goalRows,
   initialControlRoomState,
   mergeRunEvents,
   recentActivityLines,
+  shortPath,
   type TuiControlRoomState,
 } from "../src/tui/model";
+import {
+  buildHitZones,
+  buildTabLayout,
+  hitTest,
+  listWindowStart,
+  nextView,
+  parseMouseEvents,
+} from "../src/tui/layout";
+import { CONTENT_TOP, LIST_OFFSET, TAB_ROW } from "../src/tui/theme";
+
+const ESC = String.fromCharCode(27);
+const ANSI_RED = `${ESC}[31m`;
+const ANSI_CLEAR = `${ESC}[2J`;
 
 describe("Headless TUI control room", () => {
   test("routes free text to the active goal coordinator without blocking input", async () => {
@@ -306,36 +324,40 @@ describe("Headless TUI control room", () => {
     expect(invalid.status()).toContain("/ack-message <id> [more ids] [--retain]");
   });
 
-  test("renders bounded cards for narrow terminals and keeps lifecycle events ordered", () => {
+  test("sanitizes and redacts presentation rows built from live collaboration state", () => {
     const fleet = fleetFixture();
-    const goal = { ...goalFixture("goal-narrow", "active"), objective: "x".repeat(500) };
+    const goal = { ...goalFixture("goal-narrow", "active"), objective: `x${ANSI_RED}${"x".repeat(500)}` };
     const state: TuiControlRoomState = {
       ...initialControlRoomState("/a/very/long/project/path/that/must/not/overflow"),
       connection: "connected",
       fleetProfiles: [fleet],
       activeFleetProfileId: fleet.id,
+      fleetHealth: [{ id: "codex-lead", backend: "codex", authenticated: false, healthy: true, rateLimited: false, load: 2, detail: null }],
       goals: [goal],
       activeGoalId: goal.id,
+      approvals: [approvalFixture(goal.id)],
       orchestration: { enabled: true, activeJobs: 2, queuedJobs: 9, mode: "autonomous" },
     };
-    const view = buildControlRoomView(state, 42, 18);
-    expect(view).toMatchObject({ narrow: true, compact: true, eventRows: 3 });
-    expect(view.projectLine.length).toBeLessThanOrEqual(36);
-    for (const line of [...view.fleetLines, ...view.goalLines, ...view.approvalLines, ...view.candidateLines]) {
-      expect(line.length).toBeLessThanOrEqual(36);
-    }
-    expect(buildControlRoomView(state, 120, 40).narrow).toBe(false);
+
+    const goals = goalRows(state);
+    expect(goals).toHaveLength(1);
+    expect(goals[0]).toMatchObject({ id: goal.id, active: true, state: "active" });
+    expect(goals[0]?.objective).not.toContain(ESC);
+
+    const agents = fleetAgentRows(state);
+    expect(agents).toMatchObject([{ id: "codex-lead", backend: "codex", auth: "login?", load: "2" }]);
+
+    const approvals = approvalRows(state, 61_000);
+    expect(approvals).toMatchObject([{ id: "approval-one", kind: "merge", requestedBy: "codex-lead", age: "1m" }]);
 
     const activityState = {
       ...state,
-      turns: [{ ...turnFixture(goal.id), output: `turn result\u001b[31m ${"z".repeat(500)}`, state: "succeeded" as const, completedAt: 2 }],
-      messages: [messageFixture(goal.id, "message-secret", 2, "report sk-abcdefghijklmnop\u001b[2J ready")],
+      turns: [{ ...turnFixture(goal.id), output: `turn result${ANSI_RED} ${"z".repeat(500)}`, state: "succeeded" as const, completedAt: 2 }],
+      messages: [messageFixture(goal.id, "message-secret", 2, `report sk-abcdefghijklmnop${ANSI_CLEAR} ready`)],
     };
-    const narrowActivity = buildControlRoomView(activityState, 42, 18);
-    expect(narrowActivity.activityLines).toHaveLength(2);
-    expect(narrowActivity.eventRows).toBe(1);
-    expect(narrowActivity.activityLines.every((line) => line.length <= 36)).toBe(true);
-    expect(narrowActivity.activityLines.join("\n")).not.toContain("\u001b");
+    const entries = activityEntries(activityState, 4);
+    expect(entries).toHaveLength(2);
+    expect(entries.map((entry) => entry.text).join("\n")).not.toContain(ESC);
     const wideActivity = recentActivityLines(activityState, 4).join("\n");
     expect(wideActivity).toContain("[REDACTED_OPENAI_KEY]");
     expect(wideActivity).not.toContain("sk-abcdefghijklmnop");
@@ -345,6 +367,54 @@ describe("Headless TUI control room", () => {
     const later = eventFixture("event-3", 3_000, 3, "succeeded");
     const merged = mergeRunEvents([later], [earlier, later]);
     expect(merged.map((event) => event.eventId)).toEqual([earlier.eventId, later.eventId]);
+
+    const stdoutEvent = { ...eventFixture("event-ansi", 4_000, 4, "running"), kind: "stdout" as const, text: `hello${ANSI_CLEAR}world sk-abcdefghijklmnop` };
+    const line = formatEventLine(stdoutEvent as never);
+    expect(line.text).not.toContain(ESC);
+    expect(line.text).toContain("[REDACTED_OPENAI_KEY]");
+    expect(line.tone).toBeTruthy();
+
+    expect(shortPath("/a/b", 24)).toBe("/a/b");
+    expect(shortPath(`/very/${"deep/".repeat(12)}path`, 24).length).toBeLessThanOrEqual(24);
+  });
+
+  test("resolves tabs, list rows, and wheel gestures from SGR mouse reports", () => {
+    const tabs = buildTabLayout(120, { approvals: 2 });
+    expect(tabs.map((segment) => segment.view)).toEqual(["overview", "fleet", "goals", "approvals", "events", "help"]);
+    expect(tabs[0]).toMatchObject({ from: 3, to: 10 });
+    const approvalsTab = tabs.find((segment) => segment.view === "approvals");
+    expect(approvalsTab?.label).toBe("Approvals\u{b7}2");
+    const help = tabs.find((segment) => segment.view === "help");
+    expect(help?.to).toBe(118);
+
+    const zones = buildHitZones({
+      width: 120,
+      height: 30,
+      view: "goals",
+      badges: { approvals: 2 },
+      list: { rows: 6, start: 4, total: 40, paneWidth: 55 },
+    });
+    expect(hitTest(3, TAB_ROW, zones)).toEqual({ kind: "view", view: "overview" });
+    expect(hitTest(118, TAB_ROW, zones)).toEqual({ kind: "view", view: "help" });
+    expect(hitTest(2, TAB_ROW + 1, zones)).toBeUndefined();
+    expect(hitTest(10, CONTENT_TOP + LIST_OFFSET, zones)).toEqual({ kind: "row", index: 4 });
+    expect(hitTest(10, CONTENT_TOP + LIST_OFFSET + 5, zones)).toEqual({ kind: "row", index: 9 });
+    expect(hitTest(56, CONTENT_TOP + LIST_OFFSET, zones)).toBeUndefined();
+
+    expect(parseMouseEvents(`${ESC}[<0;12;3M`)).toEqual([{ x: 12, y: 3, kind: "press" }]);
+    expect(parseMouseEvents(`${ESC}[<0;12;3m`)).toEqual([]);
+    expect(parseMouseEvents(`${ESC}[<64;9;9M${ESC}[<65;9;9M`)).toEqual([
+      { x: 9, y: 9, kind: "wheel-up" },
+      { x: 9, y: 9, kind: "wheel-down" },
+    ]);
+    expect(parseMouseEvents(`${ESC}[<16;5;5M`)).toEqual([{ x: 5, y: 5, kind: "press" }]);
+    expect(parseMouseEvents("plain typing")).toEqual([]);
+
+    expect(listWindowStart(0, 5, 40)).toBe(0);
+    expect(listWindowStart(12, 5, 40)).toBe(8);
+    expect(listWindowStart(39, 5, 40)).toBe(35);
+    expect(nextView("overview")).toBe("fleet");
+    expect(nextView("overview", -1)).toBe("help");
   });
 
   test("passes --cwd from the CLI invocation to the TUI project boundary", () => {
