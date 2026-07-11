@@ -23,15 +23,10 @@ export type ListMeta = { rows: number; start: number; total: number; paneWidth: 
 export function OverviewView({ state, width, height }: { state: TuiControlRoomState; width: number; height: number }) {
   const rows = contentRows(height);
   const narrow = width < 84;
-  // Keep 2·cardHeight + 2 gutters + a >=3-row activity feed within `rows` even on
-  // a short terminal, so the feed never overflows into the card panels.
   const cardHeight = narrow
     ? 3
-    : Math.max(3, Math.min(6, Math.floor((rows - 4) / 2)));
-  // Wide mode reserves two rows for the CANVAS gutters below each card row.
-  const activityHeight = narrow
-    ? Math.max(3, rows - cardHeight * 4)
-    : Math.max(3, rows - cardHeight * 2 - 2);
+    : Math.max(4, Math.min(6, Math.floor((rows - 5) / 2)));
+  const activityHeight = Math.max(3, rows - (narrow ? cardHeight * 4 : cardHeight * 2));
   const cardWidth = narrow ? width - 4 : Math.floor((width - 6) / 2);
 
   const cards = [
@@ -42,13 +37,13 @@ export function OverviewView({ state, width, height }: { state: TuiControlRoomSt
   ];
 
   return (
-    <Box flexDirection="column" paddingX={2} height={rows} backgroundColor={CANVAS}>
+    <Box flexDirection="column" paddingX={2} height={rows} backgroundColor={SURFACE}>
       {narrow ? (
         <Box flexDirection="column">{cards}</Box>
       ) : (
         <>
-          <Box marginBottom={1}>{cards.slice(0, 2)}</Box>
-          <Box marginBottom={1}>{cards.slice(2)}</Box>
+          <Box>{cards.slice(0, 2)}</Box>
+          <Box>{cards.slice(2)}</Box>
         </>
       )}
       <ActivityFeed state={state} width={width - 4} height={activityHeight} />
@@ -58,7 +53,7 @@ export function OverviewView({ state, width, height }: { state: TuiControlRoomSt
 
 function Card({ title, hint, tone, width, height, children }: React.PropsWithChildren<{ title: string; hint?: string; tone: string; width: number; height: number }>) {
   return (
-    <Box flexDirection="column" width={width} height={height} marginRight={2} paddingX={1} backgroundColor={SURFACE}>
+    <Box flexDirection="column" width={width} height={height} marginRight={2}>
       <SectionTitle title={title} hint={hint} tone={tone} width={width - 2} />
       {children}
     </Box>
@@ -158,7 +153,7 @@ function ActivityFeed({ state, width, height }: { state: TuiControlRoomState; wi
   const eventBudget = Math.max(0, height - 1 - entries.length);
   const recentEvents = eventBudget > 0 ? state.events.slice(-eventBudget) : [];
   return (
-    <Box flexDirection="column" width={width} height={height} backgroundColor={SURFACE}>
+    <Box flexDirection="column" width={width} height={height}>
       <SectionTitle title="Activity" hint={`${state.events.length} events`} tone={OK} width={width} />
       {entries.length === 0 && recentEvents.length === 0 ? <EmptyHint text="quiet · turns, messages, and run events land here" /> : null}
       {entries.map((entry) => (
@@ -230,7 +225,7 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
           );
         })}
       </Box>
-      <Box flexDirection="column" width={rightWidth} height={rows} marginLeft={2} backgroundColor={SURFACE}>
+      <Box flexDirection="column" width={rightWidth} height={rows} marginLeft={2}>
         <SectionTitle title="Detail" tone={BLUE} width={rightWidth} />
         {profile ? (
           <>
@@ -321,7 +316,7 @@ export function GoalsView({ state, width, height, selected }: { state: TuiContro
           );
         })}
       </Box>
-      <Box flexDirection="column" width={rightWidth} height={rows} marginLeft={2} backgroundColor={SURFACE}>
+      <Box flexDirection="column" width={rightWidth} height={rows} marginLeft={2}>
         <SectionTitle title={detail ? detail.id : "Detail"} hint={detail?.id === state.activeGoalId ? "active" : undefined} tone={ACCENT} width={rightWidth} />
         {detail === null ? <EmptyHint text="select a goal · enter activates it" /> : null}
         {detail ? (
@@ -525,7 +520,7 @@ export function HelpView({ width, height }: { width: number; height: number }) {
           </Text>
         ))}
       </Box>
-      <Box flexDirection="column" width={keysWidth} height={split ? rows : undefined} marginLeft={split ? 2 : 0} marginTop={split ? 0 : 1} backgroundColor={SURFACE}>
+      <Box flexDirection="column" width={keysWidth} height={split ? rows : undefined} marginLeft={split ? 2 : 0} marginTop={split ? 0 : 1}>
         <SectionTitle title="Keys" tone={VIOLET} width={keysWidth} />
         {HELP_KEYS.map(([key, description]) => (
           <Text key={key} wrap="truncate">
