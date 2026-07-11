@@ -34,7 +34,7 @@ import type { GoalAgentAvailability, GoalSecurityControls } from "../runtime/goa
 import { GoalRuntimeService } from "./goal-runtime-service";
 import { createWorkerEnvironment } from "../runtime/worker-environment";
 import { installNativeAuthCapsule } from "../runtime/native-auth-capsule";
-import { getAdapter, resolveAdapterId } from "../backends/registry";
+import { getAdapter, requiredContainmentSecurityGaps, resolveAdapterId } from "../backends/registry";
 import type { Job, Task } from "../contracts/durable";
 import type { AgentProfile, FleetProfile } from "../contracts/collaboration";
 import { AuthorityStore } from "../runtime/authority-store";
@@ -319,9 +319,15 @@ export class HeadlessDaemon {
     security: GoalSecurityControls = { authMode: agent.authMode, approvalPolicy: agent.approvalPolicy },
   ): GoalAgentAvailability {
     let executable = false;
+    let containmentBlocked = false;
     try {
       const adapter = getAdapter(resolveAdapterId(agent.backend));
       executable = !!adapter && Bun.which(adapter.probe.versionCommand[0]) !== null;
+      // A backend that cannot satisfy required outer containment can never run in
+      // a goal — goals are always required-contained and unsafe execution is
+      // rejected. Treat it as unavailable so the coordinator selects a runnable
+      // backend instead of dispatching delegations that fail-close every attempt.
+      containmentBlocked = !!adapter && requiredContainmentSecurityGaps(adapter).length > 0;
     } catch (error) {
       recordRuntimeDiagnostic("transport", "fleet-agent-probe", error, "warning");
       executable = false;
@@ -357,7 +363,7 @@ export class HeadlessDaemon {
     const recent = this.jobs.list().filter((job) => job.backend === resolveAdapterId(agent.backend)).slice(-20);
     const recentFailures = recent.filter((job) => job.state === "failed" || job.state === "timed_out").length;
     const activeTurns = sessions.filter((session) => session.state === "running" || session.state === "cancelling").length;
-    const health: GoalAgentAvailability["health"] = !executable
+    const health: GoalAgentAvailability["health"] = !executable || containmentBlocked
       ? "offline"
       : !authenticated ? "unhealthy" : rateLimitedUntil !== null && rateLimitedUntil > Date.now() ? "degraded" : "healthy";
     return { authenticated, health, rateLimitedUntil, activeTurns, recentFailures };

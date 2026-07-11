@@ -86,7 +86,13 @@ describe("hardened built-in command preparation", () => {
     expect(read).toContain("--ignore-user-config");
     expect(read).toContain("--ignore-rules");
     expect(read).toContain("--ephemeral");
-    expect(readConfig).toContain('trust_level="untrusted"');
+    expect(read).toContain("--strict-config");
+    // Codex >= 0.144 removed the `projects."<path>".trust_level` config field, and
+    // --strict-config makes an unknown field fatal. Untrusted execution is enforced
+    // by --sandbox, --ignore-user-config, --ignore-rules, and --ephemeral, so the
+    // deprecated override must NOT be emitted.
+    expect(readConfig).not.toContain("trust_level");
+    expect(readConfig).not.toContain("projects.");
     expect(readConfig).toContain("project_doc_max_bytes=0");
     expect(readConfig).toContain('web_search="disabled"');
     expect(readConfig).toContain("apps._default.enabled=false");

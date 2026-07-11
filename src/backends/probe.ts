@@ -32,7 +32,7 @@ export async function probeBackendAdapter(id: string, execute?: ProbeExecutor): 
   if (versionResult.error) return { ok: false, version: null, capabilities: adapter.capabilities, reason: versionResult.error.slice(0, 2_048) };
   if (versionResult.timedOut) return { ok: false, version: null, capabilities: adapter.capabilities, reason: "Version probe timed out." };
   if (versionResult.overflowed) return { ok: false, version: null, capabilities: adapter.capabilities, reason: "Version probe exceeded its output limit." };
-  if (versionResult.exitCode !== 0) return { ok: false, version: null, capabilities: adapter.capabilities, reason: `Version probe exited ${String(versionResult.exitCode)}.` };
+  if (versionResult.exitCode !== 0) return { ok: false, version: null, capabilities: adapter.capabilities, reason: `Version probe exited ${String(versionResult.exitCode)}.${probeDiagnostic(versionResult)}` };
   const version = parseVersion(`${versionResult.stdout}\n${versionResult.stderr}`);
   if (adapter.probe.minimumVersion && (!version || compareVersions(version, adapter.probe.minimumVersion) < 0)) {
     return {
@@ -148,6 +148,16 @@ async function readBounded(stream: ReadableStream<Uint8Array>, budget: { remaini
     }
   }
   return output + decoder.decode();
+}
+
+/** Surface a bounded slice of the probe's own output so a non-zero exit is
+ * diagnosable (e.g. a sandboxed backend printing why it could not start). */
+function probeDiagnostic(result: ProbeExecution): string {
+  const detail = `${result.stderr}\n${result.stdout}`
+    .replace(/\[[0-9;]*m/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return detail ? ` (${detail.slice(0, 400)})` : "";
 }
 
 function parseVersion(output: string) {

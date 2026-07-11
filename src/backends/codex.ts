@@ -96,7 +96,11 @@ export function codexRepositorySkillArguments(cwd: string) {
 /** Shared fail-closed policy for one-shot, resume, and app-server transports. */
 export function codexProjectPolicyArguments(cwd: string) {
   return [
-    "-c", `${tomlProjectKey(cwd)}.trust_level="untrusted"`,
+    // The project is kept untrusted by --sandbox (read-only/workspace-write),
+    // --ignore-user-config, --ignore-rules, and --ephemeral. Older Codex also
+    // accepted a `projects."<path>".trust_level="untrusted"` config override, but
+    // Codex >= 0.144 removed that field and --strict-config makes an unknown
+    // field fatal, so it is no longer emitted.
     "-c", "project_doc_max_bytes=0",
     "-c", "project_doc_fallback_filenames=[]",
     "-c", 'web_search="disabled"',
@@ -179,6 +183,3 @@ function realpathOrInput(path: string) {
   }
 }
 
-function tomlProjectKey(path: string) {
-  return `projects.${JSON.stringify(path)}`;
-}
