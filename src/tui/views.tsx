@@ -14,7 +14,7 @@ import {
   truncateDisplay,
   type TuiControlRoomState,
 } from "./model";
-import { ACCENT, BLUE, CHROME, ERR, LIST_OFFSET, MUTED, OK, SELECT_BG, SELECT_FG, SURFACE, VIOLET, WARN, goalStateGlyph } from "./theme";
+import { ACCENT, BLUE, CANVAS, CHROME, ERR, LIST_OFFSET, MUTED, OK, SELECT_BG, SELECT_FG, SURFACE, VIOLET, WARN, goalStateGlyph } from "./theme";
 
 export type ListMeta = { rows: number; start: number; total: number; paneWidth: number };
 
@@ -23,10 +23,15 @@ export type ListMeta = { rows: number; start: number; total: number; paneWidth: 
 export function OverviewView({ state, width, height }: { state: TuiControlRoomState; width: number; height: number }) {
   const rows = contentRows(height);
   const narrow = width < 84;
+  // Keep 2·cardHeight + 2 gutters + a >=3-row activity feed within `rows` even on
+  // a short terminal, so the feed never overflows into the card panels.
   const cardHeight = narrow
     ? 3
-    : Math.max(4, Math.min(6, Math.floor((rows - 5) / 2)));
-  const activityHeight = Math.max(3, rows - (narrow ? cardHeight * 4 : cardHeight * 2));
+    : Math.max(3, Math.min(6, Math.floor((rows - 4) / 2)));
+  // Wide mode reserves two rows for the CANVAS gutters below each card row.
+  const activityHeight = narrow
+    ? Math.max(3, rows - cardHeight * 4)
+    : Math.max(3, rows - cardHeight * 2 - 2);
   const cardWidth = narrow ? width - 4 : Math.floor((width - 6) / 2);
 
   const cards = [
@@ -37,13 +42,13 @@ export function OverviewView({ state, width, height }: { state: TuiControlRoomSt
   ];
 
   return (
-    <Box flexDirection="column" paddingX={2} height={rows} backgroundColor={SURFACE}>
+    <Box flexDirection="column" paddingX={2} height={rows} backgroundColor={CANVAS}>
       {narrow ? (
         <Box flexDirection="column">{cards}</Box>
       ) : (
         <>
-          <Box>{cards.slice(0, 2)}</Box>
-          <Box>{cards.slice(2)}</Box>
+          <Box marginBottom={1}>{cards.slice(0, 2)}</Box>
+          <Box marginBottom={1}>{cards.slice(2)}</Box>
         </>
       )}
       <ActivityFeed state={state} width={width - 4} height={activityHeight} />
@@ -53,7 +58,7 @@ export function OverviewView({ state, width, height }: { state: TuiControlRoomSt
 
 function Card({ title, hint, tone, width, height, children }: React.PropsWithChildren<{ title: string; hint?: string; tone: string; width: number; height: number }>) {
   return (
-    <Box flexDirection="column" width={width} height={height} marginRight={2}>
+    <Box flexDirection="column" width={width} height={height} marginRight={2} paddingX={1} backgroundColor={SURFACE}>
       <SectionTitle title={title} hint={hint} tone={tone} width={width - 2} />
       {children}
     </Box>
@@ -150,9 +155,10 @@ function CandidateCard({ state, width, height }: { state: TuiControlRoomState; w
 
 function ActivityFeed({ state, width, height }: { state: TuiControlRoomState; width: number; height: number }) {
   const entries = activityEntries(state, height - 1);
-  const recentEvents = state.events.slice(-Math.max(0, height - 1 - entries.length));
+  const eventBudget = Math.max(0, height - 1 - entries.length);
+  const recentEvents = eventBudget > 0 ? state.events.slice(-eventBudget) : [];
   return (
-    <Box flexDirection="column" width={width} height={height}>
+    <Box flexDirection="column" width={width} height={height} backgroundColor={SURFACE}>
       <SectionTitle title="Activity" hint={`${state.events.length} events`} tone={OK} width={width} />
       {entries.length === 0 && recentEvents.length === 0 ? <EmptyHint text="quiet · turns, messages, and run events land here" /> : null}
       {entries.map((entry) => (
@@ -204,8 +210,8 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
   const nameWidth = Math.max(10, Math.floor(leftWidth * 0.4));
 
   return (
-    <Box paddingX={2} height={rows} backgroundColor={SURFACE}>
-      <Box flexDirection="column" width={leftWidth}>
+    <Box paddingX={2} height={rows} backgroundColor={CANVAS}>
+      <Box flexDirection="column" width={leftWidth} height={rows} backgroundColor={SURFACE}>
         <SectionTitle title="Agents" hint={profile ? profile.name : "no profile"} tone={ACCENT} width={leftWidth} />
         <Text color={CHROME} wrap="truncate">  {"agent".padEnd(nameWidth)} {"backend".padEnd(9)} auth</Text>
         {agents.length === 0 ? <EmptyHint text="no agents · configure a fleet profile" /> : null}
@@ -224,7 +230,7 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
           );
         })}
       </Box>
-      <Box flexDirection="column" width={rightWidth} marginLeft={2}>
+      <Box flexDirection="column" width={rightWidth} height={rows} marginLeft={2} backgroundColor={SURFACE}>
         <SectionTitle title="Detail" tone={BLUE} width={rightWidth} />
         {profile ? (
           <>
@@ -295,8 +301,8 @@ export function GoalsView({ state, width, height, selected }: { state: TuiContro
   const timeline = detail && detail.id === state.activeGoalId ? activityEntries(state, timelineRows) : [];
 
   return (
-    <Box paddingX={2} height={rows} backgroundColor={SURFACE}>
-      <Box flexDirection="column" width={leftWidth}>
+    <Box paddingX={2} height={rows} backgroundColor={CANVAS}>
+      <Box flexDirection="column" width={leftWidth} height={rows} backgroundColor={SURFACE}>
         <SectionTitle title="Goals" hint={`${goals.length} known`} tone={BLUE} width={leftWidth} />
         <Text color={CHROME} wrap="truncate">  state · goal · objective</Text>
         {goals.length === 0 ? <EmptyHint text="no goals yet · type an objective below" /> : null}
@@ -315,7 +321,7 @@ export function GoalsView({ state, width, height, selected }: { state: TuiContro
           );
         })}
       </Box>
-      <Box flexDirection="column" width={rightWidth} marginLeft={2}>
+      <Box flexDirection="column" width={rightWidth} height={rows} marginLeft={2} backgroundColor={SURFACE}>
         <SectionTitle title={detail ? detail.id : "Detail"} hint={detail?.id === state.activeGoalId ? "active" : undefined} tone={ACCENT} width={rightWidth} />
         {detail === null ? <EmptyHint text="select a goal · enter activates it" /> : null}
         {detail ? (
@@ -509,8 +515,8 @@ export function HelpView({ width, height }: { width: number; height: number }) {
   const keysWidth = split ? contentWidth - commandWidth - 2 : contentWidth;
   const commandRows = split ? rows - 1 : Math.max(4, rows - HELP_KEYS.length - 3);
   return (
-    <Box paddingX={2} height={rows} flexDirection={split ? "row" : "column"} backgroundColor={SURFACE}>
-      <Box flexDirection="column" width={commandWidth}>
+    <Box paddingX={2} height={rows} flexDirection={split ? "row" : "column"} backgroundColor={CANVAS}>
+      <Box flexDirection="column" width={commandWidth} height={split ? rows : undefined} backgroundColor={SURFACE}>
         <SectionTitle title="Commands" tone={BLUE} width={commandWidth} />
         {HELP_COMMANDS.slice(0, Math.max(1, commandRows - 1)).map(([command, description]) => (
           <Text key={command} wrap="truncate">
@@ -519,7 +525,7 @@ export function HelpView({ width, height }: { width: number; height: number }) {
           </Text>
         ))}
       </Box>
-      <Box flexDirection="column" width={keysWidth} marginLeft={split ? 2 : 0} marginTop={split ? 0 : 1}>
+      <Box flexDirection="column" width={keysWidth} height={split ? rows : undefined} marginLeft={split ? 2 : 0} marginTop={split ? 0 : 1} backgroundColor={SURFACE}>
         <SectionTitle title="Keys" tone={VIOLET} width={keysWidth} />
         {HELP_KEYS.map(([key, description]) => (
           <Text key={key} wrap="truncate">

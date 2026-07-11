@@ -77,11 +77,11 @@ function TabLabel({ segment, active }: { segment: TabSegment; active: boolean })
   const base = segment.badge > 0 ? segment.label.slice(0, -String(segment.badge).length - 1) : segment.label;
   // No horizontal padding: the tab's hit-test columns are derived from the raw
   // label width, so the highlight must not change the rendered character count.
-  // Active tab = dark SURFACE fill + bold blue + underline, matching the tpn
-  // "darker fill" active-tab treatment and linking it to its SURFACE panel.
+  // Active tab = SURFACE fill + bright cyan ACCENT + bold + underline so it reads
+  // clearly against the dim inactive labels and links to its SURFACE panel.
   return (
     <Text>
-      <Text bold={active} underline={active} color={active ? BLUE : MUTED} backgroundColor={active ? SURFACE : undefined}>{base}</Text>
+      <Text bold={active} underline={active} color={active ? ACCENT : MUTED} backgroundColor={active ? SURFACE : undefined}>{base}</Text>
       {segment.badge > 0 ? (
         <>
           <Text color={CHROME}>·</Text>
@@ -148,19 +148,17 @@ export function PromptBar({
     return () => clearInterval(interval);
   }, []);
   const accent = connected ? ACCENT : WARN;
-  const innerWidth = Math.max(1, width - 7);
+  // Bordered input box: marginX (2 each) + border (1 each) + paddingX (1 each)
+  // consume 8 columns, so the inner text has `width - 8` to work with.
+  const innerWidth = Math.max(1, width - 8);
+  const shown = input ? tail(input, innerWidth - 3) : placeholder;
   return (
-    <Box marginX={2} paddingY={0} flexShrink={0}>
-      <Text color={accent}>▎</Text>
-      <Box backgroundColor={SURFACE} paddingX={1} width={innerWidth}>
-        <Text wrap="truncate">
-          <Text bold color={accent}>❯ </Text>
-          {input
-            ? <Text color="white">{tail(input, innerWidth - 4)}</Text>
-            : <Text color={CHROME}>{placeholder}</Text>}
-          <Text color={cursorVisible ? accent : SURFACE}>▌</Text>
-        </Text>
-      </Box>
+    <Box marginX={2} width={width - 4} borderStyle="round" borderColor={accent} paddingX={1} flexShrink={0}>
+      <Text wrap="truncate">
+        <Text bold color={accent}>{"> "}</Text>
+        <Text color={input ? "white" : CHROME}>{shown}</Text>
+        <Text color={accent}>{cursorVisible ? "█" : " "}</Text>
+      </Text>
     </Box>
   );
 }

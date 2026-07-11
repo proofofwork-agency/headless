@@ -9,10 +9,12 @@ export const WARN = "#fbbf24";
 export const ERR = "#f87171";
 export const VIOLET = "#c4b5fd";
 
-// Elevation model (matches the tpn TUI): the terminal background is L0, content
-// panels and the active tab are shaded with the neutral dark SURFACE (L1) so
-// whole areas read as raised regions, and the selected row sits one step above
-// that on SELECT_BG (L2).
+// Elevation model: each view sits on the dark CANVAS backdrop (L0); its sections
+// are raised as lighter SURFACE panels (L1) separated by CANVAS gutters; and the
+// selected row / active tab sit one step above that (L2). Two distinct grays give
+// the sections clear light/dark separation regardless of the terminal theme.
+/** Dark backdrop behind a view's panels; the gutters between sections. */
+export const CANVAS = "#161619";
 /** Raised fill for the selected list row, sitting above a SURFACE panel. */
 export const SELECT_BG = "#313a63";
 /** Brighter foreground for text sitting on {@link SELECT_BG}. */
@@ -39,7 +41,9 @@ export const TAB_ROW = 3;
 export const CONTENT_TOP = 5;
 /** Rows of view chrome (section title + column header) above selectable list rows. */
 export const LIST_OFFSET = 2;
-/** Terminal rows consumed by fixed chrome outside the content area. */
+/** Terminal rows consumed by fixed chrome outside the content area: header,
+ * two spacers, tab bar (4 above) + status strip, the 3-row bordered prompt, and
+ * the footer (5 below). */
 export const FIXED_ROWS = 9;
 
 export function goalStateGlyph(state: string): { glyph: string; tone: string } {
