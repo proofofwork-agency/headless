@@ -9,6 +9,13 @@ export const WARN = "#fbbf24";
 export const ERR = "#f87171";
 export const VIOLET = "#c4b5fd";
 
+/** Highlight fill for the selected list row and the active tab. */
+export const SELECT_BG = "#2b3154";
+/** Brighter foreground for secondary text sitting on {@link SELECT_BG}. */
+export const SELECT_FG = "#c7d0f0";
+/** Near-black ink for text printed on a saturated pill background. */
+export const INK = "#0b0b12";
+
 export type TuiView = "overview" | "fleet" | "goals" | "approvals" | "events" | "help";
 
 export const TUI_VIEWS: TuiView[] = ["overview", "fleet", "goals", "approvals", "events", "help"];

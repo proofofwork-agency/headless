@@ -14,7 +14,7 @@ import {
   truncateDisplay,
   type TuiControlRoomState,
 } from "./model";
-import { ACCENT, BLUE, CHROME, ERR, LIST_OFFSET, MUTED, OK, VIOLET, WARN, goalStateGlyph } from "./theme";
+import { ACCENT, BLUE, CHROME, ERR, LIST_OFFSET, MUTED, OK, SELECT_BG, SELECT_FG, VIOLET, WARN, goalStateGlyph } from "./theme";
 
 export type ListMeta = { rows: number; start: number; total: number; paneWidth: number };
 
@@ -212,13 +212,15 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
         {visible.map((agent, index) => {
           const isSelected = meta.start + index === selected;
           return (
-            <Text key={agent.id} wrap="truncate">
-              <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
-              <Text color={agent.tone}>{agent.glyph} </Text>
-              <Text bold={isSelected} color={agent.enabled ? "white" : MUTED}>{truncateDisplay(agent.name, nameWidth).padEnd(nameWidth)}</Text>
-              <Text color={MUTED}> {agent.backend.padEnd(9)}</Text>
-              <Text color={agent.authTone}> {agent.auth}</Text>
-            </Text>
+            <Box key={agent.id} width={leftWidth} backgroundColor={isSelected ? SELECT_BG : undefined}>
+              <Text wrap="truncate">
+                <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
+                <Text color={agent.tone}>{agent.glyph} </Text>
+                <Text bold={isSelected} color={agent.enabled ? "white" : MUTED}>{truncateDisplay(agent.name, nameWidth).padEnd(nameWidth)}</Text>
+                <Text color={isSelected ? SELECT_FG : MUTED}> {agent.backend.padEnd(9)}</Text>
+                <Text color={agent.authTone}> {agent.auth}</Text>
+              </Text>
+            </Box>
           );
         })}
       </Box>
@@ -301,13 +303,15 @@ export function GoalsView({ state, width, height, selected }: { state: TuiContro
         {visible.map((goal, index) => {
           const isSelected = meta.start + index === selected;
           return (
-            <Text key={goal.id} wrap="truncate">
-              <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
-              <Text color={goal.tone}>{goal.glyph} </Text>
-              <Text bold={isSelected} color={goal.active ? ACCENT : "white"}>{goal.id}</Text>
-              <Text color={CHROME}> · </Text>
-              <Text color={MUTED}>{truncateDisplay(goal.objective, Math.max(8, leftWidth - goal.id.length - 10))}</Text>
-            </Text>
+            <Box key={goal.id} width={leftWidth} backgroundColor={isSelected ? SELECT_BG : undefined}>
+              <Text wrap="truncate">
+                <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
+                <Text color={goal.tone}>{goal.glyph} </Text>
+                <Text bold={isSelected} color={goal.active ? ACCENT : "white"}>{goal.id}</Text>
+                <Text color={isSelected ? SELECT_FG : CHROME}> · </Text>
+                <Text color={isSelected ? SELECT_FG : MUTED}>{truncateDisplay(goal.objective, Math.max(8, leftWidth - goal.id.length - 10))}</Text>
+              </Text>
+            </Box>
           );
         })}
       </Box>
@@ -382,15 +386,17 @@ export function ApprovalsView({ state, width, height, selected }: { state: TuiCo
       {visible.map((approval, index) => {
         const isSelected = meta.start + index === selected;
         return (
-          <Text key={approval.id} wrap="truncate">
-            <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
-            <Text color={WARN}>! </Text>
-            <Text bold={isSelected} color="white">{truncateDisplay(approval.id, idWidth).padEnd(idWidth)}</Text>
-            <Text color={VIOLET}> {approval.kind.padEnd(10)}</Text>
-            <Text color={MUTED}> {truncateDisplay(approval.requestedBy, 14).padEnd(14)}</Text>
-            <Text color={CHROME}> {approval.age.padEnd(5)}</Text>
-            <Text color={MUTED}> {truncateDisplay(approval.summary, Math.max(8, contentWidth - idWidth - 52))}</Text>
-          </Text>
+          <Box key={approval.id} width={contentWidth} backgroundColor={isSelected ? SELECT_BG : undefined}>
+            <Text wrap="truncate">
+              <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
+              <Text color={WARN}>! </Text>
+              <Text bold={isSelected} color="white">{truncateDisplay(approval.id, idWidth).padEnd(idWidth)}</Text>
+              <Text color={VIOLET}> {approval.kind.padEnd(10)}</Text>
+              <Text color={isSelected ? SELECT_FG : MUTED}> {truncateDisplay(approval.requestedBy, 14).padEnd(14)}</Text>
+              <Text color={isSelected ? SELECT_FG : CHROME}> {approval.age.padEnd(5)}</Text>
+              <Text color={isSelected ? SELECT_FG : MUTED}> {truncateDisplay(approval.summary, Math.max(8, contentWidth - idWidth - 52))}</Text>
+            </Text>
+          </Box>
         );
       })}
       {detail ? (

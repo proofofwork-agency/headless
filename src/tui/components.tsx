@@ -8,8 +8,10 @@ import {
   CHROME,
   connectionTone,
   ERR,
+  INK,
   MUTED,
   OK,
+  SELECT_BG,
   SURFACE,
   WARN,
   type TuiView,
@@ -19,8 +21,13 @@ export function ChromeHeader({ state, width }: { state: TuiControlRoomState; wid
   const tone = connectionTone(state.connection);
   const agents = state.fleetHealth.length;
   const pending = state.approvals.filter((approval) => approval.status === "pending").length;
-  const right = `● ${state.connection} · ${state.orchestration.mode} · agents ${agents} · approvals ${pending} · queue ${state.orchestration.queuedJobs}`;
-  const leftWidth = Math.max(18, width - right.length - 5);
+  const queued = state.orchestration.queuedJobs;
+  const connection = state.connection.toUpperCase();
+  // Plain-text estimate of the rendered right column, used only to size the
+  // left column so the two never collide.
+  const right = ` ${connection}  ${state.orchestration.mode} · agents ${agents} · approvals ${pending} · queue ${queued}`;
+  const leftWidth = Math.max(18, width - right.length - 4);
+  const sep = <Text color={CHROME}>{" · "}</Text>;
   return (
     <Box paddingX={2} justifyContent="space-between">
       <Box width={leftWidth}>
@@ -32,17 +39,18 @@ export function ChromeHeader({ state, width }: { state: TuiControlRoomState; wid
         </Text>
       </Box>
       <Text wrap="truncate">
-        <Text color={tone}>● </Text>
-        <Text color={tone}>{state.connection}</Text>
-        <Text color={CHROME}> · </Text>
-        <Text color={state.orchestration.enabled ? ACCENT : MUTED}>{state.orchestration.mode}</Text>
-        <Text color={CHROME}> · </Text>
+        <Text backgroundColor={tone} color={INK} bold>{` ${connection} `}</Text>
+        <Text color={CHROME}>{"  "}</Text>
+        <Text bold={state.orchestration.enabled} color={state.orchestration.enabled ? ACCENT : MUTED}>{state.orchestration.mode}</Text>
+        {sep}
         <Text color={MUTED}>agents </Text>
         <Text color="white">{agents}</Text>
-        <Text color={CHROME}> · </Text>
-        <Text color={pending > 0 ? WARN : MUTED}>approvals {pending}</Text>
-        <Text color={CHROME}> · </Text>
-        <Text color={MUTED}>queue {state.orchestration.queuedJobs}</Text>
+        {sep}
+        <Text color={pending > 0 ? WARN : MUTED}>approvals </Text>
+        <Text bold={pending > 0} color={pending > 0 ? WARN : "white"}>{pending}</Text>
+        {sep}
+        <Text color={MUTED}>queue </Text>
+        <Text color="white">{queued}</Text>
       </Text>
     </Box>
   );
@@ -68,9 +76,11 @@ export function TabBar({ segments, active, width }: { segments: TabSegment[]; ac
 
 function TabLabel({ segment, active }: { segment: TabSegment; active: boolean }) {
   const base = segment.badge > 0 ? segment.label.slice(0, -String(segment.badge).length - 1) : segment.label;
+  // No horizontal padding: the tab's hit-test columns are derived from the raw
+  // label width, so the highlight must not change the rendered character count.
   return (
     <Text>
-      <Text bold={active} color={active ? BLUE : MUTED} underline={active}>{base}</Text>
+      <Text bold={active} color={active ? "white" : MUTED} backgroundColor={active ? SELECT_BG : undefined}>{base}</Text>
       {segment.badge > 0 ? (
         <>
           <Text color={CHROME}>·</Text>
@@ -109,12 +119,12 @@ export function EmptyHint({ text }: { text: string }) {
 export function StatusStrip({ state, working, width }: { state: TuiControlRoomState; working: boolean; width: number }) {
   const failed = /failed|error|lost/i.test(state.status);
   const tone = failed ? ERR : working ? WARN : OK;
-  const label = failed ? "error" : working ? "working" : "ready";
+  const label = failed ? "ERROR" : working ? "WORKING" : "READY";
   return (
     <Box paddingX={2} flexShrink={0}>
       <Text wrap="truncate">
-        <Text bold color={tone}>{label.padEnd(8)}</Text>
-        <Text color="white">{truncateDisplay(state.status, Math.max(8, width - 14))}</Text>
+        <Text bold backgroundColor={tone} color={INK}>{` ${label} `}</Text>
+        <Text color="white">{`  ${truncateDisplay(state.status, Math.max(8, width - label.length - 16))}`}</Text>
       </Text>
     </Box>
   );
@@ -136,16 +146,18 @@ export function PromptBar({
     const interval = setInterval(() => setCursorVisible((visible) => !visible), 530);
     return () => clearInterval(interval);
   }, []);
-  const innerWidth = Math.max(1, width - 6);
+  const accent = connected ? ACCENT : WARN;
+  const innerWidth = Math.max(1, width - 7);
   return (
-    <Box marginX={2} backgroundColor={SURFACE} paddingX={1} paddingY={0} flexShrink={0}>
-      <Box width={innerWidth}>
+    <Box marginX={2} paddingY={0} flexShrink={0}>
+      <Text color={accent}>▎</Text>
+      <Box backgroundColor={SURFACE} paddingX={1} width={innerWidth}>
         <Text wrap="truncate">
-          <Text bold color={connected ? ACCENT : WARN}>❯ </Text>
+          <Text bold color={accent}>❯ </Text>
           {input
             ? <Text color="white">{tail(input, innerWidth - 4)}</Text>
             : <Text color={CHROME}>{placeholder}</Text>}
-          <Text color={cursorVisible ? BLUE : SURFACE}>▌</Text>
+          <Text color={cursorVisible ? accent : SURFACE}>▌</Text>
         </Text>
       </Box>
     </Box>
