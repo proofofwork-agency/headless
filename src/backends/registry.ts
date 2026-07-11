@@ -4,7 +4,7 @@ import { buildClaudeCommand } from "./claude";
 import { buildCodexCommand } from "./codex";
 import { buildGrokCommand, parseGrokJsonl } from "./grok";
 import { parseClaudeStreamJson, parseCodexJson, type JsonParseResult } from "./json";
-import { buildOpenCodeCommand, nextOpenCodeEnv, OPENCODE_CREDENTIAL_PREFIXES, parseOpenCodeJsonl } from "./opencode";
+import { buildOpenCodeCommand, nextOpenCodeEnv, openCodeColdStartNeedsRetry, OPENCODE_CREDENTIAL_PREFIXES, parseOpenCodeJsonl } from "./opencode";
 import { backendMetadata, type BackendMetadata } from "./metadata";
 import { normalizeBackend, type Backend } from "./ids";
 import type { AdapterCapabilities } from "../contracts/adapter";
@@ -40,6 +40,12 @@ export type BackendAdapter = {
   buildCommand: (opts: ExecOptions, cwd: string) => string[];
   buildResumeCommand?: (opts: ExecOptions, cwd: string, nativeSessionId: string) => string[];
   parse: (stdout: string) => JsonParseResult;
+  /**
+   * Optional one-shot cold-start retry hook. Given a finished run, returns true if
+   * it was an init turn that produced no assistant output and the exact command
+   * should be re-run once in the same (now-warm) worker before classifying failure.
+   */
+  retryColdStart?: (result: { exitCode: number | null; stdout?: string; stderr?: string }) => boolean;
 };
 
 const builtInBackendAdapters = {
@@ -61,6 +67,7 @@ const builtInBackendAdapters = {
     buildEnv: nextOpenCodeEnv,
     buildCommand: buildOpenCodeCommand,
     parse: parseOpenCodeJsonl,
+    retryColdStart: openCodeColdStartNeedsRetry,
   },
   "claude-code": {
     id: "claude-code",

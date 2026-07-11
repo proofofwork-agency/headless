@@ -4,7 +4,7 @@ import { backendAdapters, buildBackendEnv } from "../src/backends/registry";
 import { buildGrokCommand, parseGrokJsonl } from "../src/backends/grok";
 import { GROK_HEADLESS_SYSTEM_PROMPT, GROK_READ_TOOLS, GROK_WRITE_TOOLS } from "../src/runtime/grok-isolation";
 import { parseClaudeStreamJson, parseCodexJson, parseGenericAgentJson, tokenCount } from "../src/backends/json";
-import { buildOpenCodeCommand, nextOpenCodeEnv, OPENCODE_CONFIG_CONTENT, parseOpenCodeJsonl } from "../src/backends/opencode";
+import { buildOpenCodeCommand, nextOpenCodeEnv, openCodeColdStartNeedsRetry, OPENCODE_CONFIG_CONTENT, parseOpenCodeJsonl } from "../src/backends/opencode";
 
 describe("backend normalization", () => {
   test("accepts canonical ids and aliases", () => {
@@ -52,6 +52,27 @@ describe("opencode backend helpers", () => {
     expect(p.output).toContain("hi");
     // tokens may be summed or null depending on fixture shape; just assert no crash + text
     expect(typeof p.tokens === "number" || p.tokens === null).toBe(true);
+  });
+
+  test("openCodeColdStartNeedsRetry detects cold starts without assistant output", () => {
+    const stepMarkers = [
+      JSON.stringify({ type: "step_start", part: { type: "step-start" } }),
+      JSON.stringify({ type: "step_finish", part: { type: "step-finish", tokens: { output: 0 } } }),
+    ].join("\n");
+    const withText = [
+      JSON.stringify({ type: "step_start", part: { type: "step-start" } }),
+      JSON.stringify({ type: "message.part.updated", part: { type: "text", text: "READY", time: { end: 1 } } }),
+    ].join("\n");
+    // >= 1.17: exit 0, step markers, no text part -> retry
+    expect(openCodeColdStartNeedsRetry({ exitCode: 0, stdout: stepMarkers })).toBe(true);
+    // <= 1.15: exit 0, empty stdout, migration banner on stderr -> retry
+    expect(openCodeColdStartNeedsRetry({ exitCode: 0, stdout: "", stderr: "sqlite-migration:done\nDatabase migration complete." })).toBe(true);
+    // a real answer -> no retry
+    expect(openCodeColdStartNeedsRetry({ exitCode: 0, stdout: withText })).toBe(false);
+    // a non-zero exit is a genuine failure, not a cold start -> no retry
+    expect(openCodeColdStartNeedsRetry({ exitCode: 1, stdout: stepMarkers })).toBe(false);
+    // empty stdout without the migration banner is not a recognizable cold start
+    expect(openCodeColdStartNeedsRetry({ exitCode: 0, stdout: "", stderr: "" })).toBe(false);
   });
 });
 

@@ -340,7 +340,16 @@ async function runBackendProcess(
   };
   options.signal?.addEventListener("abort", abort, { once: true });
 
-  try {
+  const onOverflow = () => {
+    overflowed = true;
+    stop();
+  };
+  const stream = safeStreamCallback(options.onStdoutChunk);
+  // Spawn the (identical) command once and read its bounded streams. Reused for a
+  // single cold-start retry in the same worker; the deadline timer is shared across
+  // both attempts, and `stop()` always targets the current process.
+  const spawnAndRead = async () => {
+    stopping = null;
     process = spawn(wrapped.cmd, {
       cwd,
       env,
@@ -350,30 +359,42 @@ async function runBackendProcess(
       detached: true,
     });
     activeProcs.add(process);
-    timeoutHandle = setTimeout(() => {
-      timedOut = true;
-      stop();
-    }, timeoutMs);
-    timeoutHandle.unref?.();
 
     if (adapter.stdinPrompt && process.stdin && typeof process.stdin !== "number") {
       process.stdin.write(`${options.prompt}\n`);
       process.stdin.end();
     }
 
-    const onOverflow = () => {
-      overflowed = true;
-      stop();
-    };
-    const stream = safeStreamCallback(options.onStdoutChunk);
-    const [exitCode, stdoutRead, stderrRead] = await Promise.all([
+    return Promise.all([
       process.exited,
-      readStreamCapped(process.stdout as ReadableStream<Uint8Array>, STREAM_CAP_BYTES, onOverflow, stream?.push)
-        .finally(() => stream?.finish()),
+      readStreamCapped(process.stdout as ReadableStream<Uint8Array>, STREAM_CAP_BYTES, onOverflow, stream?.push),
       // stderr is retained separately and redacted as one bounded value below.
       // Sending it through the stdout callback would misclassify durable events.
       readStreamCapped(process.stderr as ReadableStream<Uint8Array>, STREAM_CAP_BYTES, onOverflow),
     ]);
+  };
+
+  try {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      stop();
+    }, timeoutMs);
+    timeoutHandle.unref?.();
+
+    let [exitCode, stdoutRead, stderrRead] = await spawnAndRead();
+    // One-shot cold-start retry: a fresh worker's first init turn (e.g. opencode's
+    // first run on a new data dir) can exit 0 with no assistant output. Re-run the
+    // exact command once in the same, now-warm worker — within the deadline and only
+    // when the run wasn't torn down — so this one-shot path matches the native
+    // session path instead of surfacing an empty cold start as a failure.
+    if (
+      !timedOut && !cancelled && !overflowed &&
+      Date.now() - started < timeoutMs &&
+      adapter.retryColdStart?.({ exitCode, stdout: stdoutRead.text, stderr: stderrRead.text })
+    ) {
+      if (process) activeProcs.delete(process);
+      [exitCode, stdoutRead, stderrRead] = await spawnAndRead();
+    }
     const durationMs = Date.now() - started;
     const parsed = normalizeAdapterResult(adapter.parse(stdoutRead.text), adapter.id);
     const callbackFailures = stream?.failureCount() ?? 0;
@@ -425,7 +446,7 @@ async function runBackendProcess(
       usage: parsed.usage,
       durationMs,
       exitCode,
-      signal: process.signalCode ?? null,
+      signal: (process as Subprocess | null)?.signalCode ?? null,
       timedOut,
       sandboxed: wrapped.sandboxed,
       sandboxReason: wrapped.reason,
@@ -436,6 +457,7 @@ async function runBackendProcess(
   } catch (error) {
     return failedResult(options.backend, cancelled ? "CANCELLED" : "PROCESS_ERROR", messageOf(error), Date.now() - started, containment, cancelled ? "cancelled" : "failed", wrapped, worker);
   } finally {
+    stream?.finish();
     if (timeoutHandle) clearTimeout(timeoutHandle);
     options.signal?.removeEventListener("abort", abort);
     const pendingTermination = stopping as ReturnType<typeof terminateProcessTree> | null;

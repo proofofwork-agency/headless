@@ -172,6 +172,28 @@ export function nextOpenCodeEnv(env: NodeJS.ProcessEnv = process.env, opts: Pick
   };
 }
 
+/**
+ * True when an opencode run finished cleanly (exit 0) but produced **no assistant
+ * text** — opencode's one-time, fresh-data-dir cold start. Callers retry the exact
+ * command once in the same (now-warm) worker, which yields the real turn. Covers:
+ *  - opencode ≤ 1.15: the DB-migration run exits 0 with empty stdout and a
+ *    `sqlite-migration:done` / `Database migration complete.` banner on stderr.
+ *  - opencode ≥ 1.17: the init run emits `step_start`/`step_finish` on stdout but
+ *    no `text` part (the banner is gone), so key off the parsed output instead.
+ * A retry (not just reclassification) is required because the cold-start turn has
+ * no assistant output — the answer only exists on the second, warm run.
+ */
+export function openCodeColdStartNeedsRetry(result: { exitCode: number | null; stdout?: string; stderr?: string }) {
+  if (result.exitCode !== 0) return false;
+  const stdout = result.stdout ?? "";
+  if (!stdout.trim()) {
+    const diagnostic = result.stderr ?? "";
+    return diagnostic.includes("Performing one time database migration")
+      || (diagnostic.includes("sqlite-migration:done") && diagnostic.includes("Database migration complete."));
+  }
+  return parseOpenCodeJsonl(stdout).output.trim() === "";
+}
+
 export function parseOpenCodeJsonl(stdout: string): OpenCodeJsonlParseResult {
   const output = textCollector();
   const errors: string[] = [];
