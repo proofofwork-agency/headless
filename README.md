@@ -1,341 +1,311 @@
-# Headless
+# Headless v0.2
 
-**A contained, auditable runner for coding agents.** Headless gives you one normalized way to run OpenCode, Claude Code, Codex, and the Grok CLI from scripts, other tools, or an OpenCode plugin — with defense-in-depth containment and a tamper-evident local ledger of everything that happened.
+Headless is a local, project-scoped control plane for running AI coding CLIs and collaborative fleets. It normalizes OpenCode, Claude Code, Codex, and Grok Build behind one structured result, keeps their processes hidden behind a daemon-owned control plane, contains workers at the operating-system boundary, and records activity in an external hash-chained ledger.
 
-Two properties are non-negotiable:
+Version 0.2 is intentionally breaking. Required containment is the default; an unavailable sandbox is an error, never an automatic downgrade.
 
-- **Containment** — a read-only run cannot modify your project, and a write run can only ever produce a reviewable diff (never touch your working tree). Enforced in up to three layers (app-level tool denies, an OS sandbox on macOS, and git-worktree isolation for writes).
-- **Auditability** — every run is recorded to a hash-chained `.headless` JSONL ledger with secret redaction, so you can replay exactly what each agent did.
+See [CHANGELOG.md](./CHANGELOG.md) for the migration-facing release summary.
 
-The core lives in `src/`. The CLI and the OpenCode plugin are thin adapters over that core.
+## Platform requirements
 
----
+- Bun 1.1 or newer.
+- macOS with `/usr/bin/sandbox-exec`, or Linux with a working `bubblewrap` (`bwrap`) installation.
+- A supported backend CLI on `PATH`.
+- By default, a native subscription login already established with that CLI. Headless copies only the selected backend's allowlisted login state into a temporary auth capsule after project trust is granted.
+- API keys are needed only when `authMode: "broker"` (or `--auth-mode broker`) is selected explicitly.
 
-## Requirements
+Windows returns the stable `UNSUPPORTED_PLATFORM` result before a backend is launched.
 
-- **[Bun](https://bun.sh)** — the runtime. Everything runs on Bun; there is no Node build.
-- **The backend CLIs you intend to use**, installed and authenticated (see [Backends & authentication](#backends--authentication)):
-  - `opencode` — [opencode.ai](https://opencode.ai)
-  - `claude` — Claude Code
-  - `codex` — OpenAI Codex CLI
-  - `grok` — Grok CLI
-- **macOS** is recommended for the strongest containment (the OS sandbox is macOS-only); Linux/Windows fall back to app-level containment.
+## Install and verify
 
-Headless has **zero runtime dependencies** — everything is Bun/Node built-ins. `@opencode-ai/plugin` is a dev/peer dependency, needed only when loading the OpenCode plugin.
-
----
-
-## Install
+From a published package:
 
 ```bash
-git clone https://github.com/proofofwork-agency/headless.git
-cd headless
-bun install
-bun run check   # typecheck + full test suite (should be green)
+bun add -g @proofofwork-agency/headless@0.2.0
+headless --version
 ```
 
-During development, invoke the CLI directly with Bun:
+From this checkout:
 
 ```bash
-bun src/cli.ts exec --backend opencode --json "say OK"
-```
-
-To build distributable JS + type declarations into `dist/` (and expose the `headless` / `hless` bins):
-
-```bash
+bun install --frozen-lockfile --ignore-scripts
+bun run check
 bun run build
+bun run smoke:pack
 ```
 
----
+`smoke:pack` packs both npm packages, verifies their allowlists against the generated `dist` trees, installs the tarballs into a clean temporary consumer, performs an isolated scratch-prefix `npm link`, and invokes only the published CLI, alias, doctor, TUI, MCP, daemon, and plugin entrypoints.
 
 ## Quick start
 
 ```bash
-# Read-only run (default) — the agent can read your project but cannot modify it
-bun src/cli.ts exec --backend claude "Summarize what src/runner/simple.ts does"
+# Trust is an explicit, one-time decision for the canonical project root.
+headless project trust grant --cwd .
 
-# Cap the timeout, get the full structured result as JSON
-bun src/cli.ts exec --backend codex --timeout-ms 60000 --json "List the exported functions in src/index.ts"
+# Required containment and native-login authentication are implicit.
+# Omitting --model uses the backend CLI's configured default. For OpenCode,
+# Headless safely extracts only the scalar global model; it never loads host config.
+headless exec --backend opencode --json "Summarize this project"
 
-# Contained write — runs in a throwaway git worktree and returns a DIFF; your tree is untouched
-bun src/cli.ts exec --backend grok --mode write --json "Add a docstring to the exec() function"
+headless exec --backend claude-code --model claude-sonnet-4-5 \
+  --approval-policy ask --timeout-ms 60000 --json "List the public API"
+
+# API-key brokering is an explicit hardened mode.
+headless exec --backend codex --auth-mode broker --json "Review the parser"
+
+# The only local containment bypass. It is marked unsafe in the result/ledger.
+# Approval bypass does not remove Headless's outer containment or gates.
+headless exec --backend codex --unsafe-no-sandbox --json "Say OK"
 ```
 
-Exit code is `0` when the run succeeded (`ok: true`) and `1` otherwise.
+The CLI connects to the authenticated daemon for the canonical `--cwd` project root, starting an embedded daemon when necessary. `headless daemon serve` runs it explicitly. Use `headless --help` for the current command and flag surface, including durable sessions, workflows, councils, the TUI, event snapshots, and release gates.
 
----
+### Backends
 
-## CLI reference
+| Backend | Aliases | Model | Agent | Write |
+| --- | --- | --- | --- | --- |
+| `opencode` | `headless-opencode` | yes | yes | yes |
+| `claude-code` | `claude` | yes | no | yes |
+| `codex` | `codex-cli` | yes | no | yes |
+| `grok-build` | `grok` | yes | yes | yes |
 
-```
-headless (hless) — normalized headless runner for coding CLIs
+Adapter capabilities are runtime metadata. Direct calls to `registerAdapter`, `registerProvider`, and `registerPricing` affect only that JavaScript process. A detached daemon loads extensions only from an explicit trusted startup config; executable paths are never accepted in `RunRequest` or any daemon RPC.
 
-Commands:
-  exec | run    Run one prompt on a backend and return a normalized result.
-  launch <t>    Launch a backend helper (opencode serve, a pure worker, a grok smoke).
-  --help  | -h  Show help.
-  --version | -V  Print the Headless version.
-```
+The Grok command adapter and session driver implement read/write and resume, but Grok 0.2.93 cannot yet satisfy Headless's required lifetime containment invariant: it can discover project controls created after launch. Required Grok runs therefore return `BACKEND_UNSUPPORTED` before authentication or subprocess launch. The table describes adapter capabilities, not a release-gate exemption.
 
-### `exec` / `run`
+### Authentication and approvals
 
-```bash
-bun src/cli.ts exec --backend <backend> [options] "your prompt"
-```
+`native-login` is the default for runs, durable sessions, goals, workflows, councils, and fleet profiles. It uses the official CLI's existing account without copying the real home directory or unrelated credentials into a worker. Native runs are reported as `network: "provider-direct"`, `credentialAccess: "backend-native"`, and `cost.amountUsd: null` unless the CLI reports an actual charge. `broker` keeps the previous short-lived broker-token model, denies direct provider egress, and enforces API-cost bounds.
 
-| Flag | Values | Default | Notes |
-| --- | --- | --- | --- |
-| `--backend` | see [Backends](#backends--authentication) | `opencode` | Backend id or alias. Unknown values error clearly. |
-| `--mode` | `read-only`, `write` | `read-only` | `write` is diff-only and git-required — see [Modes](#modes). |
-| `--model` | provider/model string | backend default | Passed to the backend CLI (all four honor it). |
-| `--agent` | agent name | — | Honored by `opencode` and `grok`; ignored by `claude`/`codex`. |
-| `--cwd` | path | current dir | Working directory the agent reads/operates in. |
-| `--timeout-ms` | integer | 180000 | Hard timeout; the process tree is killed and the result is marked `timedOut`. |
-| `--json` / `-j` | — | off | Print the full structured result as JSON instead of just the answer text. |
-| `--` | — | — | Everything after `--` is the verbatim prompt (useful for prompts starting with `-`). |
+Claude on macOS currently requires a supported regular-file login state such as `~/.claude/.credentials.json`. A login-keychain-only account cannot be discovered from the isolated worker under required default-deny Seatbelt containment. Headless returns `NATIVE_AUTH_UNAVAILABLE` instead of forwarding `CLAUDE_CODE_OAUTH_TOKEN`, exposing the real `HOME`, exporting keychain data, or weakening Seatbelt; use broker mode when no supported regular-file login exists.
 
-The prompt is the positional argument (or everything after `--`). Passing more than one positional, or a flag with no value, is a friendly usage error.
+OpenCode is handled deliberately: when `model` is omitted, Headless performs a bounded, canonical, no-symlink read of `~/.config/opencode/opencode.json` or `opencode.jsonc`, validates only its scalar `model`, and passes that value explicitly as `--model`. It does not copy or activate the host config, so its plugins, MCP servers, commands, permissions, and other fields cannot become worker configuration. A custom host `XDG_CONFIG_HOME` or `OPENCODE_CONFIG` is intentionally ignored; specify `--model` explicitly when the safe fixed global files contain no model. Missing, malformed, oversized, linked, non-owner, or unsafe defaults return `NATIVE_AUTH_UNAVAILABLE` before OpenCode starts. The selected scalar is included in the native auth-profile fingerprint so a changed default cannot silently resume an older session.
 
-**Examples**
+Approval policy is independent of authentication:
 
-```bash
-bun src/cli.ts exec --backend opencode --model anthropic/claude-sonnet-4-5 "explain this repo"
-bun src/cli.ts exec --backend claude --json "say OK"
-bun src/cli.ts exec --backend codex --mode write --json -- "--fix the flaky retry in the runner"
-```
+- `ask` creates a durable approval before each mutating coder turn, launches that same queued turn only after approval, and later pauses separately before candidate integration.
+- `auto` resolves coder-tool requests from Headless policy and integrates only after every configured gate passes.
+- `bypass` selects the coder's noninteractive approval mode inside the outer sandbox. It never bypasses project trust, filesystem or credential scope, budgets, worktree isolation, clean-primary checks, finality, tests/reviews/votes, or merge authority.
 
-### `launch`
+Durable collaborative goals are read-only by default. Select a gated write goal explicitly with `headless goal run --mode write "Implement the approved change"`; the mode is persisted with the goal and cannot weaken project trust, worktree isolation, approval, or integration gates.
 
-Helper passthroughs for experimentation (these inherit your terminal, they are not contained runs):
+The TUI mirrors these controls without blocking its live subscriptions: `/trust status|grant [bypass] [no-native]|revoke` manages project consent, `/use-fleet <profile-id>` activates a persisted fleet, `/goal <objective>` starts a read-only goal, and `/goal-write <objective>` starts an explicitly gated write goal. Its live panel shows recent bounded, redacted turns and addressed messages; `/ack-message <id> [more ids] [--retain]` acknowledges consumed mailbox entries and prunes them by default to relieve backpressure. Omitted goal authentication and approval controls inherit the active fleet profile.
 
-```bash
-bun src/cli.ts launch opencode-serve            # opencode serve (for attach / SDK work)
-bun src/cli.ts launch opencode --cwd ./somedir  # opencode run --pure one-shot worker
-bun src/cli.ts launch grok                       # a Grok CLI single-turn smoke through Headless
-```
+See [Native login, sessions, and fleet operation](./docs/native-login.md) for the auth-capsule allowlist, session-driver behavior, recovery rules, structured failures, and opt-in subscription smoke procedure.
 
----
+Create an owner-controlled config outside untrusted project configuration (the entry paths may be relative to the config file):
 
-## Modes
-
-### Read-only (default)
-
-The agent may read the project but must not change it. This is enforced in layers (see [Containment](#containment)). If a backend produces no assistant text, the result is `ok: false` with `"No assistant output was produced by the backend."`.
-
-### Contained write (`--mode write`)
-
-`--mode write` is **diff-only and git-required**. Headless:
-
-1. Refuses if `--cwd` is not a git worktree root, or if the tree is dirty (uncommitted changes are not seeded).
-2. Creates an ephemeral git worktree on a `headless/write/<label>-<id>` branch.
-3. Runs the backend **inside that worktree**.
-4. Captures the resulting patch/status/file list.
-5. Removes the worktree and prunes the branch — **your working tree is never modified.**
-
-The changes come back as a structured diff for you (or a parent process) to review and apply:
-
-```ts
+```json
 {
-  diff: { patch: string, status: string, files: string[] },
-  worktreeBranch: string
+  "version": 1,
+  "modules": ["./my-headless-extension.mjs"]
 }
 ```
 
-Only `grok-build` currently advertises write capability; a `--mode write` request on a read-only backend is rejected before the process is spawned.
+Each module exports `default` or `registerHeadlessExtension`, receives the daemon's exact registry API, and calls `api.registerAdapter(...)`, `api.registerProvider(...)`, and/or `api.registerPricing(...)`. Provider definitions include a trusted `validateBoundedInput` callback that rejects provider-side context the extension cannot bound under input/cost caps. Pricing entries include provider/model, effective dates, and input/output rates; they are the trusted source used when a cost-capped request must be bounded before provider egress. Start or connect with an absolute config path:
 
----
+```bash
+headless exec --extension-config /absolute/path/extensions.json \
+  --backend my-adapter --unsafe-no-sandbox --json "Say OK"
 
-## Backends & authentication
-
-| Backend | Aliases | Auth setup | `--model` | `--agent` | Write |
-| --- | --- | --- | --- | --- | --- |
-| `opencode` | `headless-opencode` | provider auth via `opencode auth login` or env keys (below) | ✅ | ✅ | ✕ |
-| `claude-code` | `claude` | run `claude` and complete `/login` | ✅ | ✕ | ✕ |
-| `codex` | `codex-cli` | complete the Codex CLI auth flow | ✅ | ✕ | ✕ |
-| `grok-build` | `grok` | Grok CLI auth + account balance | ✅ | ✅ | ✅ |
-
-The backend CLIs must already be installed and authenticated on your machine — Headless drives the real CLIs. On macOS, Claude Code stores its token in the Keychain; Headless forwards `USER`/`LOGNAME` so that keychain lookup works inside the contained child.
-
-### OpenCode models and credentials
-
-OpenCode is launched with `--pure`. Per the OpenCode source, `--pure` disables **external plugins only** — it does **not** strip authentication, environment API keys, or config. So any authenticated model works:
-
-- Pass it as `--model <provider>/<model>` (e.g. `--model anthropic/claude-sonnet-4-5`, `--model zai-coding-plan/glm-4.7`).
-- Credentials resolve from, in order: `<PROVIDER>_API_KEY` environment variables (auto-detected), your `~/.local/share/opencode/auth.json` (populated by `opencode auth login`), and any `provider.<id>.options.apiKey` in `OPENCODE_CONFIG_CONTENT`. All of these work under `--pure`.
-- Headless forwards common provider key prefixes to the child: `OPENCODE_`, `ANTHROPIC_`, `OPENAI_`, `XAI_`, `GOOGLE_`, `GEMINI_`, `OPENROUTER_`, `ZHIPU_`, `ZAI_`, `GROQ_`, `DEEPSEEK_`, `MISTRAL_`, `DASHSCOPE_`. Unrelated environment variables are stripped.
-- The env var name is provider-specific (from the [models.dev](https://models.dev) catalog), **not** always `<NAME>_API_KEY`. Notably, **z.ai / GLM (`zai`, `zai-coding-plan`) use `ZHIPU_API_KEY`.**
-
-If an OpenCode run produces no output, it is almost always the **model**, not Headless: opencode's free hosted models (`opencode/big-pickle`, `*-free`) authenticate but are too weak to emit valid tool calls, and some third-party endpoints intermittently return empty responses or server errors. Headless authenticates the provider, applies its denies, sandboxes the run, and parses output correctly regardless — pick a capable, reliable model for real work.
-
----
-
-## Containment
-
-Read-only runs are contained in up to three independent layers, so a bypass of one is caught by the next:
-
-1. **App-level tool denies (all platforms).** Each backend is launched read-only:
-   - OpenCode: an injected `OPENCODE_CONFIG_CONTENT` denies `write`/`edit`/`patch`/`bash`/`webfetch`/`websearch`/`task`/`skill`/... at both the `tools` and `permission` layers (merged last, so it overrides user config).
-   - Claude Code: `--allowedTools Read,Grep,Glob,LS`.
-   - Codex: `codex exec --sandbox read-only`.
-   - Grok: `--permission-mode plan` for read-only runs.
-   - The child process environment is allowlisted (base vars + per-backend credential prefixes + `HEADLESS_*`); unrelated secrets never reach the child.
-
-2. **OS sandbox (macOS).** On macOS, Headless auto-detects `/usr/bin/sandbox-exec` and probes that Seatbelt actually denies writes, then wraps each non-exempt read-only run in a generated Seatbelt profile. The profile is a **deny-list**: it lets the backend run normally (its SQLite DB, macOS Keychain auth, caches, temp all work) and then denies the things a read-only run must never do — **all writes to the project dir** (`--cwd`), reads/writes of credential dirs (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`), and interactive shells (`/bin/bash`, `/bin/zsh`). Codex is exempt (it already runs its own OS sandbox); write mode is exempt (it uses worktree isolation). On non-macOS, or if the probe fails, Headless falls back to app-level containment without refusing the run.
-
-3. **Git-worktree isolation (write mode).** See [Contained write](#contained-write---mode-write) — write runs happen in a throwaway worktree and only ever yield a diff.
-
----
-
-## Ledger (auditability)
-
-When run through the runtime/orchestrator (the plugin tools and `headlessRun`/`deliberate` helpers), every action is recorded to a per-session JSONL ledger:
-
-```text
-.headless/sessions/<session-id>/ledger.jsonl
+# Or for every client launched from this trusted shell:
+HEADLESS_EXTENSION_CONFIG=/absolute/path/extensions.json headless daemon serve --cwd /project
 ```
 
-- **Typed events**: `session_started`, `note`, `artifact`, `run_started`, `worker_spawned`, `headless_result`, `handoff`, `finality_proposal`.
-- **Tamper-evident, optionally tamper-proof**: each event carries `seq`, `prevHash`, and a chained `hash`. Reads verify the whole chain and throw `LedgerIntegrityError` if a line is malformed, reordered, inserted, or modified. By default the hash is a plain `sha256` (tamper-*evident*: an attacker who rewrites the file can recompute a valid chain). Set **`HEADLESS_LEDGER_KEY`** to switch the chain to a keyed **HMAC-SHA256** — if that key is held out-of-band (a secret manager, a remote verifier — anywhere an attacker with write access to the file cannot read it), the ledger becomes tamper-*proof*: forged edits can't produce valid hashes. The key must stay constant for a given ledger.
-- **Secret redaction on write**: 13 secret patterns (private keys, `sk-`/Bearer/Slack/GitHub/AWS/JWT/Stripe/GCP keys, generic `key=…`) are redacted **before** hashing, and content over 20k chars is truncated. The live caller still receives the raw output; only the durable ledger is sanitized.
-- **Atomic + locked writes**: appends go through a mkdir lock and a `tmp → fsync → rename → chmod 600` atomic rewrite, so concurrent readers never see a torn line.
-- **Read models** derive recent context, task lanes, artifacts, finality blockers, and run status by replaying the log.
+Library callers can pass `extensionConfigPath` (or absolute `extensionModules`) to `exec`/`connectOrStartDaemon`; `HeadlessDaemon` accepts the same startup-only options. Config/module files and their ancestor chain are canonicalized, bounded, permission-checked, and content-fingerprinted. A detached bootstrap passes the already-resolved paths and hashes through a startup-only manifest, and the child revalidates them immediately before import. The daemon reports only the configuration digest and registered IDs. A client explicitly requesting a different digest fails closed, and one process cannot host daemons with different extension registries; restart the daemon process after changing an extension. Extension modules execute with daemon authority and therefore must be treated as trusted code.
 
-`.headless/` is gitignored. Add it to your own repo's `.gitignore` if you run write mode there (otherwise the ledger dirties the tree and contained write refuses).
+## Containment model
 
----
+Every backend is treated as arbitrary code execution.
 
-## Structured result
+For a required run, Headless creates a private worker root with a separate `HOME`, XDG config/data/cache/runtime directories, and temporary directory. The worker never inherits the real home, ambient API keys, Git/SSH configuration, shell startup files, keychain exports, unrelated provider state, or host agent sockets. Existing repository `.env`, `.env.*`, `.envrc`, and local/common/linked-worktree Git config files are discovered recursively with a fail-closed bound, then denied on macOS and over-mounted on Linux in both primary and leased-worktree views; ordinary project source remains readable.
 
-`--json` (and the programmatic API) return an `ExecResult`:
+In native-login mode, Headless copies only the selected backend's minimal regular-file auth allowlist into that private root. Files are size-bounded, reject symlinks, use owner-only permissions, and contribute to an auth-profile fingerprint. Keychain-only Claude login on macOS is currently unsupported in required containment because the official CLI cannot discover it from the isolated home without broader real-home access. In broker mode, no native login state enters the worker and the daemon injects only a short-lived token scoped to the run, provider, model, routes, duration, and budget.
+
+- macOS uses separate default-deny Seatbelt profiles for read and write modes. Project access is read-only, only a leased write worktree may be writable, its `.git` pointer stays immutable, and network binding remains denied. Broker runs allow only the selected loopback broker port; native-login runs permit provider-direct outbound connections plus narrow TLS service lookups.
+- Linux requires successful bubblewrap and seccomp capability probes. The host and primary checkout are read-only, worker storage is mounted writable, the write worktree is the only writable project view, its `.git` pointer stays immutable, and PID/IPC/UTS namespaces remain isolated. Broker mode also isolates the network namespace. Provider-direct mode deliberately retains outbound IP networking, while host pathname sockets remain masked and the backend is denied `AF_UNIX` socket creation. On x86-64 the filter rejects the x32 syscall ABI before native syscall matching, and the capability probe exercises that alternate-ABI boundary.
+- Native backend restrictions remain defense in depth: OpenCode project configuration/plugins/skills are disabled; Claude receives tool restrictions; and Codex combines its native sandbox with explicit disables for project plugins, hooks, apps, browsers, hidden subagents, MCP skill dependencies, and both repository skill roots. Grok has isolated-config, prompt/tool, and startup-snapshot hardening, but required Grok runs remain fail-closed until late-created watched project controls can be denied on both release platforms.
+
+`--unsafe-no-sandbox` is a separate explicit local containment escape hatch. The `bypass` approval policy is not this escape hatch: bypass stays inside Headless containment and all fleet/write gates. Unsafe runs are visibly marked and are rejected by autonomous orchestration and councils.
+
+On Linux, a non-dumpable supervisor inside the private worker namespaces owns loopback-only broker and run-tool proxies when those capabilities are active. Before the proxies bind, a helper isolates its file-descriptor table; after they are ready it installs no-new-privileges and a mode-specific seccomp filter, then replaces itself with the backend. The backend cannot create Unix sockets or inspect the supervisor. Broker mode cannot reach host/LAN/internet routes; native provider-direct mode permits outbound provider traffic but does not relax filesystem, process, Unix-socket, worktree, or credential boundaries. Missing required relay/runtime/socket/seccomp capabilities fail closed.
+
+Every daemon-owned required run also receives a separate owner-only Unix endpoint and an in-memory, short-lived credential bound to that exact project, job, session, and principal. A disposable `headless-run-tool` helper exposes only bounded cooperation operations such as context, notes, messages, task status, artifacts, and finality proposals. It cannot start runs, choose a filesystem root, change policy or budgets, grant authority, merge writes, or administer credentials. The daemon destroys the listener and live connections when the run terminates; unsafe runs never receive it.
+
+See [SECURITY.md](./SECURITY.md) for the threat model and exact limits.
+
+## Writes and finality
+
+A write run requires Git and a clean primary checkout. Headless durably records a preparing lease before asking Git to create the ephemeral worktree from the recorded primary `HEAD`, then activates the lease only after creation succeeds. The primary checkout is not the worker’s writable directory. Headless captures and redacts the candidate diff even when execution fails.
+
+Daemon-owned integration uses a sanitized Git environment and daemon identity, then records the base, candidate, resulting commit, gates, actor, grant, and outcome. Auto-merge is permitted only when the authenticated coordinator has merge authority and configured policy/test/review/vote/budget gates pass. An unchanged clean primary can fast-forward; an advanced primary is integrated and re-gated in a separate worktree. Durable leases retain crashed worktrees as evidence, and a fsynced integration journal reconciles a crash after the primary update. Conflicts, ambiguous recovery, or failed gates leave primary untouched or fail closed while preserving evidence.
+
+Direct library runs without a daemon write-integration policy remain diff-only.
+
+## Daemon and durable state
+
+One authenticated daemon owns each canonical project root. Its Unix socket and token are owner-only, and clients cannot replace the daemon’s project root or self-declare their principal/coordinator identity.
+
+State is outside the repository and keyed by `sha256(canonical project root)`:
+
+- Linux: `${XDG_STATE_HOME:-~/.local/state}/headless/projects/<project-id>`
+- macOS: `~/Library/Application Support/Headless/projects/<project-id>`
+- Tests/managed deployments: `HEADLESS_STATE_HOME/projects/<project-id>`
+
+This contains the ledger and read projections, jobs, tasks, workflows, sessions, policy/grants, budgets, worktree leases, integration journals, artifacts, and daemon metadata. A normal read-only run does not create `.headless` or edit `.gitignore` in the repository.
+
+On first v0.2 open, a valid v1 `.headless` ledger is verified and imported into external state. Before the first v2 import append, Headless writes an `importing` manifest bound to the verified source hash, dimensions, target ledger, and starting head. Import records use deterministic IDs and progress is reconciled on restart, making a crash after a durable append idempotent. The original file is not changed. Invalid or ambiguous chains fail with recovery guidance.
+
+### Ledger v2
+
+Ledger v2 assigns immutable envelope fields in the daemon: version, sequence, timestamp, project ID, authenticated principal, event ID, previous hash, and hash/HMAC metadata. Payload fields cannot override the envelope.
+
+Reads verify the chain incrementally with partial-line buffering, exact event-ID duplicate suppression, and a digest-bound, size-bounded persisted read projection. Explicit retry IDs are suppressed before append; an exact verified-prefix index prevents older duplicates from reappearing after the bounded persisted ID window rolls over. Context and task-state calls apply only accepted events to a maintained, bounded semantic projection for the authenticated principal and session; a ledger head mismatch triggers a verified rebuild instead of trusting stale state. Lock ownership includes PID, process-start identity, host, and nonce; a verified live owner’s lock is never removed and an unverifiable foreign-host lock fails closed. Set `HEADLESS_LEDGER_KEY` to use HMAC-SHA256 rather than an unkeyed hash.
+
+All event/output/diff paths are deeply redacted and size-bounded before callbacks, terminal output, ledger writes, MCP/plugin responses, and TUI updates. Stateful process-stream redaction protects credentials split across chunk boundaries. Unknown provider pricing is represented as `null`, not zero.
+
+## Structured contracts
+
+The shared Zod schemas exported by the package define requests, results, events, adapters, jobs, tasks, sessions, workflows and steps, grants, budgets, councils, fleet profiles, goals, turns, delegations, directed messages, reviews, votes, approvals, candidates, and finality decisions.
 
 ```ts
+import { RunRequestSchema, exec } from "@proofofwork-agency/headless";
+
+const request = RunRequestSchema.parse({
+  backend: "codex",
+  prompt: "Review the parser",
+  projectRoot: process.cwd(),
+  containment: "required",
+  authMode: "native-login",
+  approvalPolicy: "ask",
+  timeoutMs: 60_000,
+});
+
+const result = await exec({
+  backend: request.backend,
+  prompt: request.prompt,
+  cwd: request.projectRoot,
+  containment: request.containment,
+  authMode: request.authMode,
+  approvalPolicy: request.approvalPolicy,
+  timeoutMs: request.timeoutMs,
+});
+```
+
+Expected runtime failures return structured results with terminal status, structured error, stdout/stderr, parser diagnostics, exit code/signal, separated token dimensions, cost attribution, containment evidence, session/job IDs, diff/commit data, and truncation flags. Invalid API use remains an exception. A run timeout starts when the durable job is created and covers queueing, preparation, broker access, and worker execution. Concurrency caps keep excess jobs queued instead of rejecting or dropping them. Cost-capped runs require trusted dated pricing: admission reserves a conservative model-aware estimate, authorization reuses that immutable estimate, and the broker checks each concrete protocol token maximum before egress. When a request supplies multiple recognized output-limit fields, the greatest value is reserved and multiplied by its greatest declared candidate count. Under token or cost caps, built-ins require a positively recognized text-generation model and reject provider-side conversation/prompt/file references, remote media, server-side search, provider-managed tools, non-text output modalities, and automatic/non-standard service tiers whose context or charges cannot be bounded from the request; provider extensions must supply a trusted bounded-input validator. For built-in cost-capped protocols, an omitted service tier is normalized to that provider's deterministic standard tier before byte/token pricing and forwarding. Durable budget request/input/output quotas are shared atomically across every lease for that budget, including leases issued later, so concurrent runs cannot each spend the same remainder. Interrupted broker-backed runs exhaust affected bounded dimensions when exact usage was lost, preventing quota reuse after a daemon crash. Unknown or unbounded pricing fails closed under a cap while the public cost remains `null`.
+
+Durable sessions expose create, send/resume, cancel, status, and result operations through `HeadlessDaemonClient`. A dedicated driver factory capability-probes each installed CLI and records the selected driver, backend version, auth fingerprint, capabilities, native session/thread ID, last turn, rate-limit evidence, and recovery state. Codex prefers a hidden persistent app-server transport and falls back to `codex exec resume`; Claude uses print mode with durable IDs and `--resume`; OpenCode uses `run --session`; Grok uses structured headless execution with `--resume`. Backend event assemblers preserve stable IDs, order out-of-order deltas, bound malformed data/output, infer completion only from explicit evidence, and retain retry-after data. If native resume is unavailable, Headless may replay only a bounded redacted transcript and records that recovery explicitly.
+
+## Durable workflows
+
+The daemon persists workflow DAGs and their step attempts, resumes queued/running workflows after restart, injects bounded actual dependency results and diffs into downstream prompts, retries only within each step's `maxAttempts`, and enforces typed policy, budget, test, review, and vote finality. Workflow execution always requires containment. Write steps preserve candidate commits for an explicit authorized integration decision; a workflow does not silently merge them.
+
+Create a JSON definition and use the same daemon-backed CLI for lifecycle operations:
+
+```json
 {
-  ok: boolean,            // true only if not timed out, no parse error, produced output, exit 0
-  backend: string,        // canonical backend id
-  output: string,         // assistant text (or the error/stderr on failure)
-  cost: number | null,    // where the backend reports it
-  tokens: number | null,  // where the backend reports it
-  durationMs: number,
-  exitCode: number | null,
-  timedOut: boolean,
-  diff?: { patch: string, status: string, files: string[] } | null,  // write mode only
-  worktreeBranch?: string | null                                     // write mode only
+  "id": "review-change",
+  "requirements": {
+    "policy": true,
+    "tests": true,
+    "review": true,
+    "vote": false,
+    "budget": true
+  },
+  "steps": [
+    {
+      "id": "implement",
+      "kind": "execution",
+      "backend": "codex",
+      "prompt": "Implement the requested change",
+      "mode": "write",
+      "timeoutMs": 180000,
+      "maxAttempts": 2
+    },
+    {
+      "id": "test",
+      "kind": "test",
+      "backend": "opencode",
+      "prompt": "Test the candidate and report concrete evidence",
+      "dependsOn": ["implement"]
+    },
+    {
+      "id": "review",
+      "kind": "review",
+      "backend": "claude-code",
+      "prompt": "Review the candidate result and diff",
+      "dependsOn": ["implement", "test"]
+    }
+  ]
 }
 ```
 
----
+```bash
+headless workflow run --file workflow.json
+headless workflow list
+headless workflow status --workflow-id review-change
+headless workflow wait --workflow-id review-change --timeout-ms 600000
+headless workflow cancel --workflow-id review-change
+```
+
+Step `kind` defaults to `execution`, `mode` to `read-only`, `timeoutMs` to 180000, `maxAttempts` to 1, and `dependsOn` to an empty array. Definitions are bounded to 64 acyclic steps and two million prompt bytes.
+
+Councils persist their mode, timeout, phase job IDs, attributable votes, and terminal decision. Every phase job carries an atomic council/slot binding, so startup can reconcile a crash between job creation and council-record update without duplicating work or spend; an interrupted active phase gets one budget-checked retry, while a phase already cancelling becomes terminal and is never retried after restart. Failed proposals cannot satisfy finality, and an even council requires a strict majority rather than accepting a tie. A write council's test gate is bound to the durable finality decisions produced by the actual candidate execution jobs; preserving a candidate commit is not treated as evidence that its configured tests passed.
+
+## MCP server
+
+The published `headless-mcp` binary is a stdio server. It is bound to one configured project root; tool arguments cannot select an arbitrary filesystem root or claim coordinator authority.
+
+```bash
+HEADLESS_PROJECT_ROOT=/absolute/project headless-mcp
+```
+
+Without a global install, MCP hosts can launch the published binary with:
+
+```bash
+bunx --bun -p @proofofwork-agency/headless@0.2.0 headless-mcp
+```
+
+See [docs/mcp-integration.md](./docs/mcp-integration.md) for host configurations and the tool surface.
 
 ## OpenCode plugin
 
-`plugin/index.ts` is a loadable OpenCode plugin that exposes the Headless runtime as tools inside an OpenCode session:
+Install both packages; the plugin intentionally declares Headless as a required runtime peer:
 
-- `headless_run` — run a prompt on any backend and return a normalized result
-- `headless_append_note` — append a note to the session ledger
-- `headless_record_artifact` — record a structured artifact
-- `headless_read_context` — read recent ledger context / a summary read model
-- `headless_task_state` — task lanes, artifacts, finality blockers, run status
-- `headless_propose_final` — record a finality proposal
-- `headless_deliberate` — bounded fan-out across backends, collected for parent synthesis
+```bash
+bun add @proofofwork-agency/headless@0.2.0 \
+  @proofofwork-agency/headless-plugin@0.2.0
+```
 
-This repo dogfoods the plugin via `opencode.json`:
+Then add the compiled package to OpenCode configuration:
 
 ```json
-{ "plugin": ["./plugin/index.ts"] }
+{
+  "plugin": ["@proofofwork-agency/headless-plugin"]
+}
 ```
 
-To use it elsewhere, place it in an OpenCode plugin location (`.opencode/plugin` / `.opencode/plugins`) or reference `plugin/index.ts` from your OpenCode config. Tools write session data under `<directory>/.headless/sessions/<session-id>/ledger.jsonl`, using the OpenCode `ToolContext` directory/session.
+The repository’s `opencode.json` references `./plugin/index.ts` only for local development. Published consumers load `plugin/dist/index.js`; no excluded TypeScript source is required.
 
-> The plugin is not yet npm-publishable on its own: `plugin/package.json` (`@proofofwork-agency/headless-plugin`) still imports the Headless core from `../src`, which a standalone tarball wouldn't include. Repo-path / `.opencode` usage works today.
-
----
-
-## Programmatic API
-
-The core is importable from `src/index.ts`:
-
-```ts
-import { exec, headlessRun, deliberate, getReadContext, getTaskState } from "./src/index";
-
-// One-shot, no ledger:
-const res = await exec({ backend: "claude", prompt: "say OK", mode: "read-only" });
-
-// Orchestrated (writes the ledger):
-const { result, session } = await headlessRun({
-  cwd: process.cwd(),
-  backend: "opencode",
-  model: "anthropic/claude-sonnet-4-5",
-  prompt: "summarize this repo",
-  mode: "read-only",
-});
-
-// Fan out the same question across backends and collect results:
-const { results } = await deliberate({
-  cwd: process.cwd(),
-  question: "What does src/runner/simple.ts do?",
-  backends: ["claude", "codex"],
-});
-```
-
----
-
-## Development
+## Release checks
 
 ```bash
-bun run check    # bunx tsc --noEmit  +  bun test tests   (75 tests)
-bun run build    # bundle dist/*.js  +  emit dist/*.d.ts
-bun run test     # tests only
+bun run check          # typecheck, hygiene/docs checks, deterministic tests
+bun run build          # clean JS bundles and declarations
+bun run smoke:pack     # tarball contents, clean install, compiled entrypoints
+bun run release:check  # all of the above
+# Explicit opt-in only; uses built artifacts and existing CLI subscriptions.
+HEADLESS_NATIVE_SMOKE=1 bun run smoke:native
 ```
 
-CI (GitHub Actions) runs `bun install --frozen-lockfile` + check + build on every push/PR to `main`.
+CI runs the gate on current Ubuntu and macOS runners. Linux installs bubblewrap and requires its real write-denial probe; macOS requires the real Seatbelt probe. The ordinary local suite keeps its provider-direct socket checks local and deterministic; macOS CI sets `HEADLESS_REAL_NETWORK_TEST=1` for the separate public DNS/TLS Seatbelt probe, whose child receives only the isolated worker environment. Provider-secret smoke tests are separate from deterministic fake-provider tests.
 
-Smoke checks against real CLIs (require the backend to be authenticated):
+The manually triggered `Protected provider smoke` workflow runs `bun run smoke:providers` through real scoped broker leases. Its protected GitHub environment must be named `provider-smoke` and supply secrets `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and `XAI_API_KEY`, plus model variables `HEADLESS_SMOKE_OPENAI_MODEL`, `HEADLESS_SMOKE_ANTHROPIC_MODEL`, `HEADLESS_SMOKE_GEMINI_MODEL`, and `HEADLESS_SMOKE_XAI_MODEL`. It makes one bounded request per provider and is intentionally not part of `release:check`; this repository does not claim that the credentialed smoke has run.
 
-```bash
-bun src/cli.ts exec --backend claude --json --timeout-ms 60000 "say OK"
-bun src/cli.ts exec --backend codex  --json --timeout-ms 60000 "say OK"
-bun src/cli.ts exec --backend opencode --model opencode/big-pickle --json --timeout-ms 60000 "say OK"
-```
+Real native-subscription smoke is also opt-in and never part of credential-free CI. The harness refuses to start unless `HEADLESS_NATIVE_SMOKE=1`, requires `dist/cli.js`, creates disposable project/state/runtime roots, removes provider API-key and known provider-token variables—including `CLAUDE_CODE_OAUTH_TOKEN`—from every child, runs one bounded read-only native session turn per installed backend, verifies the primary checkout is unchanged, and always terminates its daemon tree. It records pass/skip/failure separately for Claude, Codex, OpenCode, and Grok; any missing or unsupported login means the release gate did not pass. The exact procedure and evidence are in [docs/native-login.md](./docs/native-login.md#opt-in-real-subscription-smoke).
 
-### Project layout
-
-```
-src/
-  cli.ts                 CLI entrypoint (exec/run/launch/help/version)
-  index.ts               public API: exec(), types, re-exports
-  backends/              adapter registry, per-backend command + parser + env
-    registry.ts  ids.ts  metadata.ts  env.ts  opencode.ts  grok.ts  json.ts
-  runner/simple.ts       spawns backends; sandbox + worktree wiring
-  runtime/               ledger, read models, orchestrator, sandbox, worktree, redaction
-plugin/                  OpenCode plugin (index.ts + package.json)
-tests/                   headless.test.ts, plugin-load.test.ts, worktree.test.ts
-docs/                    analyses + the project review
-```
-
----
-
-## Status
-
-**Implemented, tested, and verified live against the real CLIs:**
-
-- normalized `exec` across OpenCode, Claude Code, Codex, Grok, with per-backend model/agent flags
-- three-layer read-only containment (app denies + macOS OS sandbox + env allowlist), verified live (writes to the project are blocked)
-- contained write mode via ephemeral git worktrees (diff-only), verified live (working tree untouched, no orphan worktrees)
-- tamper-evident hash-chained ledger with verified reads, secret redaction, atomic/locked writes
-- OpenCode plugin that loads in the real `opencode` binary and registers its tools
-- backend adapter registry, timeout/no-output classification, bounded `deliberate` fan-out
-- publishable package (`dist` JS + `.d.ts`, `files` allowlist, prepublish build) and CI
-
-**Known gaps / roadmap:**
-
-- OS-level containment is macOS-only; Linux (bubblewrap/landlock) is not yet ported
-- ledger integrity is tamper-evident, not tamper-proof (no MAC/signature key)
-- ledger append rewrites the whole file per event (O(n²)); fine at MVP scale, wants segmentation/compaction for long sessions
-- backend output is parsed after completion, not streamed live
-- Claude/Codex parser coverage includes a live-captured Codex golden; Grok lacks a live golden (needs account balance)
-- the OpenCode plugin is not standalone-npm-publishable yet (imports core from `../src`)
-
----
+No release should be published while a required platform gate fails or a known P0/P1 security or data-integrity defect remains.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

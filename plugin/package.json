@@ -1,11 +1,23 @@
 {
   "name": "@proofofwork-agency/headless-plugin",
-  "version": "0.1.0",
-  "description": "OpenCode plugin exposing Headless runner and local ledger tools. Loads as a repo-path plugin (see root opencode.json); npm distribution requires bundling ../src (not yet wired).",
+  "version": "0.2.0",
+  "description": "OpenCode plugin exposing Headless runner and local ledger tools. Standalone: depends on @proofofwork-agency/headless (install both for npm use).",
   "type": "module",
-  "main": "./index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "rm -rf ./dist && bun build ./index.ts --outfile ./dist/index.js --target bun --external @proofofwork-agency/headless --external @opencode-ai/plugin && bunx tsc -p ./tsconfig.build.json --declaration --emitDeclarationOnly --outDir ./dist",
+    "typecheck": "bunx tsc -p ./tsconfig.json --noEmit",
+    "prepack": "bun run build",
+    "prepublishOnly": "bun run typecheck && bun run build"
   },
   "keywords": [
     "opencode",
@@ -15,11 +27,19 @@
     "grok",
     "multi-agent"
   ],
-  "peerDependencies": {
-    "@opencode-ai/plugin": "*"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/proofofwork-agency/headless",
+    "directory": "plugin"
   },
-  "dependencies": {},
-  "devDependencies": {},
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@proofofwork-agency/headless": "^0.2.0"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
   "opencode": {
     "type": "plugin"
   }

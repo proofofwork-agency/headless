@@ -1,5 +1,20 @@
 import type { ExecOptions } from "../index";
-import { collectText, formatError, numberValue, objectValue, parseJsonValues, tokenCount } from "./json";
+import { GROK_HEADLESS_SYSTEM_PROMPT, GROK_READ_TOOLS, GROK_WRITE_TOOLS } from "../runtime/grok-isolation";
+import { GROK_BUILTIN_AGENT_NAMES, safeAgentName, safeOption } from "../runtime/validation";
+import {
+  collectText,
+  emptyTokenUsage,
+  formatError,
+  legacyTokenCount,
+  mergeTokenUsage,
+  normalizeTokenUsage,
+  numberValue,
+  objectValue,
+  parseJsonValuesDetailed,
+  textCollector,
+  type NormalizedTokenUsage,
+  type ParserDiagnostics,
+} from "./json";
 
 export interface GrokAgentInfo {
   name: string;
@@ -13,9 +28,11 @@ export type GrokJsonParseResult = {
   cost: number | null;
   tokens: number | null;
   error: string | null;
+  usage: NormalizedTokenUsage;
+  diagnostics: ParserDiagnostics;
 };
 
-const AGENTS: Record<string, GrokAgentInfo> = {
+const AGENTS: Record<typeof GROK_BUILTIN_AGENT_NAMES[number], GrokAgentInfo> = {
   plan: {
     name: "plan",
     description: "Read-only planning agent.",
@@ -45,49 +62,78 @@ export function getGrokAgents(): GrokAgentInfo[] {
 export function buildGrokCommand(opts: ExecOptions, cwd: string) {
   const cmd = ["grok", "--single", opts.prompt, "--cwd", cwd, "--output-format", "streaming-json"];
   if (opts.model) {
-    cmd.push("--model", opts.model);
+    cmd.push("--model", safeOption(opts.model, "model", { namespace: "Grok" }));
   }
   if (opts.agent) {
-    cmd.push("--agent", opts.agent);
+    cmd.push("--agent", safeAgentName(opts.agent, "Grok"));
   }
-  if (opts.mode === "read-only") {
-    cmd.push("--permission-mode", "plan");
-  }
+  // The isolated HOME contains authentication only. Disable every optional
+  // native collaboration/configuration surface that Grok exposes directly;
+  // outer containment remains the filesystem and network authority.
+  cmd.push(
+    "--no-subagents",
+    "--no-memory",
+    "--disable-web-search",
+    "--verbatim",
+    "--system-prompt-override",
+    GROK_HEADLESS_SYSTEM_PROMPT,
+    "--tools",
+    opts.mode === "write" ? GROK_WRITE_TOOLS : GROK_READ_TOOLS,
+  );
+  const permissionMode = opts.approvalPolicy === "bypass"
+    ? "bypassPermissions"
+    : opts.approvalPolicy === "auto"
+      ? "auto"
+      : opts.mode === "read-only" ? "plan" : "default";
+  cmd.push("--permission-mode", permissionMode);
   return cmd;
 }
 
 export function parseGrokJsonl(stdout: string): GrokJsonParseResult {
-  const text: string[] = [];
+  const text = textCollector();
   const errors: string[] = [];
   let cost = 0;
-  let tokens = 0;
   let sawCost = false;
-  let sawTokens = false;
+  let normalizedUsage = emptyTokenUsage();
+  const parsed = parseJsonValuesDetailed(stdout, "grok-streaming-json");
 
-  for (const event of parseJsonValues(stdout)) {
+  for (const event of parsed.values) {
+    const outputCount = text.length;
+    const errorCount = errors.length;
     if (event.type !== "error") collectText(event, text);
 
     const message = formatError(event.error) ?? (event.type === "error" ? String(event.message || "") : null);
     if (event.type === "error" && message) errors.push(message);
 
     const usage = objectValue(event.usage) ?? objectValue(event.token_usage);
-    const tokenValue = tokenCount(usage) ?? tokenCount(event.tokens);
-    if (tokenValue !== null) {
-      sawTokens = true;
-      tokens += tokenValue;
-    }
+    const eventUsage = firstUsage(usage, event.tokens);
+    if (eventUsage) normalizedUsage = mergeTokenUsage(normalizedUsage, eventUsage);
 
     const costValue = numberValue(event.cost) ?? numberValue(event.total_cost_usd);
     if (costValue !== null) {
       sawCost = true;
       cost += costValue;
     }
+
+    if (text.length === outputCount && errors.length === errorCount && costValue === null && !eventUsage) {
+      parsed.diagnostics.ignoredEvents += 1;
+    }
   }
 
   return {
     output: text.join("").trim(),
     cost: sawCost ? cost : null,
-    tokens: sawTokens ? tokens : null,
+    tokens: legacyTokenCount(normalizedUsage),
     error: errors.length ? errors.join("\n") : null,
+    usage: normalizedUsage,
+    diagnostics: parsed.diagnostics,
   };
+}
+
+function firstUsage(...values: unknown[]): NormalizedTokenUsage | null {
+  for (const value of values) {
+    const usage = normalizeTokenUsage(value);
+    if (Object.values(usage).some((entry) => entry !== null)) return usage;
+  }
+  return null;
 }

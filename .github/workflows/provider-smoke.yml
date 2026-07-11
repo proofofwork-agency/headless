@@ -1,0 +1,34 @@
+name: Protected provider smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  provider-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: provider-smoke
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+      HEADLESS_SMOKE_OPENAI_MODEL: ${{ vars.HEADLESS_SMOKE_OPENAI_MODEL }}
+      HEADLESS_SMOKE_ANTHROPIC_MODEL: ${{ vars.HEADLESS_SMOKE_ANTHROPIC_MODEL }}
+      HEADLESS_SMOKE_GEMINI_MODEL: ${{ vars.HEADLESS_SMOKE_GEMINI_MODEL }}
+      HEADLESS_SMOKE_XAI_MODEL: ${{ vars.HEADLESS_SMOKE_XAI_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Exercise real provider protocols through scoped broker leases
+        run: bun run smoke:providers

@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "paths": {
+      "@proofofwork-agency/headless": ["../dist/index.d.ts"]
+    }
+  }
+}

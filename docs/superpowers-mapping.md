@@ -1,5 +1,7 @@
 # Superpowers Mapping: Claude Features → All Backends
 
+> Design backlog only. This document maps possible future abstractions; it is not a list of implemented or release-verified v0.2 capabilities. Current contracts and limits are in the README, SECURITY.md, and `docs/plan.md`.
+
 Goal: Make using Codex / OpenCode / Grok feel like you have Claude's best power tools (ultrathink, ultraplan, dynamic workflows/agents/loops, skills, etc.).
 
 ## Core Claude "Cool Stuff"

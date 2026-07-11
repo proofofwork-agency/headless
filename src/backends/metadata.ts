@@ -1,4 +1,5 @@
 import type { Backend } from "./ids";
+import { getBackendAliases, SUPPORTED_BACKENDS } from "./ids";
 
 export type BackendMetadata = {
   id: Backend;
@@ -13,34 +14,34 @@ export type BackendMetadata = {
 export const backendMetadata: Record<Backend, BackendMetadata> = {
   opencode: {
     id: "opencode",
-    aliases: ["headless-opencode"],
+    aliases: [...getBackendAliases("opencode")],
     promptDelivery: "argv",
     timeoutMs: 180_000,
     maxDepth: 2,
     canRead: true,
-    canWrite: false,
+    canWrite: true,
   },
   "claude-code": {
     id: "claude-code",
-    aliases: ["claude"],
+    aliases: [...getBackendAliases("claude-code")],
     promptDelivery: "stdin",
     timeoutMs: 180_000,
     maxDepth: null,
     canRead: true,
-    canWrite: false,
+    canWrite: true,
   },
   codex: {
     id: "codex",
-    aliases: ["codex-cli"],
+    aliases: [...getBackendAliases("codex")],
     promptDelivery: "stdin",
     timeoutMs: 180_000,
     maxDepth: null,
     canRead: true,
-    canWrite: false,
+    canWrite: true,
   },
   "grok-build": {
     id: "grok-build",
-    aliases: ["grok"],
+    aliases: [...getBackendAliases("grok-build")],
     promptDelivery: "native",
     timeoutMs: 180_000,
     maxDepth: null,
@@ -48,3 +49,8 @@ export const backendMetadata: Record<Backend, BackendMetadata> = {
     canWrite: true,
   },
 };
+
+// Ensure all supported are covered at runtime (central alias source drives this).
+for (const b of SUPPORTED_BACKENDS) {
+  if (!backendMetadata[b]) throw new Error(`Missing metadata for backend ${b}`);
+}

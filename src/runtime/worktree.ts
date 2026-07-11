@@ -1,8 +1,31 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { getHeadSha, runGitStrict } from "./git";
+import {
+  assertSafeDaemonGitRepository,
+  assertWorktreeGitIntegrity,
+  getHeadSha,
+  registerWorktreeGitIntegrity,
+  runGitStrict,
+  unregisterWorktreeGitIntegrity,
+} from "./git";
+
+// Hoisted for use in plan/create (tsc name resolution in module)
+function assertNoCrossHardlink(candidate: string, primary: string): void {
+  try {
+    if (!existsSync(candidate)) return;
+    const pStat = statSync(primary);
+    const cStat = statSync(candidate);
+    if (pStat.dev === cStat.dev && pStat.ino === cStat.ino) {
+      throw new Error(`worktree hardlink defeat: candidate ${candidate} is hard-linked to primary ${primary}`);
+    }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/hardlink defeat/i.test(msg)) throw e;
+    throw new Error(`worktree hardlink integrity check failed: ${msg}`, { cause: e });
+  }
+}
 
 const WRITE_BRANCH_PREFIX = "headless/write/";
 const WRITE_WORKTREE_DIR_PREFIX = "headless-write-";
@@ -14,6 +37,15 @@ export interface WriteWorktreePlan {
   worktreePath: string;
   baseSha: string;
   ephemeral: true;
+}
+
+/** Daemon-owned durability hooks; direct runner callers leave this undefined. */
+export interface WorktreeLeaseHooks {
+  tempBase: string;
+  /** Persisted before `git worktree add` so a process kill cannot create an untracked orphan. */
+  onPlanned: (plan: WriteWorktreePlan, kind: "candidate" | "integration") => void;
+  onCreated: (plan: WriteWorktreePlan, kind: "candidate" | "integration") => void;
+  onTerminal: (plan: WriteWorktreePlan, outcome: string, evidence?: string[]) => void;
 }
 
 export interface PlanWriteWorktreeInput {
@@ -64,6 +96,7 @@ export function planWriteWorktree(input: PlanWriteWorktreeInput = {}): WriteWork
   if (!isGitWorktreeRoot(primary)) {
     throw new Error(`planWriteWorktree: primary path is not a git worktree root: ${primary}`);
   }
+  assertSafeDaemonGitRepository(primary);
   const baseSha = getHeadSha(primary);
   if (!baseSha) {
     throw new Error(`planWriteWorktree: could not resolve HEAD for primary tree: ${primary}`);
@@ -78,6 +111,8 @@ export function planWriteWorktree(input: PlanWriteWorktreeInput = {}): WriteWork
   if (isPathWithinOrEqual(targetResolved, primary) || isPathWithinOrEqual(primary, targetResolved)) {
     throw new Error(`planWriteWorktree: worktree target must not be inside the primary tree: ${targetResolved}`);
   }
+
+  assertNoCrossHardlink(targetResolved, primary);
 
   return { primaryRoot: primary, branch, worktreePath, baseSha, ephemeral: true };
 }
@@ -100,6 +135,8 @@ export function createWriteWorktree(plan: WriteWorktreePlan): WriteWorktreePlan 
   if (isPathWithinOrEqual(target, primary) || isPathWithinOrEqual(primary, target)) {
     throw new Error(`createWriteWorktree: worktreePath must not be the primary tree or inside it: ${target}`);
   }
+
+  assertNoCrossHardlink(target, primary);
 
   if (existsSync(plan.worktreePath)) {
     throw new Error(`createWriteWorktree: worktreePath already exists: ${plan.worktreePath}`);
@@ -126,10 +163,23 @@ export function createWriteWorktree(plan: WriteWorktreePlan): WriteWorktreePlan 
     throw new Error(`createWriteWorktree: git worktree add failed: ${added.stderr.trim()}`);
   }
 
+  try {
+    registerWorktreeGitIntegrity(plan.worktreePath, primary);
+  } catch (error) {
+    runGitStrict(["worktree", "remove", "--force", plan.worktreePath], primary);
+    runGitStrict(["branch", "-D", plan.branch], primary);
+    throw new Error(`createWriteWorktree: linked worktree integrity registration failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   if (getHeadSha(plan.worktreePath) !== plan.baseSha) {
     try {
       removeWriteWorktree(plan, { force: true });
-    } catch {}
+    } catch (cleanupError) {
+      throw new Error(
+        `createWriteWorktree: HEAD mismatch and rollback failed for ${plan.worktreePath}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+        { cause: cleanupError },
+      );
+    }
     throw new Error(`createWriteWorktree: HEAD mismatch after creation for ${plan.worktreePath}`);
   }
 
@@ -140,37 +190,79 @@ export function captureWriteDiff(plan: WriteWorktreePlan): WriteDiff {
   if (!existsSync(plan.worktreePath)) {
     throw new Error(`captureWriteDiff: worktree path missing: ${plan.worktreePath}`);
   }
+  assertWorktreeGitIntegrity(plan.worktreePath);
 
-  const statusResult = runGitStrict(["status", "--porcelain"], plan.worktreePath);
+  // Cheap same-inode check for a common tracked file. Any inspection failure
+  // is state-critical: diff capture must fail closed rather than silently
+  // weakening containment evidence.
+  const wtReal = realpathSync(plan.worktreePath);
+  const primaryReal = realpathSync(plan.primaryRoot);
+  const candidateProbe = join(wtReal, "README.md");
+  const primaryProbe = join(primaryReal, "README.md");
+  if (existsSync(candidateProbe) && existsSync(primaryProbe)) {
+    assertNoCrossHardlink(candidateProbe, primaryProbe);
+  }
+
+
+  return captureWorktreeDiff(plan.worktreePath, plan.baseSha);
+}
+
+/** Capture tracked and untracked changes without touching the candidate index. */
+export function captureWorktreeDiff(worktreePath: string, baseSha: string): WriteDiff {
+  if (!existsSync(worktreePath)) {
+    throw new Error(`captureWorktreeDiff: worktree path missing: ${worktreePath}`);
+  }
+  const statusResult = runGitStrict(["status", "--porcelain", "--untracked-files=all"], worktreePath);
   if (!statusResult.ok) {
     throw new Error(`captureWriteDiff: git status failed: ${statusResult.stderr.trim()}`);
   }
 
   const untrackedPaths = untrackedPorcelainPaths(statusResult.stdout);
-  const addIntentResult = runGitStrict(["add", "-N", "."], plan.worktreePath);
-  if (!addIntentResult.ok && untrackedPaths.length > 0) {
-    const stderr = addIntentResult.stderr.trim() || "unknown error";
-    throw new Error(`captureWriteDiff: git add -N failed; untracked files would be omitted: ${untrackedPaths.join(", ")} :: ${stderr}`);
-  }
-
-  const diffResult = runGitStrict(["diff", plan.baseSha], plan.worktreePath);
-  if (!diffResult.ok) {
-    throw new Error(`captureWriteDiff: git diff failed: ${diffResult.stderr.trim()}`);
-  }
-  const namesResult = runGitStrict(["diff", "--name-only", plan.baseSha], plan.worktreePath);
+  const namesResult = runGitStrict(["diff", "--no-ext-diff", "--no-textconv", "--name-only", baseSha, "--"], worktreePath);
   if (!namesResult.ok) {
     throw new Error(`captureWriteDiff: git diff --name-only failed: ${namesResult.stderr.trim()}`);
   }
+  const trackedPaths = parseDiffNames(namesResult.stdout);
+  assertNoExecutableGitAttributes(worktreePath, [...trackedPaths, ...untrackedPaths]);
+  const diffResult = runGitStrict(["diff", "--no-ext-diff", "--no-textconv", "--binary", "--full-index", baseSha, "--"], worktreePath);
+  if (!diffResult.ok) {
+    throw new Error(`captureWriteDiff: git diff failed: ${diffResult.stderr.trim()}`);
+  }
+
+  const untrackedDiffs: string[] = [];
+  for (const path of untrackedPaths) {
+    const untracked = runGitStrict(["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--binary", "--full-index", "--", "/dev/null", path], worktreePath);
+    // `git diff --no-index` returns 1 when it successfully found differences.
+    if (untracked.code !== 1 && !untracked.ok) {
+      throw new Error(`captureWriteDiff: could not capture untracked path ${path}: ${untracked.stderr.trim()}`);
+    }
+    if (untracked.stdout) untrackedDiffs.push(untracked.stdout);
+  }
 
   return {
-    diff: diffResult.stdout,
+    diff: [diffResult.stdout, ...untrackedDiffs].filter(Boolean).join("\n"),
     status: statusResult.stdout,
-    files: parseDiffNames(namesResult.stdout),
+    files: [...new Set([...trackedPaths, ...untrackedPaths])],
   };
+}
+
+function assertNoExecutableGitAttributes(cwd: string, files: string[]) {
+  if (files.length === 0) return;
+  const attributes = runGitStrict(["-c", "core.fsmonitor=false", "check-attr", "-z", "--stdin", "-a"], cwd, 30_000, `${files.join("\0")}\0`);
+  if (!attributes.ok) throw new Error("captureWriteDiff: Git attributes could not be inspected safely");
+  const fields = attributes.stdout.split("\0");
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const name = fields[index + 1];
+    const value = fields[index + 2];
+    if (name === "filter" && value !== "unspecified" && value !== "unset") {
+      throw new Error("captureWriteDiff: executable Git clean filters are prohibited for candidate files");
+    }
+  }
 }
 
 export function removeWriteWorktree(plan: WriteWorktreePlan, opts: RemoveWriteWorktreeOptions = {}): RemoveWriteWorktreeResult {
   if (!existsSync(plan.worktreePath)) {
+    unregisterWorktreeGitIntegrity(plan.worktreePath);
     runGitStrict(["worktree", "prune"], plan.primaryRoot);
     const branchPruned = pruneWriteBranch(plan, opts);
     return { worktreeRemoved: true, branchPruned, wasPresent: false };
@@ -190,8 +282,18 @@ export function removeWriteWorktree(plan: WriteWorktreePlan, opts: RemoveWriteWo
   if (opts.force) args.push("--force");
   const removed = runGitStrict(args, plan.primaryRoot);
   if (!removed.ok && !isAlreadyRemovedStderr(removed.stderr)) {
-    throw new Error(`removeWriteWorktree: git worktree remove failed: ${removed.stderr.trim()}`);
+    if (opts.force && isDaemonEphemeralWorktree(plan)) {
+      // A worker that replaced `.git` makes `git worktree remove` correctly
+      // refuse the path. This directory was created under a daemon-only name
+      // and force means its candidate contents may be discarded, so remove it
+      // without asking Git to follow the corrupted pointer, then prune only the
+      // primary repository's own metadata.
+      rmSync(plan.worktreePath, { recursive: true, force: true });
+    } else {
+      throw new Error(`removeWriteWorktree: git worktree remove failed: ${removed.stderr.trim()}`);
+    }
   }
+  unregisterWorktreeGitIntegrity(plan.worktreePath);
 
   runGitStrict(["worktree", "prune"], plan.primaryRoot);
   const branchPruned = pruneWriteBranch(plan, opts);
@@ -267,6 +369,11 @@ function isPathWithinOrEqual(path: string, root: string): boolean {
   const rel = relative(root, path);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
+
+// P1 hardlink defeat fix for worktree: refuse targets that are hardlinked to primary (same dev+ino at root).
+// Full tree scan for cross hardlinks post-write is expensive; this catches root-level and documents the limit.
+// (Seatbelt subpath defeats via hardlink from code-exec are mitigated at app+git layer for write mode.)
+
 
 function sanitizeLabel(label: string | undefined): string {
   if (!label) return "";
@@ -364,32 +471,24 @@ function untrackedPorcelainPaths(status: string): string[] {
 
 function readWorktreeStatusStrict(cwd: string): WorktreeStatus {
   const status = runGitStrict(["status", "--porcelain"], cwd);
-  // Headless writes its own session ledger under `.headless/` in the run cwd.
-  // That is our runtime state, not the caller's uncommitted work, so it must
-  // not count as a dirty primary — otherwise contained write mode would refuse
-  // in any repo that has not pre-ignored `.headless/`.
-  const meaningful = filterHeadlessStatePaths(status.stdout);
   return {
     ok: status.ok,
-    dirty: status.ok && meaningful.trim().length > 0,
-    status: meaningful,
+    dirty: status.ok && status.stdout.trim().length > 0,
+    status: status.stdout,
     stderr: status.stderr.trim(),
   };
 }
 
-function filterHeadlessStatePaths(porcelain: string): string {
-  return porcelain
-    .split("\n")
-    .filter((line) => {
-      if (!line.trim()) return false;
-      const path = unquotePorcelainPath(line.slice(3).trim());
-      return path !== ".headless" && !path.startsWith(".headless/");
-    })
-    .join("\n");
-}
-
 function isAlreadyRemovedStderr(stderr: string): boolean {
   return stderr.toLowerCase().includes("not a working tree");
+}
+
+function isDaemonEphemeralWorktree(plan: WriteWorktreePlan) {
+  return plan.ephemeral === true
+    && plan.branch.startsWith(WRITE_BRANCH_PREFIX)
+    && basename(plan.worktreePath).startsWith(WRITE_WORKTREE_DIR_PREFIX)
+    && !isPathWithinOrEqual(plan.worktreePath, plan.primaryRoot)
+    && !isPathWithinOrEqual(plan.primaryRoot, plan.worktreePath);
 }
 
 function pruneWriteBranch(plan: WriteWorktreePlan, opts: RemoveWriteWorktreeOptions): boolean {
@@ -434,4 +533,109 @@ function normalizeWorktreePath(value: string): string | undefined {
   } catch {
     return resolved;
   }
+}
+
+// === Per-agent / Council-style isolated worktrees (inspired by claw-orchestrator + CR) ===
+// Allows spinning up dedicated worktrees per AI coder/agent for safe parallel work.
+// Branch convention: headless/agent/<agent> or council/<agent>
+// Use these from orchestrator / councilDeliberate for multi-coder fleets.
+
+const AGENT_WORKTREE_PREFIX = "headless/agent/";
+const AGENT_WORKTREE_DIR_PREFIX = "headless-agent-";
+
+export interface AgentWorktreePlan {
+  agent: string;
+  primaryRoot: string;
+  branch: string;
+  worktreePath: string;
+  baseSha: string;
+}
+
+export interface PlanAgentWorktreeInput {
+  agent: string;
+  primaryRoot?: string;
+  tempBase?: string;
+}
+
+export function planAgentWorktree(input: PlanAgentWorktreeInput): AgentWorktreePlan {
+  const primary = canonicalExistingWorktreePath(input.primaryRoot ?? process.cwd());
+  if (!isGitWorktreeRoot(primary)) {
+    throw new Error(`planAgentWorktree: primary is not a git worktree root: ${primary}`);
+  }
+  assertSafeDaemonGitRepository(primary);
+  const baseSha = getHeadSha(primary);
+  if (!baseSha) throw new Error("planAgentWorktree: could not resolve HEAD");
+
+  const agentSlug = sanitizeLabel(input.agent);
+  if (!agentSlug) throw new Error("planAgentWorktree: agent name required");
+
+  const id = randomUUID().slice(0, 8);
+  const branch = `${AGENT_WORKTREE_PREFIX}${agentSlug}-${id}`;
+  const worktreePath = join(input.tempBase ?? tmpdir(), `${AGENT_WORKTREE_DIR_PREFIX}${agentSlug}-${id}`);
+
+  return {
+    agent: input.agent,
+    primaryRoot: primary,
+    branch,
+    worktreePath,
+    baseSha,
+  };
+}
+
+export function createAgentWorktree(plan: AgentWorktreePlan): AgentWorktreePlan {
+  const primary = canonicalExistingWorktreePath(plan.primaryRoot);
+  if (!isGitWorktreeRoot(primary)) {
+    throw new Error(`createAgentWorktree: primary not git root: ${primary}`);
+  }
+
+  const status = readWorktreeStatusStrict(primary);
+  if (!status.ok || status.dirty) {
+    throw new Error(`createAgentWorktree: primary must be clean`);
+  }
+
+  if (existsSync(plan.worktreePath)) {
+    throw new Error(`createAgentWorktree: path exists ${plan.worktreePath}`);
+  }
+
+  const added = runGitStrict(["worktree", "add", "-b", plan.branch, plan.worktreePath, plan.baseSha], primary);
+  if (!added.ok) {
+    throw new Error(`createAgentWorktree: git worktree add failed: ${added.stderr.trim()}`);
+  }
+
+  try {
+    registerWorktreeGitIntegrity(plan.worktreePath, primary);
+  } catch (error) {
+    runGitStrict(["worktree", "remove", "--force", plan.worktreePath], primary);
+    runGitStrict(["branch", "-D", plan.branch], primary);
+    throw new Error(`createAgentWorktree: linked worktree integrity registration failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return plan;
+}
+
+export function removeAgentWorktree(plan: AgentWorktreePlan, force = false): void {
+  if (existsSync(plan.worktreePath)) {
+    const args = ["worktree", "remove", plan.worktreePath];
+    if (force) args.push("--force");
+    runGitStrict(args, plan.primaryRoot);
+  }
+  unregisterWorktreeGitIntegrity(plan.worktreePath);
+  runGitStrict(["worktree", "prune"], plan.primaryRoot);
+  if (plan.branch.startsWith(AGENT_WORKTREE_PREFIX)) {
+    runGitStrict(["branch", "-D", plan.branch], plan.primaryRoot).ok; // best effort
+  }
+}
+
+/**
+ * Convenience: set up isolated worktrees for a list of agents (e.g. for council-style runs).
+ * Returns map of agent -> worktreePath
+ */
+export function setupAgentWorktrees(agents: string[], primaryRoot?: string): Record<string, string> {
+  const plans = agents.map(a => planAgentWorktree({ agent: a, primaryRoot }));
+  const result: Record<string, string> = {};
+  for (const p of plans) {
+    createAgentWorktree(p);
+    result[p.agent] = p.worktreePath;
+  }
+  return result;
 }

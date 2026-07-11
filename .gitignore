@@ -4,6 +4,7 @@ opencode/
 .headless/
 *.log
 .contextrelay/
+.codex/
 .DS_Store
 .env
 .env.local

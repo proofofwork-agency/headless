@@ -91,12 +91,12 @@ This pattern is how "any agent" can drive the fleet.
 - Release-gate + evidence collection before publish.
 - Threat model doc.
 
-## Current Limitations (from our perspective)
+## Current Limitations (from our perspective, at time of analysis 2026-07-09)
 
-- OpenCode adapter is Darwin-only for full OS sandbox enforcement (config deny works everywhere).
-- Primarily read-only headless today (write mode is Codex workspace-write for now).
-- Tight coupling to Claude + Codex live pairing; the headless piece is more general but still lives inside the CR package.
-- No first-class "multi-backend fleet" or "workflow DAG" executor on top of the primitive.
+- OpenCode adapter is Darwin-only for full OS sandbox enforcement (config deny works everywhere). *(Headless v0.2 later added required Linux bubblewrap containment; it does not claim Landlock rules.)*
+- Primarily read-only headless today (write mode is Codex workspace-write for now). *(Headless now has full write worktrees + agent worktrees for all.)*
+- Tight coupling to Claude + Codex live pairing; the headless piece is more general but still lives inside the CR package. *(Headless extracted to standalone; now multi-backend + MCP universal.)*
+- No first-class "multi-backend fleet" or "workflow DAG" executor on top of the primitive. *(Headless added 4 backends, autonomy, council, TUI, channels.)*
 
 ## Recommendation for Headless Project
 

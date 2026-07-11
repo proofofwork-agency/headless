@@ -1,0 +1,232 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { HeadlessDaemonClient } from "../src/daemon/client";
+import { connectOrStartDaemon } from "../src/daemon/connect";
+import { HeadlessDaemon } from "../src/daemon/server";
+import {
+  __handleCallToolForTest,
+  mcpToolDefinitions,
+  sendChannelPush,
+  server,
+  startMcpServer,
+} from "../src/mcp/server";
+import { server as openCodePluginServer } from "../plugin/index";
+
+const MCP_EXPECTED_TOOLS = [
+  "headless_run",
+  "headless_deliberate",
+  "headless_project_trust",
+  "headless_fleet_profile",
+  "headless_fleet_health",
+  "headless_goal",
+  "headless_collaboration",
+  "headless_approval",
+  "headless_candidate",
+  "headless_append_note",
+  "headless_record_artifact",
+  "headless_read_context",
+  "headless_task_state",
+  "headless_propose_final",
+  "headless_ask_for_work",
+  "ask_for_more_work",
+  "ask_for_work",
+  "ask_for_backup",
+  "headless_record_task_claim",
+  "headless_record_consensus_vote",
+  "headless_record_idle_action",
+  "headless_record_release_gate",
+  "headless_gate",
+  "headless_get_cooperation_instructions",
+  "send_message",
+  "wait_for_handoff",
+  "get_messages",
+  "council_deliberate",
+  "headless_workflow_run",
+  "headless_workflow_status",
+];
+
+describe("MCP server surface", () => {
+  test("exports a deferred stdio server", () => {
+    expect(typeof startMcpServer).toBe("function");
+    expect(server).toBeDefined();
+  });
+
+  test("matches the OpenCode plugin tool surface", async () => {
+    const names = mcpToolDefinitions.map((tool) => tool.name).sort();
+    expect(names).toEqual([...MCP_EXPECTED_TOOLS].sort());
+    const plugin = await openCodePluginServer({} as never);
+    expect(names).toEqual(Object.keys(plugin.tool ?? {}).sort());
+  });
+});
+
+describe("MCP authenticated daemon integration", () => {
+  let fixture!: DaemonFixture;
+
+  beforeEach(async () => {
+    fixture = await startDaemonFixture();
+  });
+
+  afterEach(async () => {
+    if (!fixture) return;
+    await fixture.daemon.stop();
+    restoreEnv(fixture.previousEnv);
+    rmSync(fixture.runtime, { recursive: true, force: true });
+    rmSync(fixture.root, { recursive: true, force: true });
+    fixture = undefined!;
+  });
+
+  test("uses a scoped MCP principal and ignores client identity claims", async () => {
+    const response = await callTool("send_message", {
+      from: "coordinator",
+      to: "reviewer",
+      content: "identity-bound message",
+      source: "coordinator",
+      actor: "coordinator",
+      sessionId: "mcp-attribution",
+    });
+
+    expect(response.isError).not.toBe(true);
+
+    const integration = await connectOrStartDaemon({
+      projectRoot: fixture.project,
+      credential: { integration: "mcp" },
+    });
+    const ping = await integration.call<{ principal: string }>("ping");
+    expect(ping.principal).toBe("integration:mcp");
+    await expect(integration.call("auth.list")).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    await expect(integration.call("ledger.event", {
+      type: "finality_decision",
+      sessionId: "mcp-attribution",
+      payload: { content: "client declared completion", source: "coordinator" },
+    })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+
+    const context = await fixture.rootClient.call<RawContext>("ledger.context", {
+      view: "raw",
+      limit: 50,
+      sessionId: "mcp-attribution",
+    });
+    const message = context.entries.find((entry) => entry.content === "identity-bound message");
+
+    expect(message?.source).toBe("integration:mcp");
+    expect(message?.message?.from).toBe("integration:mcp");
+    expect(message?.source).not.toBe("coordinator");
+  });
+
+  test("persists a redacted channel message and drains it through get_messages", async () => {
+    const chatId = "mcp-redaction";
+    const secret = "sk-1234567890abcdefghijkl";
+
+    await sendChannelPush(`channel secret ${secret}`, "spoofed-coordinator", {
+      sessionId: chatId,
+      actor: "coordinator",
+    });
+
+    const pulled = await callTool("get_messages", { sessionId: chatId, limit: 10 });
+    const pulledText = pulled.content[0]?.text ?? "";
+    expect(pulled.isError).not.toBe(true);
+    expect(pulledText).toContain("REDACTED");
+    expect(pulledText).not.toContain(secret);
+
+    const drained = await callTool("get_messages", { sessionId: chatId, limit: 10 });
+    expect(drained.content[0]?.text).toBe("no messages");
+
+    const context = await fixture.rootClient.call<RawContext>("ledger.context", {
+      view: "raw",
+      limit: 50,
+      sessionId: chatId,
+    });
+    const queued = context.entries.find((entry) => entry.type === "message" && entry.content?.includes("channel secret"));
+    expect(queued?.source).toBe("integration:mcp");
+    expect(queued?.message?.from).toBe("integration:mcp");
+    expect(JSON.stringify(queued)).not.toContain(secret);
+  });
+
+  test("ledger tools operate through the daemon instead of process-local state", async () => {
+    const note = await callTool("headless_append_note", {
+      text: "daemon-owned MCP note",
+      source: "self-declared-principal",
+      sessionId: "mcp-ledger",
+    });
+    const artifact = await callTool("headless_record_artifact", {
+      kind: "test_report",
+      title: "MCP boundary",
+      summary: "daemon persisted",
+      status: "passed",
+      sessionId: "mcp-ledger",
+    });
+    const read = await callTool("headless_read_context", {
+      view: "raw",
+      limit: 50,
+      sessionId: "mcp-ledger",
+    });
+
+    expect(note.isError).not.toBe(true);
+    expect(artifact.isError).not.toBe(true);
+    expect(read.isError).not.toBe(true);
+
+    const context = JSON.parse(read.content[0]?.text ?? "{}") as RawContext;
+    const persisted = context.entries.find((entry) => entry.content === "daemon-owned MCP note");
+    expect(persisted?.source).toBe("integration:mcp");
+    expect(context.entries.some((entry) => entry.artifact?.title === "MCP boundary")).toBe(true);
+  });
+});
+
+type ToolResponse = Awaited<ReturnType<typeof __handleCallToolForTest>>;
+
+function callTool(name: string, args: Record<string, unknown>): Promise<ToolResponse> {
+  return __handleCallToolForTest({ params: { name, arguments: args } });
+}
+
+type RawContext = {
+  entries: Array<{
+    type?: string;
+    source?: string;
+    content?: string;
+    message?: { from?: string };
+    artifact?: { title?: string };
+  }>;
+};
+
+type DaemonFixture = {
+  root: string;
+  runtime: string;
+  project: string;
+  daemon: HeadlessDaemon;
+  rootClient: HeadlessDaemonClient;
+  previousEnv: Record<"HEADLESS_PROJECT_ROOT" | "HEADLESS_STATE_HOME" | "HEADLESS_RUNTIME_HOME", string | undefined>;
+};
+
+async function startDaemonFixture(): Promise<DaemonFixture> {
+  const root = mkdtempSync(join(tmpdir(), "headless-mcp-test-"));
+  const runtime = mkdtempSync("/tmp/hm-");
+  const project = join(root, "project");
+  mkdirSync(project);
+  const previousEnv = {
+    HEADLESS_PROJECT_ROOT: process.env.HEADLESS_PROJECT_ROOT,
+    HEADLESS_STATE_HOME: process.env.HEADLESS_STATE_HOME,
+    HEADLESS_RUNTIME_HOME: process.env.HEADLESS_RUNTIME_HOME,
+  };
+  process.env.HEADLESS_PROJECT_ROOT = project;
+  process.env.HEADLESS_STATE_HOME = join(root, "state");
+  process.env.HEADLESS_RUNTIME_HOME = runtime;
+
+  const daemon = new HeadlessDaemon({ projectRoot: project, principal: "coordinator" });
+  await daemon.start();
+  return {
+    root,
+    runtime,
+    project,
+    daemon,
+    rootClient: new HeadlessDaemonClient({ projectRoot: project }),
+    previousEnv,
+  };
+}
+
+function restoreEnv(values: DaemonFixture["previousEnv"]) {
+  for (const [name, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+}
