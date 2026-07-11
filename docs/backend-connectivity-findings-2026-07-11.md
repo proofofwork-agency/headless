@@ -103,6 +103,24 @@ would be denied its API socket even after the auth capsule is built. Worth
 reconciling in `src/runner/simple.ts` (`writeDarwinReadOnlySandboxProfile`,
 `sandboxNetwork`).
 
+## Update — opencode DOES run under required containment (the earlier "needs home-read" was mostly a test artifact)
+
+Deeper testing revised the opencode conclusion in a positive direction. **opencode runs under headless's required-containment Seatbelt** (`containment.enforced: true`, `mechanism: darwin-seatbelt-read`, `network: provider-direct`) and, run directly, answers correctly:
+
+```
+{"type":"text", ... "text":"READY", ...}   # on stdout
+```
+
+Three narrower issues, not a home-read requirement:
+
+1. **Test-location artifact.** My throwaway project lived under `~/.claude/jobs/...`, and `~/.claude` is in `sandboxCredentialRoots()`. Deny rules override the workdir read-allow, so opencode could not read its own cwd → "unknown error". A **real project** (e.g. under `~/projects`, `/private/tmp`) is not under a denied path and reads fine. The earlier "opencode needs whole-home read" manual tests were confounded by running with a cwd (the worktree) that simply wasn't in the profile's read roots.
+
+2. **Native-login auth path.** opencode resolves its login token from `~/.local/share/opencode/auth.json` via `getpwuid` (the real home), **not** the worker's XDG-remapped dir where headless copies the capsule. Under the isolated worker + secret denylist the real path is unreadable, so opencode boots, migrates its DB, but gets no model response. Fix options: (a) make opencode read the capsule from `XDG_DATA_HOME`/`OPENCODE_*` so `getpwuid` isn't consulted, or (b) grant read of the backend's own auth dir for its own native-login run (backend-scoped, not a general home-read).
+
+3. **Run path + output handling.** The actual coder turn runs through `native-session-manager.ts` (which hardcodes `isolatedHome: true`), a different path than the `maybeWrapWithSandbox` probe — so any read-root change must be applied there too. Separately, opencode's one-time DB-migration banner prints to **stderr** while the JSON result is clean on **stdout**; headless surfaced the stderr as a `PROCESS_ERROR`. Because each isolated run gets a fresh data dir, the migration runs every time — worth pre-seeding or persisting the worker's opencode data dir.
+
+**Bottom line:** the earlier "coders can't work under containment / needs a security relaxation" framing was too pessimistic. opencode already runs contained; finishing a full turn needs auth-capsule wiring (so opencode uses the copied credential) plus the native-session run path and the stderr-vs-stdout result handling — **no home-read or containment weakening required.** codex still needs its arg0/temp-write reconciliation; claude still needs file-based creds. A home-read opt-in was prototyped and reverted once this narrower, no-regression path became clear.
+
 ## Test status
 
 - CLI surface: every command re-verified functional (trust, daemon, status,
