@@ -13,7 +13,6 @@ const config: Config = {
   organizationName: "proofofwork-agency",
   projectName: "headless",
   onBrokenLinks: "warn",
-  onBrokenMarkdownLinks: "warn",
   i18n: { defaultLocale: "en", locales: ["en"] },
   presets: [
     [
