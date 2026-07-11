@@ -114,6 +114,59 @@ HEADLESS_EXTENSION_CONFIG=/absolute/path/extensions.json headless daemon serve -
 
 Library callers can pass `extensionConfigPath` (or absolute `extensionModules`) to `exec`/`connectOrStartDaemon`; `HeadlessDaemon` accepts the same startup-only options. Config/module files and their ancestor chain are canonicalized, bounded, permission-checked, and content-fingerprinted. A detached bootstrap passes the already-resolved paths and hashes through a startup-only manifest, and the child revalidates them immediately before import. The daemon reports only the configuration digest and registered IDs. A client explicitly requesting a different digest fails closed, and one process cannot host daemons with different extension registries; restart the daemon process after changing an extension. Extension modules execute with daemon authority and therefore must be treated as trusted code.
 
+## Control room (TUI)
+
+`headless tui` (alias `hless tui`) opens the control room, an Ink terminal UI that drives the same authenticated daemon as every other client. It requires an interactive terminal and the project's one-time trust grant; native-login, approval policy, and fleet selection resolve exactly as they do on the CLI. Input stays editable while the daemon reconnects, and every panel is fed by a bounded, redacted live subscription.
+
+Six views, switched with `tab`/`shift+tab`, the number keys `1`–`6`, `←`/`→` when the prompt is empty, or a mouse click on the tab bar:
+
+- **Overview** — fleet, active goal, pending approvals, and the inspected candidate as cards above a merged activity feed of turns, messages, and run events.
+- **Fleet** — the active profile's agents (health, backend, auth, load) beside a detail pane; other profiles are listed for `/use-fleet`.
+- **Goals** — every known goal with its state glyph, plus the selected goal's objective, leader, and turn/message timeline.
+- **Approvals** — the pending approval queue with the selected entry's detail and the exact `/approve` and `/deny` forms.
+- **Events** — the live, redacted ledger feed with scrollback (`↑`/`↓`, `pgup`/`pgdn`; `esc` returns to live).
+- **Help** — the command palette and keybindings, rendered in-app.
+
+`⏎` submits the prompt or activates the selected row; `esc` clears the prompt, then leaves scrollback, then returns to Overview; `q` quits when the prompt is empty; `ctrl+c` always quits. The mouse selects tabs and rows and the wheel scrolls. Free text with no leading `/` is sent to the active goal's coordinator, starting a read-only goal when none is active. Slash commands mirror the CLI:
+
+| Command | Effect |
+| --- | --- |
+| `/goal <objective>` · `/goal-write <objective>` | start a read-only or gated write goal |
+| `/use-goal <id>` · `/cancel-goal [id]` | switch or cancel the active goal |
+| `/leader <agent-id>` · `/send <text>` | transfer leadership · send a coordinator turn |
+| `/ack-message <id…> [--retain]` | acknowledge mailbox entries, pruning by default |
+| `/fleet` · `/use-fleet <id>` | refresh, or activate a persisted fleet profile |
+| `/policy ask\|auto\|bypass` | set the active fleet's approval policy |
+| `/trust status\|grant\|revoke` | manage project trust |
+| `/approve <id> [reason]` · `/deny <id> [reason]` | resolve a pending approval |
+| `/candidate <id>` · `/integrate <id>` · `/reject-candidate <id>` | inspect, integrate, or reject a candidate |
+| `/autonomy on\|off` · `/dispatch [backend] [prompt]` | toggle the orchestrator · queue a contained read-only run |
+| `/council <question>` · `/gate` · `/workflow <id>` | run a council · run the release gate · show workflow progress |
+| `/claim <task-id>` · `/pair` · `/doctor` | claim durable work · pair · one-line connection summary |
+
+The control room never weakens the daemon's guarantees: every command is an authenticated daemon RPC, updates are redacted and bounded, and it cannot select an arbitrary project root or principal.
+
+## CLI commands
+
+Every command connects to the daemon for the canonical `--cwd` root, starting an embedded daemon when none is live. `--json` returns structured output where supported, and a literal `--` precedes prompts that begin with a flag. Backends are `opencode` (default), `claude`/`claude-code`, `codex`/`codex-cli`, and `grok`/`grok-build`; `--model` is optional everywhere and the backend's own default is used when omitted.
+
+| Area | Commands |
+| --- | --- |
+| Run | `exec\|run [--backend --mode --model --agent --session-id --timeout-ms --stream --json --require-sandbox\|--unsafe-no-sandbox] "prompt"` · `launch <backend> [prompt]` |
+| Sessions | `session create\|send\|resume\|cancel\|status\|result --session-id <id>` |
+| Goals | `goal start\|run\|send\|follow\|status\|list\|cancel\|result [--goal-id --fleet-profile-id --coordinator --mode --detach]` |
+| Collaboration | `collaboration turns\|messages\|acknowledge\|transfer-leader --goal-id <id> [--message-id … --retain]` |
+| Approvals | `approval list\|resolve [--goal-id --approval-id --decision approved\|rejected --resolution]` |
+| Candidates | `candidate inspect\|integrate\|reject --candidate-id <id>` |
+| Fleet | `fleet health` · `fleet profile upsert\|get\|list\|remove [--file --profile-id --activate]` |
+| Councils / workflows | `council [--agent … --mode] "question"` · `workflow run\|list\|status\|wait\|cancel [--file --workflow-id]` |
+| Autonomy | `autonomy start\|stop\|status\|ask\|backup` · `orchestrate` · `pair` |
+| Project | `project trust status\|grant\|revoke [--allow-bypass --deny-native-login]` · `init` |
+| Daemon / inspect | `daemon serve\|status` · `status` · `doctor` · `events [--follow --limit]` · `tui` |
+| Gate / MCP | `gate [--check check\|build\|test\|pack]` · `mcp serve\|install\|remove\|status [host]` |
+
+Read-only inspection (`status`, `doctor`, `events`, the `*.list`/`*.status` forms, `fleet health`, `approval list`, `candidate inspect`) never mutates state. `project trust`, `fleet profile`, `approval resolve`, `candidate integrate`, and goal/session lifecycle changes are durable. `exec`, `session send`/`resume`, `goal start`/`run`, `council`, `workflow run`, `gate`, and `autonomy start` spawn contained backend or check work. Use `bun src/cli.ts <command>` in a checkout during development.
+
 ## Containment model
 
 Every backend is treated as arbitrary code execution.

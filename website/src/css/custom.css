@@ -1,0 +1,46 @@
+/**
+ * Headless docs theme. Dark-mode-first, matching the control-room TUI palette
+ * (BLUE #8aa7ff, ACCENT #22d3ee, SURFACE #252525).
+ */
+
+:root {
+  --ifm-color-primary: #3f63d6;
+  --ifm-color-primary-dark: #3459cf;
+  --ifm-color-primary-darker: #3153c4;
+  --ifm-color-primary-darkest: #2844a1;
+  --ifm-color-primary-light: #566fdc;
+  --ifm-color-primary-lighter: #6178dd;
+  --ifm-color-primary-lightest: #8599e6;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.08);
+}
+
+[data-theme="dark"] {
+  --ifm-color-primary: #8aa7ff;
+  --ifm-color-primary-dark: #6288ff;
+  --ifm-color-primary-darker: #4e79ff;
+  --ifm-color-primary-darkest: #164cff;
+  --ifm-color-primary-light: #b2c6ff;
+  --ifm-color-primary-lighter: #c6d5ff;
+  --ifm-color-primary-lightest: #e6ecff;
+  --ifm-background-color: #1b1b1d;
+  --ifm-background-surface-color: #252525;
+  --ifm-navbar-background-color: #202023;
+  --ifm-footer-background-color: #202023;
+  --docusaurus-highlighted-code-line-bg: rgba(255, 255, 255, 0.06);
+}
+
+[data-theme="dark"] .navbar {
+  border-bottom: 1px solid rgba(138, 167, 255, 0.14);
+}
+
+[data-theme="dark"] code {
+  background-color: #252525;
+  border: 1px solid rgba(138, 167, 255, 0.12);
+}
+
+.theme-doc-markdown h2 {
+  border-top: 1px solid var(--ifm-toc-border-color);
+  padding-top: 1.2rem;
+  margin-top: 1.6rem;
+}
