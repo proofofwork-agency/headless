@@ -14,7 +14,7 @@ import {
   truncateDisplay,
   type TuiControlRoomState,
 } from "./model";
-import { ACCENT, BLUE, CHROME, ERR, LIST_OFFSET, MUTED, OK, SELECT_BG, SELECT_FG, VIOLET, WARN, goalStateGlyph } from "./theme";
+import { ACCENT, BLUE, CHROME, ERR, LIST_OFFSET, MUTED, OK, SELECT_BG, SELECT_FG, SURFACE, VIOLET, WARN, goalStateGlyph } from "./theme";
 
 export type ListMeta = { rows: number; start: number; total: number; paneWidth: number };
 
@@ -37,7 +37,7 @@ export function OverviewView({ state, width, height }: { state: TuiControlRoomSt
   ];
 
   return (
-    <Box flexDirection="column" paddingX={2} height={rows}>
+    <Box flexDirection="column" paddingX={2} height={rows} backgroundColor={SURFACE}>
       {narrow ? (
         <Box flexDirection="column">{cards}</Box>
       ) : (
@@ -204,7 +204,7 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
   const nameWidth = Math.max(10, Math.floor(leftWidth * 0.4));
 
   return (
-    <Box paddingX={2} height={rows}>
+    <Box paddingX={2} height={rows} backgroundColor={SURFACE}>
       <Box flexDirection="column" width={leftWidth}>
         <SectionTitle title="Agents" hint={profile ? profile.name : "no profile"} tone={ACCENT} width={leftWidth} />
         <Text color={CHROME} wrap="truncate">  {"agent".padEnd(nameWidth)} {"backend".padEnd(9)} auth</Text>
@@ -214,7 +214,7 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
           return (
             <Box key={agent.id} width={leftWidth} backgroundColor={isSelected ? SELECT_BG : undefined}>
               <Text wrap="truncate">
-                <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
+                <Text color={isSelected ? ACCENT : CHROME}>{isSelected ? "▸ " : "  "}</Text>
                 <Text color={agent.tone}>{agent.glyph} </Text>
                 <Text bold={isSelected} color={agent.enabled ? "white" : MUTED}>{truncateDisplay(agent.name, nameWidth).padEnd(nameWidth)}</Text>
                 <Text color={isSelected ? SELECT_FG : MUTED}> {agent.backend.padEnd(9)}</Text>
@@ -295,7 +295,7 @@ export function GoalsView({ state, width, height, selected }: { state: TuiContro
   const timeline = detail && detail.id === state.activeGoalId ? activityEntries(state, timelineRows) : [];
 
   return (
-    <Box paddingX={2} height={rows}>
+    <Box paddingX={2} height={rows} backgroundColor={SURFACE}>
       <Box flexDirection="column" width={leftWidth}>
         <SectionTitle title="Goals" hint={`${goals.length} known`} tone={BLUE} width={leftWidth} />
         <Text color={CHROME} wrap="truncate">  state · goal · objective</Text>
@@ -305,7 +305,7 @@ export function GoalsView({ state, width, height, selected }: { state: TuiContro
           return (
             <Box key={goal.id} width={leftWidth} backgroundColor={isSelected ? SELECT_BG : undefined}>
               <Text wrap="truncate">
-                <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
+                <Text color={isSelected ? ACCENT : CHROME}>{isSelected ? "▸ " : "  "}</Text>
                 <Text color={goal.tone}>{goal.glyph} </Text>
                 <Text bold={isSelected} color={goal.active ? ACCENT : "white"}>{goal.id}</Text>
                 <Text color={isSelected ? SELECT_FG : CHROME}> · </Text>
@@ -374,7 +374,7 @@ export function ApprovalsView({ state, width, height, selected }: { state: TuiCo
   const idWidth = Math.max(10, Math.min(24, Math.floor(contentWidth * 0.2)));
 
   return (
-    <Box flexDirection="column" paddingX={2} height={rows}>
+    <Box flexDirection="column" paddingX={2} height={rows} backgroundColor={SURFACE}>
       <SectionTitle
         title="Approvals"
         hint={approvals.length > 0 ? `${approvals.length} pending · enter prefills /approve` : undefined}
@@ -388,7 +388,7 @@ export function ApprovalsView({ state, width, height, selected }: { state: TuiCo
         return (
           <Box key={approval.id} width={contentWidth} backgroundColor={isSelected ? SELECT_BG : undefined}>
             <Text wrap="truncate">
-              <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
+              <Text color={isSelected ? ACCENT : CHROME}>{isSelected ? "▸ " : "  "}</Text>
               <Text color={WARN}>! </Text>
               <Text bold={isSelected} color="white">{truncateDisplay(approval.id, idWidth).padEnd(idWidth)}</Text>
               <Text color={VIOLET}> {approval.kind.padEnd(10)}</Text>
@@ -437,7 +437,7 @@ export function EventsView({ state, width, height, scrollBack }: { state: TuiCon
   const live = scrollBack === 0;
 
   return (
-    <Box flexDirection="column" paddingX={2} height={rows}>
+    <Box flexDirection="column" paddingX={2} height={rows} backgroundColor={SURFACE}>
       <SectionTitle
         title="Events"
         hint={live ? `live · ${state.events.length} buffered` : `scrollback ${scrollBack} · esc jumps to live`}
@@ -509,7 +509,7 @@ export function HelpView({ width, height }: { width: number; height: number }) {
   const keysWidth = split ? contentWidth - commandWidth - 2 : contentWidth;
   const commandRows = split ? rows - 1 : Math.max(4, rows - HELP_KEYS.length - 3);
   return (
-    <Box paddingX={2} height={rows} flexDirection={split ? "row" : "column"}>
+    <Box paddingX={2} height={rows} flexDirection={split ? "row" : "column"} backgroundColor={SURFACE}>
       <Box flexDirection="column" width={commandWidth}>
         <SectionTitle title="Commands" tone={BLUE} width={commandWidth} />
         {HELP_COMMANDS.slice(0, Math.max(1, commandRows - 1)).map(([command, description]) => (

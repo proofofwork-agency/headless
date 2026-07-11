@@ -11,7 +11,6 @@ import {
   INK,
   MUTED,
   OK,
-  SELECT_BG,
   SURFACE,
   WARN,
   type TuiView,
@@ -78,9 +77,11 @@ function TabLabel({ segment, active }: { segment: TabSegment; active: boolean })
   const base = segment.badge > 0 ? segment.label.slice(0, -String(segment.badge).length - 1) : segment.label;
   // No horizontal padding: the tab's hit-test columns are derived from the raw
   // label width, so the highlight must not change the rendered character count.
+  // Active tab = dark SURFACE fill + bold blue + underline, matching the tpn
+  // "darker fill" active-tab treatment and linking it to its SURFACE panel.
   return (
     <Text>
-      <Text bold={active} color={active ? "white" : MUTED} backgroundColor={active ? SELECT_BG : undefined}>{base}</Text>
+      <Text bold={active} underline={active} color={active ? BLUE : MUTED} backgroundColor={active ? SURFACE : undefined}>{base}</Text>
       {segment.badge > 0 ? (
         <>
           <Text color={CHROME}>·</Text>

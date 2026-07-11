@@ -9,10 +9,14 @@ export const WARN = "#fbbf24";
 export const ERR = "#f87171";
 export const VIOLET = "#c4b5fd";
 
-/** Highlight fill for the selected list row and the active tab. */
-export const SELECT_BG = "#2b3154";
-/** Brighter foreground for secondary text sitting on {@link SELECT_BG}. */
-export const SELECT_FG = "#c7d0f0";
+// Elevation model (matches the tpn TUI): the terminal background is L0, content
+// panels and the active tab are shaded with the neutral dark SURFACE (L1) so
+// whole areas read as raised regions, and the selected row sits one step above
+// that on SELECT_BG (L2).
+/** Raised fill for the selected list row, sitting above a SURFACE panel. */
+export const SELECT_BG = "#313a63";
+/** Brighter foreground for text sitting on {@link SELECT_BG}. */
+export const SELECT_FG = "#d5ddff";
 /** Near-black ink for text printed on a saturated pill background. */
 export const INK = "#0b0b12";
 
