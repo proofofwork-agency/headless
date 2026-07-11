@@ -132,3 +132,65 @@ Three narrower issues, not a home-read requirement:
 - TUI: controller driven against the live daemon — all commands route; fleet shows
   grok as unavailable.
 - `bun run check` + 512 tests green.
+
+## Update 3 — THE REAL BLOCKER: `opencode run --format json` emits only `step_start` (opencode bug, not headless)
+
+Deep live diagnosis (opencode 1.15.3, the version the registry pins) found the actual reason a
+coder "doesn't connect." It is **not** containment, auth, the migration, model selection, or any
+headless plumbing. It is opencode's one-shot CLI itself.
+
+**Reproduction (outside headless, with a Bun spawn identical to `simple.ts:344`):**
+`opencode run --pure --format json --dir <proj> --model <m> -- "<prompt>"` writes **only** the
+`step_start` JSON line to stdout (250 bytes), then exits 0 — **never** the assistant `text` or the
+`step-finish`. Reproduced 15+ times, deterministically, across:
+- valid models (`zai-coding-plan/glm-4.7`, `glm-5-turbo`, `glm-4.5-air`) and the configured default
+  (`glm-5.2`);
+- short ("Reply READY") and long (17 s streaming) prompts;
+- `--format json` and `--format default` (default writes the assistant text nowhere to stdout —
+  only a 29-byte ANSI header — and json writes only `step_start`);
+- with and without `--pure`;
+- fresh isolated HOME/XDG and the real home.
+
+**The model actually works — proof from opencode's own SQLite DB** (`~/.local/share/opencode/opencode.db`,
+`part` table): after these runs it contains the full correct turn — `[text] 'READY'`, `[reasoning] …`,
+`[step-finish] tokens={output:3,…}`. So the provider call, auth (static z.ai/GLM key), and turn all
+succeed; opencode's internal event bus even publishes `message.part.updated`. **The events just
+never reach stdout past `step_start`.** This is an opencode binary output/flush defect.
+
+**Auth/containment questions from Update 2 are all resolved (not the cause):**
+- opencode honors `XDG_DATA_HOME`; the capsule at `worker.data/opencode/auth.json` is exactly where
+  it looks (proven via disassembly + live `opencode auth list`). No auth-path gap; no home-read.
+- The "hang" seen in early manual probes was a **test artifact**: opencode blocks on an *open* stdin.
+  Bun's `spawn` default (`stdin: undefined`, what headless passes) is effectively closed, so
+  **headless does not hang** — verified by replicating headless's exact spawn.
+
+**Consequence for both run paths:** Path A (`headless exec`, one-shot) and Path B (native session,
+`OpenCodeSessionDriver`) both spawn `opencode run --format json` (Path B only adds `--session <id>`).
+Since that command emits only `step_start`, **neither path can capture an answer** — this is why the
+TUI shows no reply. ContextRelay's `opencode-adapter.ts` uses the **identical** command
+(`opencode run --format json --pure --dir …`), so it is subject to the same defect; opencode's
+*interactive* TUI (server/HTTP API) is a different path and is what works in daily use.
+
+**Fix options (opencode-level — a headless code change alone cannot make opencode emit output):**
+1. **Update/reinstall opencode** (`opencode upgrade`) and re-verify `run --format json` streams the
+   full event set. Most likely a version-specific regression; cheapest first step. *(A tool-install
+   change to the user's daily driver — left to the user, not done silently.)*
+2. **Switch the opencode adapter to server mode** (`opencode serve` + HTTP `/session` API) instead of
+   `opencode run`. Robust (it's what the working interactive TUI uses) but a real adapter rewrite.
+3. **Last resort:** read the completed turn from opencode's SQLite `part` table after `run` exits
+   (the data is there). Fragile — couples to opencode's internal schema; not recommended.
+
+**Identified but DEFERRED — the Path A migration retry.** Path A misclassifies the one-time
+DB-migration run (exit 0, empty stdout, banner `sqlite-migration:done` / `Database migration
+complete.` on stderr, all **confirmed against the real 1.15.3 output**) as `PROCESS_ERROR`. The
+correct fix is to port Path B's `isCompletedDatabaseMigration` retry into `runBackendProcess`. This
+was **intentionally not shipped in this pass** because:
+1. The opencode output bug above blocks Path A output regardless — the retry would just get another
+   `step_start`-only result, so it fixes nothing user-visible until opencode is repaired.
+2. Path B (native session — what goals and the TUI use) **already** handles the migration; the
+   misclassification only bites plain `headless exec` on a fresh worker.
+3. The retry re-spawns inside the core runner (`runBackendProcess`), so it carries real complexity
+   and regression surface that isn't justified for zero current benefit.
+A blanket removal of the `|| stderrRead.text.trim()` fallback at `simple.ts:387` was also rejected:
+it would hide genuine stderr-only failures behind the generic "No assistant output" message. Revisit
+the retry (guarded specifically on the migration predicate) once opencode's `run` output is fixed.
