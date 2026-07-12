@@ -395,6 +395,7 @@ async function runBackendProcess(
       if (process) activeProcs.delete(process);
       [exitCode, stdoutRead, stderrRead] = await spawnAndRead();
     }
+    stream?.finish();
     const durationMs = Date.now() - started;
     const parsed = normalizeAdapterResult(adapter.parse(stdoutRead.text), adapter.id);
     const callbackFailures = stream?.failureCount() ?? 0;
@@ -457,7 +458,6 @@ async function runBackendProcess(
   } catch (error) {
     return failedResult(options.backend, cancelled ? "CANCELLED" : "PROCESS_ERROR", messageOf(error), Date.now() - started, containment, cancelled ? "cancelled" : "failed", wrapped, worker);
   } finally {
-    stream?.finish();
     if (timeoutHandle) clearTimeout(timeoutHandle);
     options.signal?.removeEventListener("abort", abort);
     const pendingTermination = stopping as ReturnType<typeof terminateProcessTree> | null;
