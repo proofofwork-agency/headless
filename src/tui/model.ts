@@ -95,10 +95,22 @@ export function mergeRunEvents(current: readonly RunEvent[], incoming: readonly 
     .slice(-Math.max(1, limit));
 }
 
+const byRecency = (left: Goal, right: Goal) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt;
+
 export function selectActiveGoal(goals: readonly Goal[], preferred: string | null) {
-  const usable = goals.filter((goal) => !TERMINAL_GOAL_STATES.has(goal.state));
-  if (preferred && usable.some((goal) => goal.id === preferred)) return preferred;
-  return [...usable].sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt)[0]?.id ?? null;
+  const active = goals.filter((goal) => !TERMINAL_GOAL_STATES.has(goal.state));
+  // While any goal is still running, track it (the current one if it's still
+  // active, otherwise the newest active goal).
+  if (active.length > 0) {
+    if (preferred && active.some((goal) => goal.id === preferred)) return preferred;
+    return [...active].sort(byRecency)[0]!.id;
+  }
+  // No goal is running: keep the currently-tracked goal selected even though it
+  // has reached a terminal state, so its final reply stays on screen until the
+  // user starts a new goal. Previously this returned null the instant a goal
+  // completed, which wiped the answer (turns/messages) from the control room.
+  if (preferred && goals.some((goal) => goal.id === preferred)) return preferred;
+  return [...goals].sort(byRecency)[0]?.id ?? null;
 }
 
 export function activeFleetProfile(state: Pick<TuiControlRoomState, "fleetProfiles" | "activeFleetProfileId">) {

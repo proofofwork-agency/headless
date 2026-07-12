@@ -19,6 +19,7 @@ import {
   initialControlRoomState,
   mergeRunEvents,
   recentActivityLines,
+  selectActiveGoal,
   shortPath,
   type TuiControlRoomState,
 } from "../src/tui/model";
@@ -442,6 +443,24 @@ describe("Headless TUI control room", () => {
     expect(listWindowStart(39, 5, 40)).toBe(35);
     expect(nextView("overview")).toBe("fleet");
     expect(nextView("overview", -1)).toBe("help");
+  });
+
+  test("keeps a completed goal selected so its final reply stays visible", () => {
+    const active = goalFixture("goal-running", "active");
+    const done = { ...goalFixture("goal-running", "succeeded"), updatedAt: 50 };
+
+    // While running, the current goal is tracked.
+    expect(selectActiveGoal([active], "goal-running")).toBe("goal-running");
+    // After it completes with no other goal running, it stays selected (the bug:
+    // this previously returned null and wiped the reply from the control room).
+    expect(selectActiveGoal([done], "goal-running")).toBe("goal-running");
+    // A fresh session with only a completed goal still surfaces it (not null).
+    expect(selectActiveGoal([done], null)).toBe("goal-running");
+    // Starting a new goal switches away from the finished one.
+    const next = { ...goalFixture("goal-next", "planning"), updatedAt: 100 };
+    expect(selectActiveGoal([done, next], "goal-running")).toBe("goal-next");
+    // No goals at all -> nothing selected.
+    expect(selectActiveGoal([], "goal-running")).toBeNull();
   });
 
   test("passes --cwd from the CLI invocation to the TUI project boundary", () => {

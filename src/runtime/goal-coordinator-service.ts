@@ -106,6 +106,11 @@ export class GoalCoordinatorService {
   readonly delegations: GoalDelegationRuntime;
   private readonly active = new Map<string, Promise<void>>();
   private readonly activeJobs = new Map<string, Set<string>>();
+  // Per-goal set of agents that failed a turn with a retryable provider/account
+  // error (rate limit, exhausted credits/quota, auth). Leader selection excludes
+  // them so the goal fails over to another healthy agent instead of dying. Cleared
+  // when the goal execution settles.
+  private readonly failedProviderAgents = new Map<string, Set<string>>();
   private readonly integrationControllers = new Map<string, AbortController>();
   private readonly now: () => number;
   private readonly id: () => string;
@@ -316,6 +321,7 @@ export class GoalCoordinatorService {
       .finally(() => {
         if (this.active.get(goalId) === execution) this.active.delete(goalId);
         this.activeJobs.delete(goalId);
+        this.failedProviderAgents.delete(goalId);
       });
     this.active.set(goalId, execution);
   }
@@ -324,16 +330,34 @@ export class GoalCoordinatorService {
     let record = this.options.goals.get(goalId);
     if (!record || record.result) return;
     const profile = this.requireProfile(record.goal.fleetProfileId);
-    let leader = this.resolveLeader(profile, record);
     this.preparePlanning(goalId, record.goal.principal);
-    const planTurn = await this.runTurn(
-      record.goal,
-      leader,
-      planningPrompt(record.goal.objective, prompt, profile.maxActiveWorkers),
-      record.goal.principal,
-      "planning",
-      record.goal.principal,
-    );
+    let leader = this.resolveLeader(profile, record);
+    // Fail the leader's opening turn over to another healthy agent when it fails
+    // with a provider/account error (e.g. the leader is out of credits), instead of
+    // failing the whole goal. Bounded to one attempt per enabled agent; resolveLeader
+    // excludes the failed agent(s) and transfers leadership.
+    const maxLeaderAttempts = Math.max(1, profile.agents.filter((agent) => agent.enabled).length);
+    let planTurn: CompletedGoalTurn;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        planTurn = await this.runTurn(
+          record.goal,
+          leader,
+          planningPrompt(record.goal.objective, prompt, profile.maxActiveWorkers),
+          record.goal.principal,
+          "planning",
+          record.goal.principal,
+        );
+        break;
+      } catch (error) {
+        const excluded = this.failedProviderAgents.get(goalId);
+        if (!excluded?.has(leader.id) || attempt >= maxLeaderAttempts) throw error;
+        record = this.options.goals.get(goalId) ?? record;
+        const next = this.resolveLeader(profile, record);
+        if (next.id === leader.id) throw error;
+        leader = next;
+      }
+    }
     const plan = parseGoalPlan(planTurn.turn.output, `${record.goal.objective}\n\nCURRENT TURN:\n${prompt}`);
     const assignments = this.assignDelegations(profile, record.goal, plan, leader.id);
     this.publishPlan(record.goal, leader.id, planTurn, plan, assignments);
@@ -349,17 +373,34 @@ export class GoalCoordinatorService {
       });
     }
     this.advance(goalId, "active", record.goal.principal, "Independent worker delegations started through the durable scheduler.");
+    const leaderId = leader.id;
     const workerSettled = await Promise.allSettled(assignments.map(async (assignment) => {
-      const completed = await this.runTurn(
-        record!.goal,
-        assignment.agent,
-        workerPrompt(record!.goal.objective, assignment.plan, planTurn),
-        leader.id,
-        "worker",
-        leader.id,
-      );
-      this.publishWorkerQuestions(record!.goal, assignment.agent.id, leader.id, completed);
-      return completed;
+      let agent = assignment.agent;
+      const attempted = new Set<string>([agent.id]);
+      for (;;) {
+        try {
+          const completed = await this.runTurn(
+            record!.goal,
+            agent,
+            workerPrompt(record!.goal.objective, assignment.plan, planTurn),
+            leaderId,
+            "worker",
+            leaderId,
+          );
+          this.publishWorkerQuestions(record!.goal, agent.id, leaderId, completed);
+          return completed;
+        } catch (error) {
+          // A worker whose agent failed with a provider/account error (e.g. out of
+          // credits) is reassigned to another healthy agent instead of failing the
+          // goal. Bounded by the set of agents already attempted.
+          const excluded = this.failedProviderAgents.get(goalId);
+          if (!excluded?.has(agent.id)) throw error;
+          const replacement = this.pickAvailableAgent(profile, record!.goal, new Set([...(excluded ?? []), ...attempted]));
+          if (!replacement) throw error;
+          attempted.add(replacement.id);
+          agent = replacement;
+        }
+      }
     }));
     const workerFailures = workerSettled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
     if (workerFailures.length > 0) {
@@ -513,8 +554,9 @@ export class GoalCoordinatorService {
     });
   }
 
-  private resolveLeader(profile: FleetProfile, record: GoalRecord) {
-    const decision = this.selectLeader(profile, record.goal.coordinator, record.goal.leaderAgentId, record.goal);
+  private resolveLeader(profile: FleetProfile, record: GoalRecord, excludeAgentIds?: ReadonlySet<string>) {
+    const exclude = excludeAgentIds ?? this.failedProviderAgents.get(record.goal.id);
+    const decision = this.selectLeader(profile, record.goal.coordinator, record.goal.leaderAgentId, record.goal, exclude);
     if (!decision.leaderId) {
       throw new HeadlessError("NATIVE_SESSION_LOST", "No healthy leader is available for goal recovery.", { retryable: true });
     }
@@ -538,9 +580,11 @@ export class GoalCoordinatorService {
     plan: ParsedGoalPlan,
     leaderId: string,
   ): AssignedDelegation[] {
+    const excluded = this.failedProviderAgents.get(goal.id);
     const candidates = profile.agents
       .map((agent) => ({ agent, availability: this.options.availability(agent, goal) }))
       .filter(({ agent, availability }) => agent.enabled
+        && !excluded?.has(agent.id)
         && isAvailableNow(availability, this.now())
         && availability.activeTurns < agent.maxConcurrentTurns)
       .map(({ agent }) => agent)
@@ -578,10 +622,12 @@ export class GoalCoordinatorService {
     const reviewerTurnCapacity = Math.max(1, Math.floor(
       (attemptTurnCapacity - fixedTurnCapacity) / profile.maxDeliberationRounds,
     ));
+    const excluded = this.failedProviderAgents.get(goal.id);
     return profile.agents
       .map((agent) => ({ agent, availability: this.options.availability(agent, goal) }))
       .filter(({ agent, availability }) => agent.enabled
         && agent.id !== leaderId
+        && !excluded?.has(agent.id)
         && isAvailableNow(availability, this.now())
         && availability.activeTurns < agent.maxConcurrentTurns)
       .map(({ agent }) => agent)
@@ -873,6 +919,7 @@ export class GoalCoordinatorService {
             completedAt: this.now(),
             updatedAt: this.now(),
           });
+          this.recordProviderFailure(goal.id, agent.id, output);
           return { kind: "failed" as const, error: output };
         }
 
@@ -891,6 +938,7 @@ export class GoalCoordinatorService {
             completedAt: this.now(),
             updatedAt: this.now(),
           });
+          this.recordProviderFailure(goal.id, agent.id, output);
           return { kind: "failed" as const, error: output };
         } finally {
           const activeJobs = this.activeJobs.get(goal.id);
@@ -942,6 +990,7 @@ export class GoalCoordinatorService {
           artifactIds,
           evidence: candidateEvidence(execution.jobId, result, output),
         };
+        if (state !== "succeeded") this.recordProviderFailure(goal.id, agent.id, output, result.error);
         return state === "succeeded"
           ? { kind: "succeeded" as const, value, resultTurnId: completed.id, artifactIds: completed.artifactIds }
           : { kind: "failed" as const, error: output };
@@ -980,11 +1029,27 @@ export class GoalCoordinatorService {
     }
   }
 
+  private recordProviderFailure(goalId: string, agentId: string, message: string, error?: RunResult["error"]) {
+    if (!isProviderFailoverSignal(message, error)) return;
+    const set = this.failedProviderAgents.get(goalId) ?? new Set<string>();
+    set.add(agentId);
+    this.failedProviderAgents.set(goalId, set);
+  }
+
+  /** First enabled agent that is currently usable and not in the exclusion set —
+   * used to reassign a worker whose agent failed with a provider/account error. */
+  private pickAvailableAgent(profile: FleetProfile, goal: Goal, excludeIds: ReadonlySet<string>): AgentProfile | null {
+    return profile.agents.find((agent) => agent.enabled
+      && !excludeIds.has(agent.id)
+      && isAvailableNow(this.options.availability(agent, goal), this.now())) ?? null;
+  }
+
   private selectLeader(
     profile: FleetProfile,
     coordinator: CoordinatorSelection,
     currentLeaderId: string | null,
     security: GoalSecurityControls,
+    excludeAgentIds?: ReadonlySet<string>,
   ): GoalLeaderDecision {
     if (coordinator.kind === "human") {
       return { leaderId: null, keptCurrent: false, reason: "no_eligible_candidate", scores: [] };
@@ -992,18 +1057,21 @@ export class GoalCoordinatorService {
     if (coordinator.kind === "agent") {
       const agent = this.requireAgent(profile, coordinator.agentId);
       const availability = this.options.availability(agent, security);
-      if (!agent.enabled || !availability.authenticated || availability.health === "offline" || availability.health === "unhealthy") {
+      if (excludeAgentIds?.has(agent.id) || !agent.enabled || !availability.authenticated || availability.health === "offline" || availability.health === "unhealthy") {
         return { leaderId: null, keptCurrent: false, reason: "no_eligible_candidate", scores: [] };
       }
       return { leaderId: agent.id, keptCurrent: currentLeaderId === agent.id, reason: currentLeaderId === agent.id ? "sticky" : "selected", scores: [] };
     }
     const candidates = profile.agents.map((agent) => {
       const availability = this.options.availability(agent, security);
+      // An agent that already failed this goal with a provider/account error is
+      // treated as unhealthy so the sticky selector fails over to another one.
+      const excluded = excludeAgentIds?.has(agent.id) ?? false;
       return {
         agentId: agent.id,
         enabled: agent.enabled,
         authenticated: availability.authenticated,
-        health: availability.health,
+        health: excluded ? "unhealthy" as const : availability.health,
         capabilities: agent.capabilities,
         rateLimitedUntil: availability.rateLimitedUntil,
         priority: agent.priority,
@@ -1243,6 +1311,17 @@ function isAvailableNow(availability: GoalAgentAvailability, now: number) {
   return availability.authenticated
     && (availability.health === "healthy" || availability.health === "degraded")
     && (availability.rateLimitedUntil === null || availability.rateLimitedUntil <= now);
+}
+
+// Rate limit, exhausted credits/quota, or auth — an agent/account problem rather
+// than a task error, so the goal should fail over to a different healthy agent.
+const PROVIDER_FAILOVER_PATTERN = /retry budget exhausted|out of credits|credit balance|insufficient (?:quota|credit|funds|balance)|quota (?:is )?exceeded|too many requests|\b429\b|\b402\b|payment required|rate[ -]?limit|unauthorized|forbidden|stream disconnected before completion|error sending request/i;
+
+function isProviderFailoverSignal(message: string | undefined, error?: RunResult["error"]): boolean {
+  if (error?.retryable === true) return true;
+  const code = error?.code;
+  if (code === "RATE_LIMITED" || code === "NATIVE_AUTH_UNAVAILABLE" || code === "BUDGET_EXCEEDED") return true;
+  return PROVIDER_FAILOVER_PATTERN.test(message ?? "");
 }
 
 function rateLimitRecovery(result: RunResult) {

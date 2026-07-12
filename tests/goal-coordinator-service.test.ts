@@ -664,6 +664,64 @@ describe("adaptive durable goal coordinator", () => {
     }));
   });
 
+  test("fails the goal over to another agent when the leader's turn hits a provider error (out of credits)", async () => {
+    const fixture = createFixture({
+      agents: [
+        { id: "codex-leader", backend: "codex", name: "Codex", priority: 10 },
+        { id: "opencode-backup", backend: "opencode", name: "OpenCode", priority: 5 },
+        { id: "reviewer", backend: "opencode", name: "Reviewer", priority: 1 },
+      ],
+    });
+    const roles: Array<{ agentId: string; role: string }> = [];
+    let job = 0;
+    const service = new GoalCoordinatorService({
+      ...fixture,
+      now: () => 1_000,
+      // Codex stays authenticated + "healthy" — it is out of credits, not offline,
+      // so nothing but the failed turn itself reveals it is unusable.
+      availability: () => healthy(),
+      cancelJob: () => {},
+      executeTurn: ({ agent, role, prompt }) => {
+        roles.push({ agentId: agent.id, role });
+        const jobId = `provider-job-${++job}`;
+        if (agent.id === "codex-leader") {
+          return {
+            jobId,
+            sessionId: "codex-session",
+            completion: Promise.reject(new Error("stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses) Retry budget exhausted.")),
+          };
+        }
+        if (role === "planning") {
+          return { jobId, sessionId: `${agent.id}-session`, completion: Promise.resolve(result(plan([{ id: "inspect", task: "Inspect the change." }]), "succeeded", jobId)) };
+        }
+        if (role === "worker") {
+          return { jobId, sessionId: `${agent.id}-session`, completion: Promise.resolve(result("grounded worker evidence", "succeeded", jobId)) };
+        }
+        if (role === "candidate") {
+          return { jobId, sessionId: `${agent.id}-session`, completion: Promise.resolve(result("backup synthesis", "succeeded", jobId)) };
+        }
+        const candidateId = /Your second line must be exactly "EVIDENCE: ([^"]+)"\./.exec(prompt)?.[1];
+        return {
+          jobId,
+          sessionId: `${agent.id}-session`,
+          completion: Promise.resolve(result(`VERDICT: APPROVE\nEVIDENCE: ${candidateId}\nBackup leader retained grounded worker evidence.`, "succeeded", jobId)),
+        };
+      },
+    });
+
+    const started = service.start({ principal: "owner", objective: "Ship even though codex is out of credits." });
+    await service.wait(started.goal.id);
+    const record = service.status(started.goal.id, "owner");
+
+    // The goal completed on the healthy backend instead of dying on codex.
+    expect(record.goal).toMatchObject({ state: "succeeded", leaderAgentId: "opencode-backup" });
+    // Codex was selected first (higher priority) and attempted before failover.
+    expect(roles.some((entry) => entry.agentId === "codex-leader" && entry.role === "planning")).toBe(true);
+    // The retried planning turn (and synthesis) ran on the backup, never codex.
+    expect(roles.some((entry) => entry.agentId === "opencode-backup" && entry.role === "planning")).toBe(true);
+    expect(roles.find((entry) => entry.role === "candidate")?.agentId).toBe("opencode-backup");
+  });
+
   test("cancels every active worker in a concurrent plan", async () => {
     const fixture = createFixture({
       maxActiveWorkers: 2,
