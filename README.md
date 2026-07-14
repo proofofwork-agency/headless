@@ -4,7 +4,7 @@
 
 Headless is a local execution boundary for heterogeneous coding CLIs. Its current focus is one reliable path: admit a bounded request, run OpenCode, Claude Code, or Codex inside a contained worker, and return a structured result with attributable usage, cost, policy, and durable event evidence.
 
-Grok remains experimental and is blocked unless a contained `grok inspect --json` attestation proves every project and compatibility surface disabled. Grok writes remain disabled. Writes, persistent worker sessions, MCP, the OpenCode plugin, workflows, fleets, councils, autonomy, loops, skills, and the observer TUI are experimental compatibility surfaces; they are not part of the first beta stability promise.
+Grok remains experimental and is blocked unless a contained `grok inspect --json` attestation proves every project and compatibility surface disabled. Grok writes remain disabled. Writes, persistent worker sessions, the OpenCode plugin, workflows, fleets, councils, autonomy, loops, and skills are experimental compatibility surfaces; they are not part of the first beta stability promise. The stable observer TUI remains read-only even when it displays those experimental projections.
 
 ## Current execution boundary
 
@@ -73,6 +73,7 @@ Default help exposes only the recovery-critical surface:
 - `daemon serve|status` — project-daemon lifecycle.
 - `init [--lead <host>]` — initialize external state and optionally configure a foreground lead without editing the checkout.
 - `mcp install|remove|status|serve` — manage the published foreground-lead MCP server.
+- `tui` — open the read-only durable log and configuration pane.
 
 Advanced compatibility commands require the explicit `headless experimental` namespace. List them with `headless experimental --help`; their contracts may change or be removed before beta. The [generated command reference](./docs/command-reference.md) is checked against the command registry.
 
@@ -108,7 +109,13 @@ Headless owns its ledger and communication state. It does not read, import, or d
 
 Write mode is not part of the read-only beta gate. Its intended invariant is that ambiguity never mutates the primary checkout: a clean primary is required, work occurs in a leased worktree, bounded secret/diff checks and configured gates run, and only an authorized integration decision may advance primary.
 
-The daemon still contains experimental worker sessions, MCP/plugin integrations, fleets, goals, workflows, councils, autonomy, loops, skills, and TUI projection code. The TUI is observer-only: it cannot dispatch work, resolve approvals, integrate candidates, mutate policy, or control provider processes.
+The daemon still contains experimental worker sessions, plugin integrations, fleets, goals, workflows, councils, autonomy, loops, and skills. The stable TUI is observer-only: it reads snapshots/events, displays durable logs and configuration state, and generates root-CLI commands; it cannot dispatch work, resolve approvals, integrate candidates, mutate policy, or control provider processes.
+
+```bash
+headless tui --cwd .
+```
+
+The Config view shows project trust, foreground lead binding, budgets, backend readiness, and daemon state. Its commands are copy-paste guidance labeled “run from your shell”; the TUI never executes them and never holds root authority.
 
 One durable foreground lead may be configured per project:
 

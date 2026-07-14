@@ -19,6 +19,7 @@ import { runSkillCommand } from "./commands/skill";
 import { runLoopCommand } from "./commands/loop";
 import { runLedgerCommand } from "./commands/ledger";
 import { runLeadCommand } from "./commands/lead";
+import { runBudgetCommand } from "./commands/budget";
 import { UNIFIED_COMMAND_REGISTRY } from "../command-registry";
 
 export type CliCommandHandler = (args: string[]) => Promise<void>;
@@ -52,6 +53,7 @@ const handlers = {
   loop: runLoopCommand,
   ledger: runLedgerCommand,
   lead: runLeadCommand,
+  budget: runBudgetCommand,
 } satisfies Record<CliCommandName, CliCommandHandler>;
 
 export const COMMAND_TABLE = new Map(UNIFIED_COMMAND_REGISTRY.cli.map(({ source: spec }) => [spec.name, {

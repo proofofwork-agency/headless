@@ -9,9 +9,9 @@ export const WARN = "#fbbf24";
 export const ERR = "#f87171";
 export const VIOLET = "#c4b5fd";
 
-export type TuiView = "overview" | "fleet" | "goals" | "approvals" | "events" | "help";
+export type TuiView = "overview" | "fleet" | "goals" | "approvals" | "events" | "config" | "help";
 
-export const TUI_VIEWS: TuiView[] = ["overview", "fleet", "goals", "approvals", "events", "help"];
+export const TUI_VIEWS: TuiView[] = ["overview", "fleet", "goals", "approvals", "events", "config", "help"];
 
 export const VIEW_LABELS: Record<TuiView, string> = {
   // Keep the legacy tab width for mouse/layout compatibility; the view itself
@@ -21,6 +21,7 @@ export const VIEW_LABELS: Record<TuiView, string> = {
   goals: "Goals",
   approvals: "Approvals",
   events: "Events",
+  config: "Config",
   help: "Help",
 };
 

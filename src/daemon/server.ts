@@ -1129,6 +1129,7 @@ export class HeadlessDaemon {
       goalTurns: Object.fromEntries(goals.map((record) => [record.goal.id, record.turns])),
       goalMessages: Object.fromEntries(goals.map((record) => [record.goal.id, this.directedMailbox.snapshot().messages.filter((message) => message.collaborationId === record.goal.id)])),
       approvals: this.approvals.list({}),
+      budgets: this.budgets.getState().budgets,
       jobs: this.jobs.list(),
       tasks: this.tasks.list(),
       sessions: this.sessions.list(),

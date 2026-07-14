@@ -17,6 +17,7 @@ import {
   resolveCommand,
   runMcpInstall,
 } from "../src/cli";
+import { parseBudgetCommand } from "../src/cli/commands/budget";
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const cliSharedUrl = new URL("../src/cli/shared.ts", import.meta.url).href;
@@ -46,7 +47,7 @@ describe("v0.2 CLI contracts", () => {
     const help = renderHelp();
     const experimentalHelp = renderHelp(true);
     for (const spec of COMMAND_SPECS) if ("valueFlags" in spec) for (const flag of spec.valueFlags) expect(VALUE_FLAGS.has(flag)).toBe(true);
-    for (const command of ["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp"]) {
+    for (const command of ["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp", "tui"]) {
       const spec = COMMAND_SPECS.find((candidate) => candidate.name === command);
       expect(spec && "help" in spec ? help : "").toContain(`  ${spec && "help" in spec ? spec.help : ""}`);
     }
@@ -56,6 +57,7 @@ describe("v0.2 CLI contracts", () => {
     expect(parseCliInvocation(["session"])).toEqual({ kind: "unknown", name: "session" });
     expect(parseCliInvocation(["experimental", "session"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "session")! });
     expect(parseCliInvocation(["mcp", "status", "codex"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "mcp")! });
+    expect(parseCliInvocation(["tui"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "tui")! });
     expect(parseCliInvocation(["exec", "--version", "--help"])).toEqual({ kind: "help" });
     expect(parseCliInvocation(["missing"])).toEqual({ kind: "unknown", name: "missing" });
   });
@@ -100,6 +102,15 @@ describe("v0.2 CLI contracts", () => {
       expect(() => parseIntegerArg(["exec", "--timeout-ms", value], "--timeout-ms")).toThrow();
     }
     expect(() => parseIntegerArg(["events", "--limit", "1001"], "--limit", 1000)).toThrow();
+  });
+
+  test("parses root budget commands while keeping them experimental", () => {
+    expect(parseBudgetCommand(["budget", "list"])).toEqual({ method: "budget.list", params: {} });
+    expect(parseBudgetCommand(["budget", "upsert", "--id", "project-limit", "--max-requests", "20", "--max-cost-usd", "10", "--max-retries", "0"]))
+      .toEqual({ method: "budget.upsert", params: { id: "project-limit", maxRequests: 20, maxCostUsd: 10, maxRetries: 0 } });
+    expect(() => parseBudgetCommand(["budget", "upsert", "--id", "project-limit", "--max-requests", "0"])).toThrow("positive safe integer");
+    expect(parseCliInvocation(["budget", "list"])).toEqual({ kind: "unknown", name: "budget" });
+    expect(parseCliInvocation(["experimental", "budget", "list"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "budget")! });
   });
 
   test("published MCP configuration invokes the installed binary only", () => {

@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import React from "react";
 import type { FleetProfile, Goal } from "../src/contracts/collaboration";
+import type { Budget } from "../src/contracts/durable";
 import type { RunEvent } from "../src/contracts/run";
+import {
+  ConfigView,
+} from "../src/tui/views";
 import {
   TuiController,
   restoreControlRoom,
@@ -9,6 +14,7 @@ import {
 } from "../src/tui/controller";
 import {
   controlSummary,
+  configViewModel,
   filterEvents,
   formatEventLine,
   groupRepeatedEvents,
@@ -27,6 +33,7 @@ import {
   listWindowStart,
   nextView,
   parseMouseEvents,
+  viewForDigit,
 } from "../src/tui/layout";
 
 describe("Headless read-only TUI", () => {
@@ -37,10 +44,11 @@ describe("Headless read-only TUI", () => {
     const client = new FakeClient({
       ping: { projectId: "project-id", projectRoot: "/canonical/project", principal: "observer" },
       "observer.snapshot": {
+        observedAt: 50,
         projectId: "project-id",
         projectRoot: "/canonical/project",
         lead: { host: "codex", backendId: "codex", generation: 2, status: "connected" },
-        projectTrust: { trusted: true, nativeLoginAllowed: true, bypassAllowed: false },
+        projectTrust: { trusted: true, nativeLoginAllowed: true, nativeDirectUnrestrictedAcknowledged: true, bypassAllowed: false },
         fleetProfiles: [fleet],
         activeFleetProfileId: fleet.id,
         fleetHealth: { leaderCandidates: [{ agent: { id: "worker", backend: "opencode" }, authenticated: true, health: "healthy", rateLimitedUntil: null, activeTurns: 1, detail: "ready" }] },
@@ -48,6 +56,7 @@ describe("Headless read-only TUI", () => {
         goalTurns: { [goal.id]: [] },
         goalMessages: { [goal.id]: [] },
         approvals: [],
+        budgets: [budgetFixture()],
         jobs: [{ state: "running" }, { state: "queued" }],
         tasks: [],
         sessions: [],
@@ -64,10 +73,46 @@ describe("Headless read-only TUI", () => {
       connection: "connected",
       activeGoalId: goal.id,
       lead: { host: "codex", generation: 2, status: "connected" },
+      budgets: [{ id: "project-limit" }],
       orchestration: { enabled: true, activeJobs: 1, queuedJobs: 1, mode: "automatic" },
     });
     expect(restored.patch.events).toEqual([event]);
     expect(restored.patch.fleetHealth).toMatchObject([{ id: "worker", backend: "opencode", healthy: true }]);
+  });
+
+  test("renders config state and exact root-CLI commands from an observer snapshot", () => {
+    const state: TuiControlRoomState = {
+      ...initialControlRoomState("/canonical/project with space"),
+      projectId: "project-id",
+      connection: "connected",
+      observedAt: 1_000,
+      projectTrust: { trusted: true, nativeLoginAllowed: true, nativeDirectUnrestrictedAcknowledged: true, bypassAllowed: false },
+      lead: { host: "codex", backendId: "codex", generation: 3, status: "connected" },
+      budgets: [budgetFixture()],
+      fleetHealth: [{ id: "worker", backend: "opencode", authenticated: true, healthy: true, rateLimited: false, load: 0, detail: "ready" }],
+      orchestration: { enabled: true, activeJobs: 1, queuedJobs: 2, mode: "automatic" },
+    };
+
+    const config = configViewModel(state);
+    expect(config).toMatchObject({
+      trust: "trusted · native allowed · egress acknowledged · bypass denied",
+      lead: "codex · generation 3 · connected",
+      backends: [{ id: "worker", backend: "opencode", readiness: "Ready" }],
+      budgets: [{ id: "project-limit" }],
+    });
+    expect(config.commands.map(({ command }) => command)).toEqual(expect.arrayContaining([
+      "headless project trust grant --allow-native-direct-unrestricted --cwd '/canonical/project with space'",
+      "headless project trust revoke --cwd '/canonical/project with space'",
+      "headless lead use claude --cwd '/canonical/project with space'",
+      "headless experimental budget list --cwd '/canonical/project with space'",
+      "headless experimental budget upsert --id project-limit --max-requests 20 --max-input-tokens 50000 --max-cost-usd 10 --max-concurrency 2 --max-retries 1 --expires-at 10000 --cwd '/canonical/project with space'",
+      "headless doctor --cwd '/canonical/project with space'",
+      "headless daemon status --cwd '/canonical/project with space'",
+    ]));
+    const rendered = renderedText(ConfigView({ state, width: 140, height: 40 }));
+    expect(rendered).toContain("headless project trust grant --allow-native-direct-unrestricted --cwd '/canonical/project with space'");
+    expect(rendered).toContain("headless experimental budget upsert --id project-limit");
+    expect(rendered).toContain("headless daemon status --cwd '/canonical/project with space'");
   });
 
   test("never turns prompt-like input into daemon mutations", async () => {
@@ -128,6 +173,8 @@ describe("Headless read-only TUI", () => {
     const tabs = buildTabLayout(120);
     expect(tabs.length).toBeGreaterThan(3);
     expect(nextView("overview")).not.toBe("overview");
+    expect(viewForDigit("6")).toBe("config");
+    expect(viewForDigit("7")).toBe("help");
     const zones = buildHitZones({ width: 120, height: 32, view: "goals", list: { rows: 4, start: 2, total: 10 } });
     expect(hitTest(tabs[0]!.from, zones.tabY, zones)).toEqual({ kind: "view", view: tabs[0]!.view });
     expect(hitTest(2, zones.list!.fromY, zones)).toEqual({ kind: "row", index: 2 });
@@ -166,6 +213,17 @@ function goalFixture(): Goal {
   };
 }
 
+function budgetFixture(): Budget {
+  return {
+    id: "project-limit", projectId: "project-id", principal: null, sessionId: null, workflowId: null, provider: null,
+    maxRequests: 20, maxInputTokens: 50_000, maxOutputTokens: null, maxCostUsd: 10, maxArtifactBytes: null,
+    maxConcurrency: 2, maxRetries: 1, expiresAt: 10_000, usedRequests: 2,
+    usedUsage: { input: 1_000, output: 200, reasoning: 0, cached: 0, providerTotal: 1_200 },
+    usedCost: { amountUsd: 1.25, source: "reconciled", pricingId: null, observedRequests: 2 },
+    usedArtifactBytes: 0, updatedAt: 1,
+  };
+}
+
 function eventFixture(id: string, timestamp: number, sequence: number): RunEvent {
   return { version: 2, eventId: id, jobId: "job-one", sessionId: null, sequence, timestamp, redacted: true, kind: "lifecycle", state: "running" };
 }
@@ -175,4 +233,11 @@ function completionFixture(id: string, timestamp: number, sequence: number): Run
     version: 2, eventId: id, jobId: "job-one", sessionId: null, sequence, timestamp, redacted: true, kind: "completion",
     result: { status: "failed", backend: "codex", output: "provider endpoint disconnected", error: null } as never,
   };
+}
+
+function renderedText(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (Array.isArray(value)) return value.map(renderedText).join("");
+  if (!React.isValidElement<{ children?: React.ReactNode }>(value)) return "";
+  return renderedText(React.Children.toArray(value.props.children));
 }

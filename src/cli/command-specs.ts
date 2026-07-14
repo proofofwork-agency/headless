@@ -104,7 +104,7 @@ export const COMMAND_SPECS = [
     help: "status [--cwd dir]              Show project and daemon status.",
   },
   { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "doctor [--cwd dir]              Check backend, containment, and daemon readiness." },
-  { name: "tui", valueFlags: ["--cwd"] },
+  { name: "tui", valueFlags: ["--cwd"], help: "tui [--cwd dir]                 Open the read-only observer log and configuration pane." },
   { name: "pair", valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"] },
   {
     name: "mcp",
@@ -125,6 +125,11 @@ export const COMMAND_SPECS = [
   { name: "skill", aliases: ["skills"], valueFlags: ["--source", "--backend", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"], help: "skill | skills <list|inspect|import|enable|use|revoke> [options]" },
   { name: "loop", valueFlags: ["--loop-id", "--file", "--mode", "--deadline-ms", "--max-iterations", "--per-iteration-cost-usd", "--total-cost-usd", "--cwd", "--extension-config", "--extension-module"], help: "loop <start|list|status|pause|resume|cancel> --confirm [finite policy options]" },
   { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "ledger repair-tail --confirm [--cwd dir]   Admin-only partial-tail recovery." },
+  {
+    name: "budget",
+    valueFlags: ["--id", "--principal", "--session-id", "--workflow-id", "--provider", "--max-requests", "--max-input-tokens", "--max-output-tokens", "--max-cost-usd", "--max-artifact-bytes", "--max-concurrency", "--max-retries", "--expires-at", "--cwd", "--extension-config", "--extension-module"],
+    help: "budget <list|upsert> [--id id] [budget limits] [--cwd dir]",
+  },
 ] as const satisfies readonly CliCommandSpec[];
 
 export type CliCommandName = typeof COMMAND_SPECS[number]["name"];
@@ -159,7 +164,7 @@ export function parseCliInvocation(args: string[]): CliInvocation {
     : { kind: "unknown", name };
 }
 
-export const STABLE_COMMAND_NAMES = new Set(["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp"]);
+export const STABLE_COMMAND_NAMES = new Set(["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp", "tui"]);
 
 export function renderHelp(includeExperimental = false) {
   return [

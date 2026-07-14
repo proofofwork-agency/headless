@@ -265,6 +265,7 @@ export const BudgetUpsertParamsSchema = z.object({
   maxArtifactBytes: z.number().int().positive().nullable().default(null),
   maxConcurrency: z.number().int().positive().nullable().default(null),
   maxRetries: z.number().int().nonnegative().nullable().default(null),
+  expiresAt: TimestampSchema.nullable().default(null),
 }).strict();
 
 /**

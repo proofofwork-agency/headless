@@ -11,6 +11,7 @@ import {
   activeGoal,
   activityEntries,
   approvalRows,
+  configViewModel,
   controlSummary,
   eventSummary,
   fleetAgentRows,
@@ -459,7 +460,7 @@ export function ApprovalsView({ state, width, height, selected }: { state: TuiCo
             {detail.expiresIn ? <Text color={WARN}> · expires in {detail.expiresIn}</Text> : null}
           </KeyValue>
           <KeyValue label="summary"><Text color={MUTED}>{truncateDisplay(detail.summary, Math.max(8, contentWidth - 12))}</Text></KeyValue>
-          <KeyValue label="resolve"><Text color={MUTED}>headless approval resolve --approval-id {detail.id} …</Text></KeyValue>
+          <KeyValue label="resolve"><Text color={MUTED}>headless experimental approval resolve --approval-id {detail.id} …</Text></KeyValue>
         </>
       ) : null}
     </Box>
@@ -518,6 +519,49 @@ export function EventsView({ state, width, height, scrollBack, filter = "all", g
   );
 }
 
+// ── Config ──────────────────────────────────────────────────────────────────
+
+export function ConfigView({ state, width, height }: { state: TuiControlRoomState; width: number; height: number }) {
+  const rows = contentRows(height);
+  const contentWidth = width - 4;
+  const config = configViewModel(state);
+  const split = width >= 92;
+  const stateWidth = split ? Math.max(34, Math.floor(contentWidth * 0.42)) : contentWidth;
+  const commandsWidth = split ? contentWidth - stateWidth - 2 : contentWidth;
+  return (
+    <Box paddingX={2} height={rows} flexDirection={split ? "row" : "column"} overflow="hidden">
+      <Box flexDirection="column" width={stateWidth}>
+        <SectionTitle title="Config" hint="observer snapshot" tone={ACCENT} width={stateWidth} />
+        <Text color={CHROME} wrap="truncate">  state only · this process cannot mutate project configuration</Text>
+        <KeyValue label="project"><Text color={MUTED}>{config.project}</Text></KeyValue>
+        <KeyValue label="trust"><Text color={state.projectTrust.trusted ? OK : WARN}>{config.trust}</Text></KeyValue>
+        <KeyValue label="lead"><Text color={state.lead?.status === "connected" ? OK : state.lead ? WARN : MUTED}>{config.lead}</Text></KeyValue>
+        <KeyValue label="daemon"><Text color={state.connection === "connected" ? OK : WARN}>{config.daemon}</Text></KeyValue>
+        <SectionTitle title="Backend readiness" tone={BLUE} width={stateWidth} />
+        {config.backends.length === 0 ? <EmptyHint text="no configured backend health is available" /> : config.backends.map((backend) => (
+          <Text key={backend.id} wrap="truncate">
+            <Text color={backend.readiness === "Ready" ? OK : backend.readiness === "Disabled" ? CHROME : WARN}>  {backend.backend} · {backend.readiness}</Text>
+            <Text color={MUTED}> · {backend.detail}</Text>
+          </Text>
+        ))}
+        <SectionTitle title="Budgets" tone={VIOLET} width={stateWidth} />
+        {config.budgets.length === 0 ? <EmptyHint text="no explicit project budgets" /> : config.budgets.map((budget) => (
+          <Text key={budget.id} color={MUTED} wrap="truncate">  {budget.id} · {budget.summary}</Text>
+        ))}
+      </Box>
+      <Box flexDirection="column" width={commandsWidth} marginLeft={split ? 2 : 0} marginTop={split ? 0 : 1}>
+        <SectionTitle title="Run from your shell" hint="TUI never executes" tone={WARN} width={commandsWidth} />
+        {config.commands.map((command) => (
+          <Box key={command.id} flexDirection="column" marginBottom={1}>
+            <Text color={CHROME}>{command.label}</Text>
+            <Text color={ACCENT} wrap="wrap">  {command.command}</Text>
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
 function EventLine({ event, count = 1, contentWidth, mode = "compact" }: { event: RunEvent; count?: number; contentWidth: number; mode?: LogDisplayMode }) {
   const line = formatEventLine(event);
   const text = mode === "strict"
@@ -534,15 +578,15 @@ function EventLine({ event, count = 1, contentWidth, mode = "compact" }: { event
 
 const HELP_COMMANDS: Array<[string, string]> = [
   ["headless lead status", "inspect the configured external foreground lead"],
-  ["headless goal list", "inspect or manage goals outside the TUI"],
-  ["headless approval list", "review pending human decisions"],
-  ["headless candidate inspect", "inspect preserved candidate evidence"],
-  ["headless events", "inspect the same durable run-event projection"],
+  ["headless experimental goal list", "inspect or manage goals outside the TUI"],
+  ["headless experimental approval list", "review pending human decisions"],
+  ["headless experimental candidate inspect", "inspect preserved candidate evidence"],
+  ["headless experimental events", "inspect the same durable run-event projection"],
 ];
 
 const HELP_KEYS: Array<[string, string]> = [
   ["tab / shift+tab", "next / previous view"],
-  ["1-6", "jump to a view (empty input)"],
+  ["1-7", "jump to a view (empty input)"],
   ["↑ ↓", "select rows · scroll events"],
   ["pgup / pgdn", "page the event feed"],
   ["r", "refresh the observer snapshot"],

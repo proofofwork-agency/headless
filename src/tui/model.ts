@@ -1,5 +1,5 @@
 import type { ApprovalRequest, DirectedMessage, FleetProfile, Goal, Turn } from "../contracts/collaboration";
-import type { Task } from "../contracts/durable";
+import type { Budget, Task } from "../contracts/durable";
 import type { RunEvent } from "../contracts/run";
 import type { TaskState } from "../runtime/read-model";
 import { redactAndTruncate } from "../runtime/redaction";
@@ -37,6 +37,7 @@ export type OrchestrationView = {
 export type ProjectTrustView = {
   trusted: boolean;
   nativeLoginAllowed: boolean;
+  nativeDirectUnrestrictedAcknowledged: boolean;
   bypassAllowed: boolean;
 };
 
@@ -46,6 +47,7 @@ export type TuiControlRoomState = {
   principal: string | null;
   connection: ConnectionState;
   status: string;
+  observedAt: number | null;
   events: RunEvent[];
   taskState: TaskState | null;
   durableTasks: Task[];
@@ -59,6 +61,7 @@ export type TuiControlRoomState = {
   turns: Turn[];
   messages: DirectedMessage[];
   approvals: ApprovalRequest[];
+  budgets: Budget[];
   candidate: CandidateView | null;
   lead: {
     host: string;
@@ -152,9 +155,163 @@ export function nextActions(state: TuiControlRoomState): NextAction[] {
   const actions: NextAction[] = [];
   if (state.connection !== "connected") actions.push({ id: "refresh", label: "Reconnect", command: "automatic", risk: "safe", reason: "The observer is waiting for the daemon." });
   if (!state.lead) actions.push({ id: "lead", label: "Configure a lead", command: "headless lead use <host>", risk: "safe", reason: "No foreground lead is configured." });
-  if (pendingApprovals(state)[0]) actions.push({ id: "approval", label: "Review in CLI", command: "headless approval list", risk: "safe", reason: "The observer cannot resolve approvals." });
+  if (pendingApprovals(state)[0]) actions.push({ id: "approval", label: "Review in CLI", command: "headless experimental approval list", risk: "safe", reason: "The observer cannot resolve approvals." });
   if (!state.projectTrust.trusted) actions.push({ id: "trust", label: "Review trust in CLI", command: "headless project trust status", risk: "safe", reason: "The observer cannot change project trust." });
   return actions.slice(0, 4);
+}
+
+export type ConfigCommand = {
+  id: string;
+  label: string;
+  command: string;
+};
+
+export type ConfigViewModel = {
+  project: string;
+  trust: string;
+  lead: string;
+  daemon: string;
+  budgets: Array<{ id: string; summary: string }>;
+  backends: Array<{ id: string; backend: string; readiness: OperatorStatus; detail: string }>;
+  commands: ConfigCommand[];
+};
+
+/** Read-only configuration projection plus root-CLI commands for external use. */
+export function configViewModel(state: TuiControlRoomState): ConfigViewModel {
+  const cwd = shellArg(state.projectRoot);
+  const trust = state.projectTrust;
+  const commands: ConfigCommand[] = [
+    {
+      id: "trust-project",
+      label: "grant project trust",
+      command: `headless project trust grant --cwd ${cwd}`,
+    },
+    {
+      id: "trust-grant",
+      label: "grant native trust",
+      command: `headless project trust grant --allow-native-direct-unrestricted --cwd ${cwd}`,
+    },
+    {
+      id: "trust-bypass",
+      label: "grant native trust with bypass",
+      command: `headless project trust grant --allow-native-direct-unrestricted --allow-bypass --cwd ${cwd}`,
+    },
+    {
+      id: "trust-revoke",
+      label: "revoke project trust",
+      command: `headless project trust revoke --cwd ${cwd}`,
+    },
+    ...(["codex", "claude", "opencode", "grok"] as const).map((host) => ({
+      id: `lead-${host}`,
+      label: `use ${host} lead`,
+      command: `headless lead use ${host} --cwd ${cwd}`,
+    })),
+    {
+      id: "lead-release",
+      label: "release lead",
+      command: `headless lead release --cwd ${cwd}`,
+    },
+    {
+      id: "budget-list",
+      label: "inspect budgets",
+      command: `headless experimental budget list --cwd ${cwd}`,
+    },
+    ...(state.budgets.length > 0
+      ? state.budgets.map((budget) => ({
+          id: `budget-${budget.id}`,
+          label: `update ${budget.id}`,
+          command: budgetUpsertCommand(budget, state.projectRoot),
+        }))
+      : [{
+          id: "budget-create",
+          label: "create project budget",
+          command: `headless experimental budget upsert --id project-default --max-requests 8 --max-cost-usd 5 --cwd ${cwd}`,
+        }]),
+    {
+      id: "backend-readiness",
+      label: "check backends",
+      command: `headless doctor --cwd ${cwd}`,
+    },
+    {
+      id: "daemon-status",
+      label: "inspect daemon",
+      command: `headless daemon status --cwd ${cwd}`,
+    },
+  ];
+  return {
+    project: `${state.projectId ?? "unresolved"} · ${state.projectRoot}`,
+    trust: trust.trusted
+      ? `trusted · native ${trust.nativeLoginAllowed ? "allowed" : "denied"} · egress ${trust.nativeDirectUnrestrictedAcknowledged ? "acknowledged" : "not acknowledged"} · bypass ${trust.bypassAllowed ? "allowed" : "denied"}`
+      : "not trusted · broker mode remains available",
+    lead: state.lead
+      ? `${state.lead.host} · generation ${state.lead.generation} · ${state.lead.status}`
+      : "not configured",
+    daemon: `${state.connection} · ${state.orchestration.mode} · ${state.orchestration.activeJobs} active · ${state.orchestration.queuedJobs} queued${state.observedAt === null ? "" : ` · snapshot ${new Date(state.observedAt).toISOString()}`}`,
+    budgets: state.budgets.map((budget) => ({ id: budget.id, summary: budgetSummary(budget) })),
+    backends: state.fleetHealth.map((backend) => ({
+      id: backend.id,
+      backend: backend.backend,
+      readiness: providerReadiness(backend),
+      detail: safeInline(backend.detail ?? "No readiness detail reported."),
+    })),
+    commands,
+  };
+}
+
+export function budgetUpsertCommand(budget: Budget, projectRoot: string) {
+  const args = ["headless", "experimental", "budget", "upsert", "--id", shellArg(budget.id)];
+  pushFlag(args, "--principal", budget.principal);
+  pushFlag(args, "--session-id", budget.sessionId);
+  pushFlag(args, "--workflow-id", budget.workflowId);
+  pushFlag(args, "--provider", budget.provider);
+  pushFlag(args, "--max-requests", budget.maxRequests);
+  pushFlag(args, "--max-input-tokens", budget.maxInputTokens);
+  pushFlag(args, "--max-output-tokens", budget.maxOutputTokens);
+  pushFlag(args, "--max-cost-usd", budget.maxCostUsd);
+  pushFlag(args, "--max-artifact-bytes", budget.maxArtifactBytes);
+  pushFlag(args, "--max-concurrency", budget.maxConcurrency);
+  pushFlag(args, "--max-retries", budget.maxRetries);
+  pushFlag(args, "--expires-at", budget.expiresAt);
+  args.push("--cwd", shellArg(projectRoot));
+  return args.join(" ");
+}
+
+function budgetSummary(budget: Budget) {
+  const limits = [
+    limit("requests", budget.usedRequests, budget.maxRequests),
+    limit("input", budget.usedUsage.input, budget.maxInputTokens),
+    limit("output", budget.usedUsage.output, budget.maxOutputTokens),
+    limit("cost", budget.usedCost.amountUsd, budget.maxCostUsd, "$"),
+    limit("concurrency", null, budget.maxConcurrency),
+    limit("retries", null, budget.maxRetries),
+    budget.expiresAt === null ? null : `expires ${new Date(budget.expiresAt).toISOString()}`,
+  ].filter(Boolean);
+  return `${budgetScope(budget)} · ${limits.join(" · ") || "no explicit limits"}`;
+}
+
+function budgetScope(budget: Budget) {
+  if (budget.sessionId) return `session ${budget.sessionId}`;
+  if (budget.workflowId) return `workflow ${budget.workflowId}`;
+  if (budget.principal) return `principal ${budget.principal}`;
+  if (budget.provider) return `provider ${budget.provider}`;
+  return "project";
+}
+
+function limit(label: string, used: number | null, maximum: number | null, prefix = "") {
+  if (maximum === null) return null;
+  const value = used === null ? "–" : `${prefix}${used}`;
+  return `${label} ${value}/${prefix}${maximum}`;
+}
+
+function pushFlag(args: string[], flag: string, value: string | number | null) {
+  if (value === null) return;
+  args.push(flag, typeof value === "string" ? shellArg(value) : String(value));
+}
+
+export function shellArg(value: string) {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
+    ? value
+    : `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 export type GroupedEvent = { event: RunEvent; count: number };
@@ -201,11 +358,12 @@ export function initialControlRoomState(projectRoot: string): TuiControlRoomStat
     principal: null,
     connection: "connecting",
     status: "Connecting to the authenticated project daemon…",
+    observedAt: null,
     events: [],
     taskState: null,
     durableTasks: [],
     orchestration: { enabled: false, activeJobs: 0, queuedJobs: 0, mode: "manual" },
-    projectTrust: { trusted: false, nativeLoginAllowed: false, bypassAllowed: false },
+    projectTrust: { trusted: false, nativeLoginAllowed: false, nativeDirectUnrestrictedAcknowledged: false, bypassAllowed: false },
     fleetProfiles: [],
     activeFleetProfileId: null,
     fleetHealth: [],
@@ -214,6 +372,7 @@ export function initialControlRoomState(projectRoot: string): TuiControlRoomStat
     turns: [],
     messages: [],
     approvals: [],
+    budgets: [],
     candidate: null,
     lead: null,
     logMode: "compact",

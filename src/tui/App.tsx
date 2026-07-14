@@ -20,6 +20,7 @@ import { MUTED, WARN } from "./theme";
 import {
   ApprovalsView,
   approvalsListMeta,
+  ConfigView,
   EventsView,
   eventRowCount,
   FleetView,
@@ -161,7 +162,7 @@ export const App: React.FC<AppProps> = ({ projectRoot, connect = connectProjectD
   if (width < MIN_WIDTH || height < MIN_HEIGHT) return <MinimumSizeView width={width} height={height} />;
   const footer = view === "events"
     ? { hints: [["↑↓", "scroll"], ["e", "errors"], ["a", "activity"], ["g", "group"]] as Array<[string, string]>, right: "observer · r refresh · q quit" }
-    : { hints: [["⇥", "views"], ["1-6", "jump"], ["↑↓", "select"]] as Array<[string, string]>, right: "observer · r refresh · q quit" };
+    : { hints: [["⇥", "views"], ["1-7", "jump"], ["↑↓", "select"]] as Array<[string, string]>, right: "observer · r refresh · q quit" };
 
   return <Box flexDirection="column" width={width} height={height}>
     <ChromeHeader state={state} width={width} />
@@ -173,6 +174,7 @@ export const App: React.FC<AppProps> = ({ projectRoot, connect = connectProjectD
       {view === "goals" ? <GoalsView state={state} width={width} height={height} selected={selected.goals} historyMode={goalHistoryMode} /> : null}
       {view === "approvals" ? <ApprovalsView state={state} width={width} height={height} selected={selected.approvals} /> : null}
       {view === "events" ? <EventsView state={state} width={width} height={height} scrollBack={eventScroll} filter={eventFilter} grouped={eventsGrouped} mode={state.logMode} /> : null}
+      {view === "config" ? <ConfigView state={state} width={width} height={height} /> : null}
       {view === "help" ? <HelpView width={width} height={height} /> : null}
     </Box>
     <StatusStrip state={state} working={state.connection !== "connected"} width={width} />

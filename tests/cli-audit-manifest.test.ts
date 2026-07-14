@@ -28,6 +28,7 @@ describe("CLI audit manifest", () => {
       "project:trust grant", "project:trust revoke", "collaboration:acknowledge", "collaboration:ack", "approval:resolve", "candidate:integrate",
       "mcp:install codex", "mcp:install claude", "mcp:install grok", "mcp:install opencode",
       "mcp:remove codex", "mcp:remove claude", "mcp:remove grok", "mcp:remove opencode",
+      "budget:upsert",
     ]) {
       expect(risk(id)).toBe("destructive");
     }

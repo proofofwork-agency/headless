@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadlessDaemonClient } from "../src/daemon/client";
+import { DaemonMethodSchema } from "../src/daemon/protocol";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { AuthorityStore } from "../src/runtime/authority-store";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
@@ -45,13 +46,22 @@ describe("foreground lead and observer daemon boundaries", () => {
 
   test("observer credentials can project state and events but cannot mutate any route", async () => {
     const fixture = await daemonFixture();
+    await fixture.rootClient.call("budget.upsert", { id: "observer-budget", maxRequests: 2 });
     await fixture.rootClient.call("auth.provisionObserver");
     const observer = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.stateOptions, credential: { observer: true } });
     expect(await observer.call("ping")).toMatchObject({ principal: "observer", scopes: ["observe"] });
-    expect(await observer.call("observer.snapshot")).toMatchObject({ projectId: fixture.state.projectId, projectRoot: fixture.state.canonicalProjectRoot });
+    expect(await observer.call("observer.snapshot")).toMatchObject({
+      projectId: fixture.state.projectId,
+      projectRoot: fixture.state.canonicalProjectRoot,
+      budgets: [{ id: "observer-budget", maxRequests: 2 }],
+    });
     expect(await observer.call("observer.events", { limit: 10 })).toMatchObject({ events: [] });
     await expect(observer.call("ledger.note", { text: "forbidden" })).rejects.toMatchObject({ code: "POLICY_DENIED" });
     await expect(observer.call("project.trust.grant", { nativeLoginAllowed: true })).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    for (const method of DaemonMethodSchema.options) {
+      if (method === "ping" || method.startsWith("observer.")) continue;
+      await expect(observer.call(method)).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    }
     expect(readFileSync(fixture.state.observerTokenPath, "utf8").trim().length).toBeGreaterThan(40);
   });
 });

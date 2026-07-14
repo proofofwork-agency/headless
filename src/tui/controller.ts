@@ -1,5 +1,5 @@
 import type { ApprovalRequest, DirectedMessage, FleetProfile, Goal, Turn } from "../contracts/collaboration";
-import type { Job, Task } from "../contracts/durable";
+import type { Budget, Job, Task } from "../contracts/durable";
 import type { RunEvent } from "../contracts/run";
 import type { HeadlessDaemonClient } from "../daemon/client";
 import {
@@ -21,10 +21,11 @@ export type ControllerHooks = {
 };
 
 type ObserverSnapshot = {
+  observedAt?: number;
   projectId: string;
   projectRoot: string;
   lead: TuiControlRoomState["lead"];
-  projectTrust: ProjectTrustView;
+  projectTrust: Omit<ProjectTrustView, "nativeDirectUnrestrictedAcknowledged"> & { nativeDirectUnrestrictedAcknowledged?: boolean };
   fleetProfiles: FleetProfile[];
   activeFleetProfileId: string | null;
   fleetHealth: {
@@ -41,6 +42,7 @@ type ObserverSnapshot = {
   goalTurns: Record<string, Turn[]>;
   goalMessages: Record<string, DirectedMessage[]>;
   approvals: ApprovalRequest[];
+  budgets?: Budget[];
   jobs: Job[];
   tasks: Task[];
   orchestration: Partial<OrchestrationView> & { enabled: boolean };
@@ -117,7 +119,10 @@ export async function restoreControlRoom(client: ControlRoomClient, current: Tui
       principal: ping.principal,
       connection: "connected" as const,
       lead: snapshot.lead,
-      projectTrust: snapshot.projectTrust,
+      projectTrust: {
+        ...snapshot.projectTrust,
+        nativeDirectUnrestrictedAcknowledged: snapshot.projectTrust.nativeDirectUnrestrictedAcknowledged ?? false,
+      },
       fleetProfiles: snapshot.fleetProfiles,
       activeFleetProfileId: snapshot.activeFleetProfileId,
       fleetHealth: normalizeFleetHealth(snapshot.fleetHealth),
@@ -126,6 +131,8 @@ export async function restoreControlRoom(client: ControlRoomClient, current: Tui
       turns: activeGoalId ? snapshot.goalTurns[activeGoalId] ?? [] : [],
       messages: activeGoalId ? snapshot.goalMessages[activeGoalId] ?? [] : [],
       approvals: snapshot.approvals,
+      budgets: snapshot.budgets ?? [],
+      observedAt: typeof snapshot.observedAt === "number" && Number.isFinite(snapshot.observedAt) ? snapshot.observedAt : null,
       durableTasks: snapshot.tasks,
       orchestration,
       events: mergeRunEvents(current.events, eventPage.events),

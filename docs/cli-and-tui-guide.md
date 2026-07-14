@@ -6,7 +6,7 @@ description: Configure one foreground lead, run contained workers, and observe d
 
 # CLI-first operations and the observer TUI
 
-> Experimental private alpha. Use disposable projects and bounded spend.
+> Unreleased Beta 1. Use disposable projects and bounded spend until the release gate is green.
 
 ## Operating model
 
@@ -112,7 +112,7 @@ The lead-facing MCP/plugin surface can list approvals and inspect candidates but
 ## Observer TUI
 
 ```bash
-headless experimental tui --cwd "$PROJECT"
+headless tui --cwd "$PROJECT"
 ```
 
 The TUI may start the Headless daemon if it is absent. It cannot start providers or jobs. It authenticates with a dedicated observer credential and reads only `observer.snapshot` and `observer.events`; the daemon rejects every mutation attempted with that credential.
@@ -123,7 +123,7 @@ Navigation:
 - Event filters, grouping, compact/verbose/strict presentation, redaction, layout, and reconnect behavior remain local presentation features.
 - `?` shows observer guidance; `q` or Ctrl-C exits the client without stopping detached work.
 
-Approvals and candidates display the CLI command needed for action. Provider health may display the provider’s login command as guidance, but the TUI never runs it.
+The Config view renders project trust, lead binding, budgets, backend readiness, and daemon state from the same observer snapshot. It labels exact root-CLI commands as “run from your shell”; the TUI never runs them. Approvals and candidates likewise display CLI guidance, and provider health may display the provider’s login command without launching it.
 
 ## Migration behavior
 
