@@ -6,7 +6,7 @@ import { registerBackendDefinition, unregisterBackendDefinition, type BackendDef
 import type { Job } from "../src/contracts/durable";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
-import { DARWIN_SANDBOX_EXEC, probeLinuxBwrap } from "../src/runtime/os-sandbox";
+import { DARWIN_SANDBOX_EXEC, probeLinuxBwrap, probeLinuxRunToolRelay } from "../src/runtime/os-sandbox";
 
 const ADAPTER_ID = "run-tool-contained-fixture";
 const roots: string[] = [];
@@ -107,6 +107,6 @@ console.log(JSON.stringify({ task: results[0], note: results[1], leaked: process
 
 function strictContainmentAvailable() {
   if (process.platform === "darwin") return existsSync(DARWIN_SANDBOX_EXEC);
-  if (process.platform === "linux") return probeLinuxBwrap().ok;
+  if (process.platform === "linux") return probeLinuxBwrap().ok && probeLinuxRunToolRelay().ok;
   return false;
 }

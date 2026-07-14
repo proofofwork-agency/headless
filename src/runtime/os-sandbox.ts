@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -910,6 +910,94 @@ export function probeLinuxBwrap(): SandboxProbeResult {
   }
 }
 
+/**
+ * Prove the complete Linux run-tool transport, not merely socket visibility.
+ *
+ * The filtered backend is intentionally unable to create AF_UNIX sockets. Its
+ * helper therefore connects over private loopback to the trusted containment
+ * supervisor, which forwards to the one read-only-bound daemon socket. Some
+ * hosts admit bwrap while rejecting that later supervisor connection, so the
+ * generic write/seccomp probe is not sufficient evidence for run tools.
+ */
+export function probeLinuxRunToolRelay(): SandboxProbeResult {
+  if (process.platform !== "linux") return { ok: false, reason: `unsupported platform: ${process.platform}` };
+  if (!hasBwrap()) return { ok: false, reason: `${BWRAP} not found in PATH` };
+  const supervisor = resolveLinuxContainmentSupervisorEntry();
+  const bun = process.execPath;
+  if (!supervisor || !existsSync(bun)) {
+    return { ok: false, reason: "Linux containment run-tool relay runtime is unavailable" };
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), "headless-run-tool-relay-probe-"));
+  const socketPath = join(dir, "probe.tool.sock");
+  const readyPath = join(dir, "ready");
+  const nonce = `headless-run-tool-relay-${process.pid}-${Date.now()}`;
+  const serverSource = [
+    "const {chmodSync,writeFileSync}=require('node:fs');",
+    "const {createServer}=require('node:net');",
+    `const expected=${JSON.stringify(nonce)};`,
+    "const server=createServer((socket)=>{",
+    "let buffer='';socket.setEncoding('utf8');",
+    "socket.on('data',(chunk)=>{buffer+=chunk;const newline=buffer.indexOf('\\n');if(newline<0)return;",
+    "const value=buffer.slice(0,newline);socket.end((value===expected?expected:'mismatch')+'\\n');server.close();});",
+    "});",
+    `server.listen(${JSON.stringify(socketPath)},()=>{chmodSync(${JSON.stringify(socketPath)},0o600);writeFileSync(${JSON.stringify(readyPath)},'ready',{mode:0o600});});`,
+    "setTimeout(()=>process.exit(78),10000);",
+  ].join("");
+  const server = spawn(bun, ["-e", serverSource], { cwd: dir, stdio: "ignore" });
+  // A launch failure is reported by the bounded readiness check below. Keep
+  // Node's ChildProcess error event from becoming an unrelated process-level
+  // exception while this synchronous capability probe is waiting.
+  server.once("error", () => {});
+  try {
+    const readyDeadline = Date.now() + 2_000;
+    while (!existsSync(readyPath) && Date.now() < readyDeadline) sleepSync(5);
+    if (!existsSync(readyPath) || !existsSync(socketPath) || !statSync(socketPath).isSocket()) {
+      return { ok: false, reason: "Linux run-tool relay probe server did not become ready" };
+    }
+
+    const clientSource = [
+      "const {createConnection}=require('node:net');",
+      `const expected=${JSON.stringify(nonce)};`,
+      "const host=process.env.HEADLESS_RUN_TOOL_HOST;const port=Number(process.env.HEADLESS_RUN_TOOL_PORT);",
+      "if(host!=='127.0.0.1'||!Number.isSafeInteger(port))process.exit(79);",
+      "const socket=createConnection({host,port});let buffer='';socket.setEncoding('utf8');",
+      "const timeout=setTimeout(()=>{socket.destroy();process.exit(80);},5000);",
+      "socket.once('connect',()=>socket.write(expected+'\\n'));",
+      "socket.on('data',(chunk)=>{buffer+=chunk;const newline=buffer.indexOf('\\n');if(newline<0)return;clearTimeout(timeout);socket.end();process.exit(buffer.slice(0,newline)===expected?0:81);});",
+      "socket.once('error',()=>{clearTimeout(timeout);process.exit(82);});",
+      "socket.once('close',()=>{if(buffer.indexOf('\\n')<0){clearTimeout(timeout);process.exit(83);}});",
+    ].join("");
+    const result = spawnSync(BWRAP, [
+      ...buildLinuxReadOnlyArgs({
+        workdir: dir,
+        runtimeReadRoots: [supervisor, bun],
+        runToolSocket: socketPath,
+      }),
+      "--",
+      bun,
+      supervisor,
+      "supervise",
+      "--run-tool",
+      socketPath,
+      "38471",
+      "--",
+      bun,
+      "-e",
+      clientSource,
+    ], { encoding: "utf-8", timeout: 10_000 });
+    if (result.error) return { ok: false, reason: `Linux run-tool relay probe failed: ${result.error.message}` };
+    if (result.status !== 0) {
+      const detail = (result.stderr || result.stdout || `exit ${result.status}`).trim().slice(0, 300);
+      return { ok: false, reason: `Linux run-tool relay did not complete a contained round-trip: ${detail}` };
+    }
+    return { ok: true, reason: "Linux run-tool relay completed a contained loopback-to-Unix round-trip" };
+  } finally {
+    if (server.exitCode === null) server.kill("SIGKILL");
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 export function resolveLinuxContainmentSupervisorEntry() {
   const candidates = [
     join(import.meta.dir, "../broker/linux-relay.ts"),
@@ -921,6 +1009,10 @@ export function resolveLinuxContainmentSupervisorEntry() {
     if (resolved) return resolved;
   }
   return null;
+}
+
+function sleepSync(ms: number) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // Back-compat alias (probeLinuxBwrap is the canonical name per linux-containment slice)
