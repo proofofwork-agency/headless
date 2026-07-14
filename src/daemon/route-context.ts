@@ -17,12 +17,14 @@ import type { WorkflowStore } from "../runtime/workflow-store";
 import type { JobStore } from "./job-store";
 import type { RunEventStore } from "./run-event-store";
 import type { TaskStore } from "./task-store";
+import type { LeadBindingStore } from "../runtime/lead-binding";
 
 type GoalRecord = NonNullable<ReturnType<GoalStore["get"]>>;
 
 export type DaemonRouteContext = {
   projectId: string;
   projectRoot: string;
+  experimentalSessionsEnabled: boolean;
   stateOptions?: ProjectStateOptions;
   extensionInfo: () => {
     digest: string;
@@ -30,6 +32,12 @@ export type DaemonRouteContext = {
     providers: readonly string[];
     pricing: readonly string[];
   };
+  leads: LeadBindingStore;
+  useLead: (host: string, credential: AuthenticatedCredential) => unknown;
+  releaseLead: (credential: AuthenticatedCredential) => unknown;
+  provisionObserver: (credential: AuthenticatedCredential) => unknown;
+  observerSnapshot: () => unknown;
+  observerEvents: (params: { afterCursor?: number; limit: number }) => unknown;
   trust: ProjectTrustStore;
   fleets: FleetProfileStore;
   fleetHealth: (profile: NonNullable<ReturnType<FleetProfileStore["get"]>>) => unknown;
@@ -66,6 +74,13 @@ export type DaemonRouteContext = {
   workflows: WorkflowStore;
   waitWorkflow: (workflowId: string, timeoutMs: number) => Promise<Workflow>;
   cancelWorkflow: (workflowId: string) => Workflow;
+  pauseWorkflow: (workflowId: string) => Workflow;
+  resumeWorkflow: (workflowId: string) => Workflow;
+  validateWorkflow: (params: Record<string, unknown>, credential: AuthenticatedCredential) => unknown;
+  createWorkflowDraft: (params: Record<string, unknown>, credential: AuthenticatedCredential) => unknown;
+  listWorkflowDrafts: (credential: AuthenticatedCredential) => unknown;
+  getWorkflowDraft: (draftId: string, credential: AuthenticatedCredential) => unknown;
+  launchWorkflowDraft: (draftId: string, credential: AuthenticatedCredential) => unknown;
   runGate: (params: Record<string, unknown>, principal: string) => unknown;
   enableAutonomy: () => unknown;
   disableAutonomy: () => unknown;
@@ -74,4 +89,17 @@ export type DaemonRouteContext = {
   sendSession: (params: Record<string, unknown>, credential: AuthenticatedCredential) => unknown;
   cancelSession: (sessionId: string, credential: AuthenticatedCredential) => unknown;
   requireSessionFor: (sessionId: string, credential: AuthenticatedCredential) => { result: unknown };
+  listSkills: () => unknown;
+  inspectSkill: (skill: string) => unknown;
+  importSkill: (source: string, actor: string) => unknown;
+  enableSkill: (skill: string, actor: string) => unknown;
+  useSkill: (params: Record<string, unknown>, credential: AuthenticatedCredential) => unknown;
+  revokeSkill: (skill: string) => unknown;
+  startLoop: (policy: unknown, credential: AuthenticatedCredential) => unknown;
+  listLoops: (credential: AuthenticatedCredential) => unknown;
+  statusLoop: (loopId: string, credential: AuthenticatedCredential) => unknown;
+  pauseLoop: (loopId: string, credential: AuthenticatedCredential) => unknown;
+  resumeLoop: (loopId: string, credential: AuthenticatedCredential) => unknown;
+  cancelLoop: (loopId: string, credential: AuthenticatedCredential) => unknown;
+  repairLedgerTail: (principal: string) => unknown;
 };

@@ -23,6 +23,7 @@ import { JobStore } from "./job-store";
 import { ProviderBroker } from "../broker/server";
 import { getProvider } from "../broker/providers";
 import { PersistentSessionStore } from "../runtime/persistent-sessions";
+import { ledgerIntegrityOptionsFromEnv, repairLedgerPartialTail } from "../runtime/ledger-v2";
 import { NativeSessionManager } from "../runtime/native-session-manager";
 import { ProjectTrustStore } from "../runtime/project-trust-store";
 import { FleetProfileStore } from "../runtime/fleet-profile-store";
@@ -34,8 +35,9 @@ import type { GoalAgentAvailability, GoalSecurityControls } from "../runtime/goa
 import { GoalRuntimeService } from "./goal-runtime-service";
 import { createWorkerEnvironment } from "../runtime/worker-environment";
 import { installNativeAuthCapsule } from "../runtime/native-auth-capsule";
-import { getAdapter, resolveAdapterId } from "../backends/registry";
-import type { Job, Task } from "../contracts/durable";
+import { getBackendDefinition, requiredContainmentSecurityGaps, resolveBackendId } from "../backends/registry";
+import { backendMetadata } from "../backends/metadata";
+import { BudgetSchema, type Job, type Task } from "../contracts/durable";
 import type { AgentProfile, FleetProfile } from "../contracts/collaboration";
 import { AuthorityStore } from "../runtime/authority-store";
 import { BudgetStore } from "../runtime/budget-store";
@@ -45,13 +47,17 @@ import { CouncilStore } from "../runtime/council-store";
 import { CouncilService } from "./council-service";
 import { DEFAULT_GATES, runReleaseGate, type GateCheck } from "../runtime/release-gate";
 import { OrchestrationStateStore } from "../runtime/orchestration-state";
-import { listAdapters } from "../backends/registry";
+import { SkillRegistry } from "../runtime/skill-registry";
+import { LoopStore } from "../runtime/loop-store";
+import { LoopService } from "./loop-service";
+import { listBackendDefinitions } from "../backends/registry";
 import { atomicWriteFile } from "../runtime/atomic-write";
 import { getProcessStartIdentity } from "../runtime/ledger-v2";
 import { getHeadSha, runGitStrict } from "../runtime/git";
 import { WorktreeLeaseStore } from "../runtime/worktree-leases";
 import { IntegrationJournal, type IntegrationJournalRecord } from "../runtime/integration-journal";
 import { WorkflowService } from "./workflow-service";
+import { WorkflowDraftStore } from "../runtime/workflow-draft-store";
 import {
   JobAdmissionService,
   estimateRequestResources,
@@ -60,6 +66,8 @@ import { TaskStore } from "./task-store";
 import { RunEventStore } from "./run-event-store";
 import { PersistentMessageQueue } from "../runtime/message-queue";
 import { CredentialStore, type AuthenticatedCredential } from "../runtime/credential-store";
+import { LeadBindingStore, leadCredentialName } from "../runtime/lead-binding";
+import { migrateSingleLeadState } from "../runtime/project-state-migration";
 import { assertPrincipalOwns } from "./auth";
 import { RunToolEndpointManager } from "./run-tool-endpoint";
 import { createRunToolCallHandler } from "./run-tool-operations";
@@ -68,6 +76,7 @@ import { createDaemonRouteHandlers } from "./route-handlers";
 import { optionalString, optionalTimeout, stringArray, stringParam } from "./route-params";
 import { createCandidateIntegrationService } from "./candidate-service";
 import { RunExecutionService } from "./run-execution-service";
+import { DurableBrokerQuotaStore } from "../runtime/broker-quota-store";
 import {
   loadDaemonExtensions,
   resolveDaemonExtensionConfig,
@@ -88,6 +97,8 @@ export type HeadlessDaemonOptions = {
   extensionConfigPath?: string;
   /** Trusted absolute entrypoints for embedded/bootstrapped daemons. */
   extensionModules?: readonly string[];
+  /** Beta 1 compatibility switch. Persistent execution routes are off by default. */
+  enableExperimentalSessions?: boolean;
 };
 
 export class HeadlessDaemon {
@@ -117,23 +128,29 @@ export class HeadlessDaemon {
   private readonly coordinator: string;
   private councils!: CouncilStore;
   private orchestration!: OrchestrationStateStore;
+  private skills!: SkillRegistry;
+  private loopService!: LoopService;
   private messages!: PersistentMessageQueue;
   private credentials!: CredentialStore;
+  private leads!: LeadBindingStore;
   private worktreeLeases!: WorktreeLeaseStore;
   private integrationJournal!: IntegrationJournal;
   private workflowService!: WorkflowService;
+  private workflowDrafts!: WorkflowDraftStore;
   private jobAdmission!: JobAdmissionService;
   private runTools!: RunToolEndpointManager;
   private councilService!: CouncilService;
   private runExecution!: RunExecutionService;
   private readonly writeGateChecks: GateCheck[];
   private readonly extensionConfig;
+  private readonly enableExperimentalSessions: boolean;
   private loadedExtensions: LoadedDaemonExtensions;
   private readonly executions = new Set<Promise<void>>();
   private stopping = false;
   private ready = false;
   private ownedStateInitialized = false;
   private server: Server | null = null;
+  private readonly sockets = new Set<Socket>();
   private routeHandlers!: DaemonRouteHandlerMap;
 
   constructor(options: HeadlessDaemonOptions) {
@@ -141,12 +158,16 @@ export class HeadlessDaemon {
     this.principal = (options.principal?.trim() || localPrincipal()).slice(0, 128);
     this.configuredToken = options.token;
     this.stateOptions = options.state;
+    const brokerQuotas = new DurableBrokerQuotaStore(this.state);
     this.broker = new ProviderBroker({
       unixSocketPath: join(this.state.daemonRuntimeDir, `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`),
+      initialBudgetQuotas: brokerQuotas.snapshot(),
+      persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
     });
     this.coordinator = options.coordinator ?? this.principal;
     this.writeGateChecks = options.writeGateChecks ?? DEFAULT_GATES;
     this.jobAdmissionLimits = { maxConcurrency: options.maxConcurrency, maxQueued: options.maxQueued };
+    this.enableExperimentalSessions = options.enableExperimentalSessions === true;
     this.extensionConfig = resolveDaemonExtensionConfig({
       configPath: options.extensionConfigPath,
       modulePaths: options.extensionModules,
@@ -191,6 +212,7 @@ export class HeadlessDaemon {
       await this.candidateIntegrations.reconcile();
       this.reconcileIntegrationJournal();
       this.jobs.recoverInterruptedJobs(true);
+      this.reconcileTerminalRunEvents();
       this.jobAdmission.recoverBudgetReservations();
       this.reconcilePersistentSessions();
       this.reconcileTasks();
@@ -199,7 +221,12 @@ export class HeadlessDaemon {
       this.writeMetadata(true);
     } catch (error) {
       this.ready = false;
-      await cleanupWithDiagnostic("daemon.start.socket-close", () => new Promise<void>((resolve) => server.close(() => resolve())));
+      await cleanupWithDiagnostic("daemon.start.socket-close", async () => {
+        const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+        for (const socket of this.sockets) socket.destroy();
+        await closed;
+        this.sockets.clear();
+      });
       if (bound) await cleanupWithDiagnostic("daemon.start.socket-remove", () => { rmSync(this.state.socketPath, { force: true }); });
       await cleanupWithDiagnostic("daemon.start.run-tools-revoke", () => this.runTools?.revokeAll());
       await cleanupWithDiagnostic("daemon.start.goal-runtime-dispose", () => this.goalRuntime?.dispose());
@@ -213,6 +240,7 @@ export class HeadlessDaemon {
     this.workflowService.recover();
     this.councilService.recover();
     this.goalRuntime.recover();
+    this.loopService.recover();
     return this.state.socketPath;
   }
 
@@ -233,6 +261,7 @@ export class HeadlessDaemon {
       }
     }
     if (this.ownedStateInitialized) {
+      this.loopService.dispose();
       await this.goalRuntime.waitForIdle();
       this.goalRuntime.dispose();
     }
@@ -242,7 +271,10 @@ export class HeadlessDaemon {
       this.ready = false;
       const server = this.server;
       this.server = null;
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+      for (const socket of this.sockets) socket.destroy();
+      await closed;
+      this.sockets.clear();
       rmSync(this.state.socketPath, { force: true });
     }
     this.broker.stop();
@@ -254,6 +286,8 @@ export class HeadlessDaemon {
   }
 
   private accept(socket: Socket) {
+    this.sockets.add(socket);
+    socket.once("close", () => this.sockets.delete(socket));
     socket.setEncoding("utf8");
     let buffer = "";
     socket.on("data", (chunk) => {
@@ -288,6 +322,31 @@ export class HeadlessDaemon {
       socket.end(`${JSON.stringify(failure(request.id, new HeadlessError("DAEMON_AUTH_FAILED", "Daemon authentication failed.")))}\n`);
       return;
     }
+    if (credential.kind === "observer" && request.method !== "ping" && !request.method.startsWith("observer.")) {
+      socket.end(`${JSON.stringify(failure(request.id, new HeadlessError("POLICY_DENIED", "Observer credentials are read-only and may only use observer operations.")))}\n`);
+      return;
+    }
+    if (credential.kind === "integration" && credential.id.startsWith("integration:lead-")) {
+      try {
+        const binding = this.leads.assertCurrent(credential.principal);
+        if (binding.status !== "connected" && leadMutationRequiresAttachment(request.method)) {
+          throw new HeadlessError("POLICY_DENIED", "The configured foreground lead must attach before changing project state.");
+        }
+      } catch (error) {
+        socket.end(`${JSON.stringify(failure(request.id, error))}\n`);
+        return;
+      }
+    }
+    if (request.method.startsWith("session.") && !this.enableExperimentalSessions) {
+      socket.end(`${JSON.stringify(failure(
+        request.id,
+        new HeadlessError(
+          "BACKEND_UNSUPPORTED",
+          "Persistent execution sessions are experimental and disabled. Use one-shot run.submit or restart the daemon with the explicit experimental session option.",
+        ),
+      ))}\n`);
+      return;
+    }
     try {
       const result = await dispatchDaemonRoute(this.routeHandlers, request.method, request.params, credential);
       socket.end(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: request.id, ok: true, result } satisfies DaemonResponse)}\n`);
@@ -300,11 +359,19 @@ export class HeadlessDaemon {
   }
 
   private fleetHealth(profile: FleetProfile) {
-    const agents = profile.agents.map((agent) => ({
-      agent,
-      ...this.agentAvailability(agent),
-      executable: getAdapter(resolveAdapterId(agent.backend))?.probe.versionCommand[0] ?? null,
-    }));
+    const probed = profile.agents.map((agent) => ({ agent, availability: this.agentAvailability(agent) }));
+    const alternatives = probed.filter(({ agent, availability }) => {
+      const adapter = getBackendDefinition(resolveBackendId(agent.backend));
+      return agent.enabled && availability.authenticated && availability.health === "healthy" && adapter && requiredContainmentSecurityGaps(adapter, "read-only").length === 0;
+    }).map(({ agent }) => agent.id);
+    const agents = probed.map(({ agent, availability }) => {
+      const adapter = getBackendDefinition(resolveBackendId(agent.backend));
+      const gaps = adapter ? requiredContainmentSecurityGaps(adapter, "read-only") : ["registered backend"];
+      const writeGaps = adapter ? requiredContainmentSecurityGaps(adapter, "write") : ["registered backend"];
+      const login = adapter && adapter.id in backendMetadata ? backendMetadata[adapter.id as keyof typeof backendMetadata].login : undefined;
+      const presentation = fleetPresentation(agent, availability, gaps, writeGaps, alternatives.filter((id) => id !== agent.id), login);
+      return { agent, ...availability, executable: adapter?.probe.versionCommand[0] ?? null, detail: presentation.reason, presentation };
+    });
     return {
       profileId: profile.id,
       active: this.fleets.snapshot().activeProfileId === profile.id,
@@ -320,8 +387,11 @@ export class HeadlessDaemon {
   ): GoalAgentAvailability {
     let executable = false;
     try {
-      const adapter = getAdapter(resolveAdapterId(agent.backend));
-      executable = !!adapter && Bun.which(adapter.probe.versionCommand[0]) !== null;
+      const adapter = getBackendDefinition(resolveBackendId(agent.backend));
+      executable = !!adapter && (
+        Bun.which(adapter.probe.versionCommand[0]) !== null
+        || (adapter.managedExecutable?.(this.stateOptions?.homeDir) ?? null) !== null
+      );
     } catch (error) {
       recordRuntimeDiagnostic("transport", "fleet-agent-probe", error, "warning");
       executable = false;
@@ -330,10 +400,10 @@ export class HeadlessDaemon {
     if (executable) {
       if (security.authMode === "native-login") {
         const trust = this.trust.status();
-        if (trust.trusted && trust.nativeLoginAllowed && (security.approvalPolicy !== "bypass" || trust.bypassAllowed)) {
+        if (trust.trusted && trust.nativeLoginAllowed && trust.nativeDirectUnrestrictedAcknowledged && (security.approvalPolicy !== "bypass" || trust.bypassAllowed)) {
           const worker = createWorkerEnvironment();
           try {
-            authenticated = installNativeAuthCapsule(worker, resolveAdapterId(agent.backend)).available;
+            authenticated = installNativeAuthCapsule(worker, resolveBackendId(agent.backend)).available;
           } catch (error) {
             console.error(redactAndTruncate(`Native fleet auth probe failed for ${agent.id}: ${messageOf(error)}`, 2_048).text);
           } finally {
@@ -343,23 +413,25 @@ export class HeadlessDaemon {
       } else {
         const provider = providerForBackend(agent.backend, agent.model);
         const definition = provider ? getProvider(provider) : null;
-        authenticated = getAdapter(resolveAdapterId(agent.backend))?.security.strictAuth === "credential-free"
+        authenticated = getBackendDefinition(resolveBackendId(agent.backend))?.security.strictAuth === "credential-free"
           || (!!definition && !!process.env[definition.credentialEnv]);
       }
     }
-    const sessions = this.sessions.list().filter((session) => session.backend === resolveAdapterId(agent.backend));
+    const sessions = this.sessions.list().filter((session) => session.backend === resolveBackendId(agent.backend));
     const rateLimitedUntil = sessions.reduce<number | null>((latest, session) => {
       const rate = session.native?.rateLimit;
       if (!rate?.limited || rate.retryAfterMs === null || rate.detectedAt === null) return latest;
       const until = rate.detectedAt + rate.retryAfterMs;
       return latest === null || until > latest ? until : latest;
     }, null);
-    const recent = this.jobs.list().filter((job) => job.backend === resolveAdapterId(agent.backend)).slice(-20);
+    const recent = this.jobs.list().filter((job) => job.backend === resolveBackendId(agent.backend)).slice(-20);
     const recentFailures = recent.filter((job) => job.state === "failed" || job.state === "timed_out").length;
     const activeTurns = sessions.filter((session) => session.state === "running" || session.state === "cancelling").length;
+    const adapter = executable ? getBackendDefinition(resolveBackendId(agent.backend)) : null;
+    const containmentReady = !!adapter && requiredContainmentSecurityGaps(adapter, security.mode ?? "read-only").length === 0;
     const health: GoalAgentAvailability["health"] = !executable
       ? "offline"
-      : !authenticated ? "unhealthy" : rateLimitedUntil !== null && rateLimitedUntil > Date.now() ? "degraded" : "healthy";
+      : !authenticated || !containmentReady ? "unhealthy" : rateLimitedUntil !== null && rateLimitedUntil > Date.now() ? "degraded" : "healthy";
     return { authenticated, health, rateLimitedUntil, activeTurns, recentFailures };
   }
 
@@ -434,18 +506,18 @@ export class HeadlessDaemon {
   }
 
   private createSession(params: Record<string, unknown>, principal: string) {
-    const backend = resolveAdapterId(stringParam(params, "backend"));
-    const adapter = getAdapter(backend);
+    const backend = resolveBackendId(stringParam(params, "backend"));
+    const adapter = getBackendDefinition(backend);
     const requestedAgent = optionalString(params.agent);
     const agent = requestedAgent ? safeAgentName(requestedAgent, backend) : undefined;
     if (agent && !adapter?.supportsNamedAgent) {
       throw new HeadlessError("BACKEND_UNSUPPORTED", `Backend ${backend} does not support named agents in contained Headless sessions.`);
     }
-    const authMode = params.authMode === "broker" ? "broker" : "native-login";
+    const authMode = params.authMode === "native-login" ? "native-login" : "broker";
     const approvalPolicy = params.approvalPolicy === "auto" || params.approvalPolicy === "bypass" ? params.approvalPolicy : "ask";
     if (authMode === "native-login" && adapter?.security.strictAuth !== "credential-free") {
       const trust = this.trust.status();
-      if (!trust.trusted || !trust.nativeLoginAllowed || (approvalPolicy === "bypass" && !trust.bypassAllowed)) {
+      if (!trust.trusted || !trust.nativeLoginAllowed || !trust.nativeDirectUnrestrictedAcknowledged || (approvalPolicy === "bypass" && !trust.bypassAllowed)) {
         throw new HeadlessError("NATIVE_AUTH_UNAVAILABLE", "Native sessions require compatible project trust.");
       }
     }
@@ -528,6 +600,36 @@ export class HeadlessDaemon {
     return session;
   }
 
+  private useSkill(params: Record<string, unknown>, credential: AuthenticatedCredential) {
+    const backend = optionalString(params.backend);
+    if (!backend) throw new HeadlessError("INVALID_REQUEST", "Skill use requires an explicit backend.");
+    const invocation = this.skills.invocation(stringParam(params, "skill"), String(params.arguments ?? ""), credential.principal, [backend]);
+    this.recordSkillAudit("portable_skill_invoked", credential.principal, { auditId: invocation.auditId, skillId: invocation.skill.id, version: invocation.skill.version, contentHash: invocation.skill.contentHash, receivers: [backend] });
+    const session = this.createSession({ backend, containment: "required", approvalPolicy: "ask" }, credential.principal);
+    const response = this.sendSession({ sessionId: session.id, prompt: invocation.prompt, timeoutMs: params.timeoutMs }, credential);
+    this.recordSkillCompletion(invocation.auditId, response.job.id, credential.principal);
+    return response;
+  }
+
+  private recordSkillCompletion(auditId: string, jobId: string, principal: string) {
+    void this.wait(jobId).then((job) => {
+      this.skills.completeInvocation(auditId, { jobId, status: job.state, result: job.result });
+      this.recordSkillAudit("portable_skill_completed", principal, { auditId, jobId, status: job.state });
+    }).catch((error) => {
+      this.skills.completeInvocation(auditId, { jobId, status: "failed", error: messageOf(error) });
+      this.recordSkillAudit("portable_skill_completed", principal, { auditId, jobId, status: "failed" });
+    });
+  }
+
+  private recordSkillAudit(type: string, principal: string, payload: Record<string, unknown>) {
+    try {
+      const session = getOrCreateSession({ cwd: this.state.canonicalProjectRoot, state: this.stateOptions, authenticatedPrincipal: principal });
+      appendEvent(session, { type: "note", source: principal, content: `${type}: ${redactAndTruncate(JSON.stringify(payload), 16_384).text}`, meta: { eventType: type, ...payload } });
+    } catch (error) {
+      recordRuntimeDiagnostic("state", "skill-audit", error, "error");
+    }
+  }
+
   private assertRequestedSessionOwnership(params: Record<string, unknown>, credential: AuthenticatedCredential) {
     const sessionId = optionalString(params.sessionId);
     if (!sessionId) return;
@@ -587,6 +689,21 @@ export class HeadlessDaemon {
     }
   }
 
+  private reconcileTerminalRunEvents() {
+    for (const job of this.jobs.list()) {
+      if (!job.result || !["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(job.state)) continue;
+      try {
+        this.runEvents.reconcileTerminal(
+          { jobId: job.id, sessionId: job.sessionId },
+          job.result,
+          job.updatedAt,
+        );
+      } catch (error) {
+        recordRuntimeDiagnostic("state", `daemon.start.terminal-events:${job.id}`, error);
+      }
+    }
+  }
+
   private reconcileTasks() {
     this.tasks.recoverStaleLeases();
     for (const task of this.tasks.list()) {
@@ -612,6 +729,7 @@ export class HeadlessDaemon {
   /** Initialize every mutable project store only after this process has won the socket. */
   private initializeOwnedState() {
     this.token = this.configuredToken ?? loadOrCreateToken(this.state.tokenPath);
+    migrateSingleLeadState(this.state);
     this.jobs = new JobStore(this.state.jobsDir);
     this.tasks = new TaskStore(this.state.tasksDir, { recoverOnOpen: false });
     this.runEvents = new RunEventStore(this.state.runEventsPath, { compactOnOpen: false });
@@ -628,12 +746,11 @@ export class HeadlessDaemon {
       this.fleets.create({
         id: "fleet-default",
         name: "Installed native coders",
-        coordinator: { kind: "automatic" },
-        agents: listAdapters().map((adapter) => ({
+        agents: listBackendDefinitions().map((adapter) => ({
           id: adapter.id,
           backend: adapter.id,
           name: adapter.id,
-          priority: adapter.id === "codex" ? 20 : adapter.id === "claude-code" ? 10 : adapter.id === "opencode" ? 5 : 0,
+          priority: adapter.fleetPriority ?? 0,
           capabilities: [
             "read",
             ...(adapter.capabilities.write ? ["write"] : []),
@@ -643,10 +760,16 @@ export class HeadlessDaemon {
         })),
       });
     }
+    this.credentials = new CredentialStore(this.state, { token: this.token, principal: this.principal });
+    this.leads = new LeadBindingStore(this.state);
+    this.credentials.revokeLegacyIntegrations(this.credentials.authenticate(this.token)!);
     this.goals = new GoalStore(this.state);
     this.approvals = new ApprovalStore(this.state, { expiryActor: this.principal });
     this.directedMailbox = new DirectedMailbox({ statePath: join(this.state.projectDir, "directed-mailbox.json") });
-    this.authority = new AuthorityStore(this.state, { coordinator: this.coordinator });
+    this.authority = new AuthorityStore(this.state, {
+      rootPrincipal: this.coordinator,
+      foregroundLead: () => this.leads.status()?.integrationPrincipal ?? null,
+    });
     this.budgets = new BudgetStore(this.state);
     this.finality = new FinalityStore(this.state);
     this.jobAdmission = new JobAdmissionService({
@@ -657,6 +780,7 @@ export class HeadlessDaemon {
       tasks: this.tasks,
       runEvents: this.runEvents,
       approvals: this.approvals,
+      sessions: this.sessions,
       trust: this.trust,
       authority: this.authority,
       budgets: this.budgets,
@@ -683,8 +807,8 @@ export class HeadlessDaemon {
       submit: (params, principal, options) => this.jobAdmission.submit(params, principal, options),
       wait: (jobId, timeoutMs) => this.wait(jobId, timeoutMs),
       authorize: (request) => this.authority.authorize(request),
-      resolveBackend: resolveAdapterId,
-      getBackend: (backend) => getAdapter(backend) ?? null,
+      resolveBackend: resolveBackendId,
+      getBackend: (backend) => getBackendDefinition(backend) ?? null,
       latestFinality: (jobId) => this.finality.latest(jobId),
       listFinality: () => this.finality.list().map(({ decision }) => decision),
       evaluateFinality: (input) => this.finality.evaluate(input),
@@ -695,9 +819,14 @@ export class HeadlessDaemon {
       },
     });
     this.orchestration = new OrchestrationStateStore(this.state);
+    this.skills = new SkillRegistry(this.state);
     this.messages = new PersistentMessageQueue(join(this.state.projectDir, "message-queue.sqlite"));
-    this.credentials = new CredentialStore(this.state, { token: this.token, principal: this.principal });
-    this.worktreeLeases = new WorktreeLeaseStore(this.state.worktreesDir, this.state.projectId);
+    this.worktreeLeases = new WorktreeLeaseStore(this.state.worktreesDir, this.state.projectId, {
+      // Bun and Git inspect checkout ancestors. Keeping executable worktrees
+      // beneath the short owner-only runtime root avoids macOS TCC-protected
+      // ~/Library ancestors while durable lease manifests remain in state.
+      checkoutBase: join(this.state.daemonRuntimeDir, "worktrees", this.state.projectId),
+    });
     this.integrationJournal = new IntegrationJournal(this.state);
     this.candidateIntegrations = createCandidateIntegrationService({
       paths: this.state,
@@ -734,6 +863,7 @@ export class HeadlessDaemon {
         console.error(redactAndTruncate(`${message} ${messageOf(error)}`, 2_048).text);
       },
     });
+    this.workflowDrafts = new WorkflowDraftStore(this.state);
     this.runTools = new RunToolEndpointManager({
       socketDir: this.state.daemonRuntimeDir,
       handle: createRunToolCallHandler({
@@ -779,6 +909,7 @@ export class HeadlessDaemon {
       trust: this.trust,
       orchestration: this.orchestration,
       availability: (agent, security) => this.agentAvailability(agent, security),
+      activeLeadBackend: () => this.leads.status()?.backendId ?? null,
       createSession: (params, principal) => this.createSession(params, principal),
       submitRun: (params, principal, options) => this.jobAdmission.submit(params, principal, options),
       waitRun: (jobId, timeoutMs) => this.wait(jobId, timeoutMs),
@@ -789,6 +920,31 @@ export class HeadlessDaemon {
         console.error(redactAndTruncate(`${message} ${error === undefined ? "" : messageOf(error)}`, 2_048).text);
       },
     });
+    this.loopService = new LoopService({
+      store: new LoopStore(this.state),
+      startGoal: (target, principal, workId) => {
+        const existing = this.goals.get(workId);
+        if (existing) return { id: existing.goal.id };
+        return { id: this.goalRuntime.coordinator.start({ id: workId, principal, objective: target.objective, mode: target.mode, fleetProfileId: target.fleetProfileId, autonomous: false }).goal.id };
+      },
+      goalStatus: (id) => {
+        const record = this.goals.get(id);
+        if (!record) throw new HeadlessError("INVALID_REQUEST", `Loop goal disappeared: ${id}`);
+        return { state: record.goal.state, terminal: record.result !== null, succeeded: record.goal.state === "succeeded" };
+      },
+      startWorkflow: (definition, principal, workId) => {
+        const existing = this.workflowService.store.get(workId);
+        if (existing) return { id: existing.id };
+        return { id: this.workflowService.create({ ...definition, id: workId }, internalCredential(principal)).id };
+      },
+      workflowStatus: (id) => {
+        const workflow = this.workflowService.store.get(id);
+        if (!workflow) throw new HeadlessError("INVALID_REQUEST", `Loop workflow disappeared: ${id}`);
+        return { state: workflow.state, terminal: ["succeeded", "failed", "blocked", "cancelled"].includes(workflow.state), succeeded: workflow.state === "succeeded" };
+      },
+      cancelGoal: (id, principal) => this.goalRuntime.cancelGoalAs(id, principal),
+      cancelWorkflow: (id) => this.workflowService.cancel(id),
+    });
     this.initializeRouteHandlers();
     this.ownedStateInitialized = true;
   }
@@ -797,6 +953,7 @@ export class HeadlessDaemon {
     this.routeHandlers = createDaemonRouteHandlers({
       projectId: this.state.projectId,
       projectRoot: this.state.canonicalProjectRoot,
+      experimentalSessionsEnabled: this.enableExperimentalSessions,
       stateOptions: this.stateOptions,
       extensionInfo: () => ({
         digest: this.loadedExtensions.digest,
@@ -804,6 +961,12 @@ export class HeadlessDaemon {
         providers: this.loadedExtensions.providers,
         pricing: this.loadedExtensions.pricing,
       }),
+      leads: this.leads,
+      useLead: (host, credential) => this.useLead(host, credential),
+      releaseLead: (credential) => this.releaseLead(credential),
+      provisionObserver: (credential) => this.credentials.provisionObserver(credential),
+      observerSnapshot: () => this.observerSnapshot(),
+      observerEvents: (params) => this.runEvents.snapshot(params),
       trust: this.trust,
       fleets: this.fleets,
       fleetHealth: (profile) => this.fleetHealth(profile),
@@ -845,6 +1008,27 @@ export class HeadlessDaemon {
       workflows: this.workflowService.store,
       waitWorkflow: (workflowId, timeoutMs) => this.workflowService.wait(workflowId, timeoutMs),
       cancelWorkflow: (workflowId) => this.workflowService.cancel(workflowId),
+      pauseWorkflow: (workflowId) => this.workflowService.pause(workflowId),
+      resumeWorkflow: (workflowId) => this.workflowService.resume(workflowId),
+      validateWorkflow: (params, credential) => this.workflowService.validate(params, credential),
+      createWorkflowDraft: (params, credential) => {
+        const validated = this.workflowService.validate(params, credential);
+        return this.workflowDrafts.create(validated.parsed, credential.principal);
+      },
+      listWorkflowDrafts: (credential) => this.workflowDrafts.list().filter((draft) => credential.scopes.includes("admin") || draft.principal === credential.principal),
+      getWorkflowDraft: (draftId, credential) => {
+        const draft = this.workflowDrafts.get(draftId);
+        if (!draft) throw new HeadlessError("INVALID_REQUEST", `Unknown workflow draft: ${draftId}`);
+        assertPrincipalOwns(credential, draft.principal, "Workflow draft"); return draft;
+      },
+      launchWorkflowDraft: (draftId, credential) => {
+        const draft = this.workflowDrafts.get(draftId);
+        if (!draft) throw new HeadlessError("INVALID_REQUEST", `Unknown workflow draft: ${draftId}`);
+        assertPrincipalOwns(credential, draft.principal, "Workflow draft");
+        if (draft.state !== "draft") throw new HeadlessError("INVALID_REQUEST", "Workflow draft was already launched.");
+        const workflow = this.workflowService.create(draft.definition, credential);
+        return { draft: this.workflowDrafts.launched(draft.id, workflow.id), workflow };
+      },
       runGate: (params, principal) => runReleaseGate({
         checks: parseGateChecks(params.checks),
         cwd: this.state.canonicalProjectRoot,
@@ -860,6 +1044,29 @@ export class HeadlessDaemon {
       sendSession: (params, credential) => this.sendSession(params, credential),
       cancelSession: (sessionId, credential) => this.cancelSession(sessionId, credential),
       requireSessionFor: (sessionId, credential) => this.requireSessionFor(sessionId, credential),
+      listSkills: () => this.skills.list(),
+      inspectSkill: (skill) => this.skills.inspect(skill),
+      importSkill: (source, actor) => this.skills.import(source, actor),
+      enableSkill: (skill, actor) => this.skills.enable(skill, actor),
+      useSkill: (params, credential) => this.useSkill(params, credential),
+      revokeSkill: (skill) => this.skills.revoke(skill),
+      startLoop: (policy, credential) => this.loopService.start(policy, credential.principal),
+      listLoops: (credential) => this.loopService.store.list().filter((loop) => credential.scopes.includes("admin") || loop.principal === credential.principal),
+      statusLoop: (loopId, credential) => {
+        const loop = this.loopService.store.get(loopId);
+        if (!loop) throw new HeadlessError("INVALID_REQUEST", `Unknown loop: ${loopId}`);
+        assertPrincipalOwns(credential, loop.principal, "Loop"); return loop;
+      },
+      pauseLoop: (loopId, credential) => this.loopService.pause(loopId, credential.principal),
+      resumeLoop: (loopId, credential) => this.loopService.resume(loopId, credential.principal),
+      cancelLoop: (loopId, credential) => this.loopService.cancel(loopId, credential.principal),
+      repairLedgerTail: (principal) => repairLedgerPartialTail({
+        ledgerPath: this.state.ledgerPath,
+        readModelPath: this.state.readModelPath,
+        projectId: this.state.projectId,
+        principal,
+        ...ledgerIntegrityOptionsFromEnv(),
+      }),
     });
   }
 
@@ -883,6 +1090,123 @@ export class HeadlessDaemon {
     })}\n`, { mode: 0o600 });
     ensureOwnerOnlyFile(this.state.daemonMetadataPath);
   }
+
+  private useLead(host: string, credential: AuthenticatedCredential) {
+    const backendId = resolveBackendId(host);
+    const generation = this.leads.nextGeneration();
+    const provisioned = this.credentials.provisionIntegration(credential, leadCredentialName(host, generation));
+    const previous = this.leads.status();
+    const binding = this.leads.use({
+      host,
+      backendId,
+      integrationPrincipal: provisioned.credential.principal,
+      generation,
+    });
+    if (previous) this.credentials.revoke(credential, previous.integrationPrincipal);
+    return { binding, credentialId: provisioned.credential.id, tokenPath: provisioned.tokenPath };
+  }
+
+  private releaseLead(credential: AuthenticatedCredential) {
+    const previous = this.leads.release();
+    if (previous) this.credentials.revoke(credential, previous.integrationPrincipal);
+    return { released: previous, binding: null };
+  }
+
+  private observerSnapshot() {
+    const fleetState = this.fleets.snapshot();
+    const goals = this.goals.listRecords();
+    return {
+      version: 1,
+      projectId: this.state.projectId,
+      projectRoot: this.state.canonicalProjectRoot,
+      observedAt: Date.now(),
+      lead: this.leads.status(),
+      projectTrust: this.trust.status(),
+      fleetProfiles: this.fleets.list(),
+      activeFleetProfileId: fleetState.activeProfileId,
+      fleetHealth: this.fleets.getActive() ? this.fleetHealth(this.fleets.getActive()!) : null,
+      goals: goals.map((record) => record.goal),
+      goalTurns: Object.fromEntries(goals.map((record) => [record.goal.id, record.turns])),
+      goalMessages: Object.fromEntries(goals.map((record) => [record.goal.id, this.directedMailbox.snapshot().messages.filter((message) => message.collaborationId === record.goal.id)])),
+      approvals: this.approvals.list({}),
+      jobs: this.jobs.list(),
+      tasks: this.tasks.list(),
+      sessions: this.sessions.list(),
+      orchestration: this.goalRuntime.autonomyStatus(),
+    };
+  }
+}
+
+function leadMutationRequiresAttachment(method: DaemonRequest["method"]) {
+  return !new Set<DaemonRequest["method"]>([
+    "ping",
+    "lead.status",
+    "lead.attach",
+    "lead.heartbeat",
+    "lead.disconnect",
+    "project.trust.status",
+    "fleet.profile.get",
+    "fleet.profile.list",
+    "fleet.health",
+    "goal.status",
+    "goal.list",
+    "goal.result",
+    "collaboration.turns",
+    "collaboration.messages",
+    "approval.list",
+    "candidate.inspect",
+    "authority.grant.list",
+    "budget.list",
+    "run.status",
+    "events.snapshot",
+    "events.wait",
+    "task.status",
+    "task.list",
+    "ledger.context",
+    "ledger.task",
+    "messages.pull",
+    "council.status",
+    "workflow.status",
+    "workflow.list",
+    "workflow.wait",
+    "workflow.validate",
+    "workflow.draft.list",
+    "workflow.draft.get",
+    "orchestrator.status",
+    "session.status",
+    "session.result",
+    "skill.list",
+    "skill.inspect",
+    "loop.list",
+    "loop.status",
+  ]).has(method);
+}
+
+function internalCredential(principal: string): AuthenticatedCredential {
+  return {
+    id: "headless-loop-service", principal, kind: "root",
+    scopes: ["admin", "run", "task", "ledger:read", "ledger:write", "messages", "council", "gate", "orchestrator", "session"],
+    createdAt: Date.now(), expiresAt: null, revokedAt: null,
+  };
+}
+
+function fleetPresentation(
+  agent: AgentProfile,
+  availability: GoalAgentAvailability,
+  containmentGaps: string[],
+  writeContainmentGaps: string[],
+  alternatives: string[],
+  login?: { argv?: [string, ...string[]]; instructions: string; brokerMode: boolean },
+) {
+  const common = { alternatives, brokerAvailable: login?.brokerMode ?? false, credentialForm: "supported provider CLI regular-file login state", loginCommand: login?.argv ?? null, loginInstructions: login?.instructions ?? null };
+  if (!agent.enabled) return { code: "disabled", reason: "Agent is disabled in the active fleet profile.", recovery: "Enable the agent or activate another fleet profile.", ...common };
+  if (containmentGaps.length) return { code: "blocked_by_containment", reason: `Required project-safety controls are unsupported: ${containmentGaps.join(", ")}.`, recovery: "Exclude this provider from required runs or select a compatible alternative; containment cannot be unblocked from the TUI.", ...common };
+  if (availability.rateLimitedUntil && availability.rateLimitedUntil > Date.now()) return { code: "rate_limited", reason: `Provider retry is unavailable until ${new Date(availability.rateLimitedUntil).toISOString()}.`, recovery: "Wait until the retry time or reassign work to an available alternative.", retryAt: availability.rateLimitedUntil, ...common };
+  if (!availability.authenticated) return { code: "login_required", reason: "Supported provider login state was not found.", recovery: login?.instructions ?? "Run the provider's declared login flow, then refresh Fleet health.", ...common };
+  if (availability.health === "offline") return { code: "provider_unavailable", reason: "Provider executable is unavailable on PATH.", recovery: "Install or restore the declared provider CLI, inspect Events, then refresh health.", ...common };
+  if (availability.health !== "healthy") return { code: "provider_unavailable", reason: "Provider health checks did not report ready.", recovery: "Retry health, inspect Events, or reassign to an available alternative.", ...common };
+  if (writeContainmentGaps.length) return { code: "ready", reason: "Ready for read-only planning, worker, and review roles. Direct candidate writes use another compatible provider.", recovery: "Assign read-only fleet work; keep writable leadership and candidate turns on a compatible provider.", writeCapable: false, ...common };
+  return { code: "ready", reason: "Provider is authenticated and satisfies required project-safety controls.", recovery: "Start a session, make it the future lead, or assign work.", ...common };
 }
 
 function loadOrCreateToken(path: string) {
@@ -1047,9 +1371,10 @@ function platform(): RunResult["containment"]["platform"] {
 }
 
 function providerForBackend(backend: string, model?: string) {
-  if (backend === "claude-code" || backend === "claude") return "anthropic";
-  if (backend === "codex") return "openai";
-  if (backend === "grok-build" || backend === "grok") return "xai";
+  try {
+    const provider = getBackendDefinition(resolveBackendId(backend))?.provider;
+    if (provider) return provider;
+  } catch {}
   const prefix = model?.split("/", 1)[0]?.toLowerCase();
   if (prefix === "google") return "gemini";
   return prefix && getProvider(prefix) ? prefix : null;

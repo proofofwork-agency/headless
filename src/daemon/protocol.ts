@@ -6,11 +6,13 @@ import {
   PositiveTimeoutSchema,
   RunModeSchema,
   StructuredErrorSchema,
+  TimestampSchema,
 } from "../contracts/common";
 import { RunRequestObjectSchema } from "../contracts/run";
-import { CoordinatorSelectionSchema } from "../contracts/collaboration";
+import { SynthesizerSelectionSchema } from "../contracts/collaboration";
 import { ApprovalPolicySchema, AuthModeSchema } from "../contracts/native";
 import { AgentNameSchema, backendAgentSelectionRefinement } from "../contracts/agent-name";
+import { LoopPolicySchema } from "../contracts/loop";
 
 export const DAEMON_PROTOCOL_VERSION = 2 as const;
 // Accommodates one fully bounded RunResult plus JSON framing without allowing
@@ -19,6 +21,14 @@ export const MAX_DAEMON_MESSAGE_BYTES = 4_000_000;
 
 export const DaemonMethodSchema = z.enum([
   "ping",
+  "lead.use",
+  "lead.status",
+  "lead.release",
+  "lead.attach",
+  "lead.heartbeat",
+  "lead.disconnect",
+  "observer.snapshot",
+  "observer.events",
   "project.trust.status",
   "project.trust.grant",
   "project.trust.revoke",
@@ -36,13 +46,13 @@ export const DaemonMethodSchema = z.enum([
   "collaboration.turns",
   "collaboration.messages",
   "collaboration.messages.acknowledge",
-  "collaboration.transferLeader",
+  "collaboration.transferSynthesizer",
   "approval.list",
   "approval.resolve",
   "candidate.inspect",
   "candidate.integrate",
   "candidate.reject",
-  "auth.provisionIntegration",
+  "auth.provisionObserver",
   "auth.list",
   "auth.revoke",
   "authority.grant.add",
@@ -69,6 +79,7 @@ export const DaemonMethodSchema = z.enum([
   "ledger.task",
   "ledger.proposeFinal",
   "ledger.event",
+  "ledger.repairTail",
   "messages.push",
   "messages.pull",
   "messages.markPushed",
@@ -79,6 +90,13 @@ export const DaemonMethodSchema = z.enum([
   "workflow.list",
   "workflow.wait",
   "workflow.cancel",
+  "workflow.pause",
+  "workflow.resume",
+  "workflow.validate",
+  "workflow.draft.create",
+  "workflow.draft.list",
+  "workflow.draft.get",
+  "workflow.draft.launch",
   "gate.run",
   "orchestrator.start",
   "orchestrator.stop",
@@ -89,7 +107,26 @@ export const DaemonMethodSchema = z.enum([
   "session.cancel",
   "session.status",
   "session.result",
+  "skill.list",
+  "skill.inspect",
+  "skill.import",
+  "skill.enable",
+  "skill.use",
+  "skill.revoke",
+  "loop.start",
+  "loop.list",
+  "loop.status",
+  "loop.pause",
+  "loop.resume",
+  "loop.cancel",
 ]);
+
+export const LeadUseParamsSchema = z.object({
+  host: z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
+}).strict();
+export const LeadGenerationParamsSchema = z.object({
+  generation: z.number().int().positive(),
+}).strict();
 
 export const DaemonRequestSchema = z.object({
   version: z.literal(DAEMON_PROTOCOL_VERSION),
@@ -114,15 +151,36 @@ export const AuthorityGrantAddParamsSchema = z.object({
   backends: z.array(z.string().trim().min(1).max(64)).min(1).max(64),
   expiresAt: z.number().int().positive(),
   maxCostUsd: z.number().nonnegative().nullable().default(null),
+  maxIterations: z.number().int().positive().max(10_000).nullable().default(null),
 }).strict();
 
-export const ProjectTrustGrantParamsSchema = z.object({
-  nativeLoginAllowed: z.boolean().default(true),
+export const ProjectTrustGrantParamsObjectSchema = z.object({
+  nativeLoginAllowed: z.boolean().default(false),
+  nativeDirectUnrestrictedAcknowledged: z.boolean().default(false),
   bypassAllowed: z.boolean().default(false),
 }).strict();
 
+export const ProjectTrustGrantParamsSchema = ProjectTrustGrantParamsObjectSchema.superRefine((value, context) => {
+  if (value.nativeLoginAllowed && !value.nativeDirectUnrestrictedAcknowledged) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["nativeDirectUnrestrictedAcknowledged"],
+      message: "Native login requires explicit acknowledgement of unrestricted provider egress.",
+    });
+  }
+});
+
 /** Project root and principal are always derived from the authenticated daemon. */
-export const RunSubmitParamsSchema = RunRequestObjectSchema.omit({ projectRoot: true })
+export const RunSubmitParamsSchema = RunRequestObjectSchema.omit({
+  projectRoot: true,
+  containment: true,
+  authMode: true,
+  approvalPolicy: true,
+}).extend({
+  containment: ContainmentRequirementSchema.optional(),
+  authMode: AuthModeSchema.optional(),
+  approvalPolicy: ApprovalPolicySchema.optional(),
+})
   .superRefine(backendAgentSelectionRefinement);
 
 const AgentProfileInputSchema = z.object({
@@ -130,7 +188,7 @@ const AgentProfileInputSchema = z.object({
   backend: BackendIdSchema,
   name: z.string().trim().min(1).max(160),
   model: z.string().trim().min(1).max(256).refine((value) => !value.startsWith("-"), "Model must not begin with a flag prefix.").optional(),
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
   enabled: z.boolean().default(true),
   priority: z.number().int().min(-100).max(100).default(0),
@@ -141,9 +199,8 @@ const AgentProfileInputSchema = z.object({
 export const FleetProfileUpsertParamsSchema = z.object({
   id: IdentifierSchema,
   name: z.string().trim().min(1).max(160),
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
-  coordinator: CoordinatorSelectionSchema.default({ kind: "automatic" }),
   agents: z.array(AgentProfileInputSchema).min(1).max(64),
   maxActiveWorkers: z.number().int().positive().max(64).default(4),
   maxQueuedDelegations: z.number().int().positive().max(1_024).default(64),
@@ -160,7 +217,7 @@ export const GoalStartParamsSchema = z.object({
   objective: z.string().trim().min(1).max(500_000),
   mode: RunModeSchema.default("read-only"),
   fleetProfileId: IdentifierSchema.optional(),
-  coordinator: CoordinatorSelectionSchema.optional(),
+  synthesizer: SynthesizerSelectionSchema.optional(),
   // Optional by design: omission inherits the selected fleet profile rather
   // than forcing the global native-login/ask defaults over that profile.
   authMode: AuthModeSchema.optional(),
@@ -181,7 +238,7 @@ export const CollaborationAcknowledgeParamsSchema = GoalIdParamsSchema.extend({
     .refine((values) => new Set(values).size === values.length, "Message acknowledgement ids must be unique."),
   prune: z.boolean().default(true),
 }).strict();
-export const CollaborationTransferLeaderParamsSchema = GoalIdParamsSchema.extend({ agentId: IdentifierSchema }).strict();
+export const CollaborationTransferSynthesizerParamsSchema = GoalIdParamsSchema.extend({ agentId: IdentifierSchema }).strict();
 export const ApprovalListParamsSchema = z.object({
   goalId: IdentifierSchema.optional(),
   status: z.enum(["pending", "approved", "rejected", "cancelled", "expired"]).optional(),
@@ -252,6 +309,11 @@ export const EventsWaitParamsSchema = EventsSnapshotParamsSchema.extend({
   timeoutMs: PositiveTimeoutSchema.max(60_000).default(30_000),
 }).strict();
 
+export const ObserverEventsParamsSchema = z.object({
+  afterCursor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  limit: z.number().int().positive().max(1_000).default(200),
+}).strict();
+
 const LedgerTextSchema = z.string().min(1).max(500_000);
 const OptionalSessionIdSchema = IdentifierSchema.optional();
 
@@ -292,6 +354,8 @@ export const LedgerEventParamsSchema = z.object({
   payload: z.record(z.unknown()),
 }).strict();
 
+export const LedgerRepairTailParamsSchema = z.object({ confirm: z.literal(true) }).strict();
+
 export const MessagesPushParamsSchema = z.object({
   chatId: IdentifierSchema,
   content: z.string().min(1).max(500_000),
@@ -311,7 +375,7 @@ export const CouncilRunParamsSchema = z.object({
   agents: z.array(BackendIdSchema).max(64).optional(),
   mode: z.enum(["read-only", "write"]).default("read-only"),
   containment: ContainmentRequirementSchema.default("required"),
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
   timeoutMs: PositiveTimeoutSchema.default(180_000),
 }).strict();
@@ -327,7 +391,7 @@ export const SessionCreateParamsSchema = z.object({
   model: z.string().trim().min(1).max(256).refine((value) => !value.startsWith("-"), "Model must not begin with a flag prefix.").optional(),
   agent: AgentNameSchema.optional(),
   containment: ContainmentRequirementSchema.default("required"),
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
   nativeSessionId: z.string().trim().min(1).max(512).optional(),
 }).strict().superRefine(backendAgentSelectionRefinement);
@@ -356,7 +420,7 @@ export const WorkflowStepParamsSchema = z.object({
 export const WorkflowRunParamsSchema = z.object({
   id: IdentifierSchema.optional(),
   sessionId: IdentifierSchema.nullable().default(null),
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
   steps: z.array(WorkflowStepParamsSchema).min(1).max(64),
   requirements: z.object({
@@ -375,7 +439,18 @@ export const WorkflowIdParamsSchema = z.object({ workflowId: IdentifierSchema })
 export const WorkflowWaitParamsSchema = WorkflowIdParamsSchema.extend({
   timeoutMs: PositiveTimeoutSchema.max(86_400_000).default(180_000),
 }).strict();
+export const WorkflowDraftIdParamsSchema = z.object({ draftId: IdentifierSchema }).strict();
+export const WorkflowDraftLaunchParamsSchema = WorkflowDraftIdParamsSchema;
 
+export const SkillIdParamsSchema = z.object({ skill: z.string().trim().min(1).max(256) }).strict();
+export const SkillImportParamsSchema = z.object({ source: z.string().trim().min(1).max(1_024) }).strict();
+export const SkillUseParamsSchema = SkillIdParamsSchema.extend({
+  arguments: z.string().max(64_000).default(""),
+  backend: BackendIdSchema.optional(),
+  timeoutMs: PositiveTimeoutSchema.default(180_000),
+}).strict();
+export const LoopStartParamsSchema = z.object({ policy: LoopPolicySchema }).strict();
+export const LoopIdParamsSchema = z.object({ loopId: IdentifierSchema }).strict();
 export type DaemonMethod = z.infer<typeof DaemonMethodSchema>;
 export type DaemonRequest = z.infer<typeof DaemonRequestSchema>;
 export type DaemonResponse = z.infer<typeof DaemonResponseSchema>;

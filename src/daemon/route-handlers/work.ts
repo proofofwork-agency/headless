@@ -88,6 +88,13 @@ export function workRouteHandlers(context: DaemonRouteContext): WorkFamilies {
       "workflow.cancel": (params, credential) => context.cancelWorkflow(
         context.requireWorkflowFor(params.workflowId, credential).id,
       ),
+      "workflow.pause": (params, credential) => context.pauseWorkflow(context.requireWorkflowFor(params.workflowId, credential).id),
+      "workflow.resume": (params, credential) => context.resumeWorkflow(context.requireWorkflowFor(params.workflowId, credential).id),
+      "workflow.validate": (params, credential) => context.validateWorkflow(params, credential),
+      "workflow.draft.create": (params, credential) => context.createWorkflowDraft(params, credential),
+      "workflow.draft.list": (_params, credential) => context.listWorkflowDrafts(credential),
+      "workflow.draft.get": (params, credential) => context.getWorkflowDraft(params.draftId, credential),
+      "workflow.draft.launch": (params, credential) => context.launchWorkflowDraft(params.draftId, credential),
     },
     gate: {
       "gate.run": (params, credential) => context.runGate(params, credential.principal),

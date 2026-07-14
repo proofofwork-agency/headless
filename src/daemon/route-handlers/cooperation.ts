@@ -73,6 +73,7 @@ export function cooperationRouteHandlers(context: DaemonRouteContext): Cooperati
           authenticatedLedgerEvent(type, params.payload as Record<string, unknown>, credential.principal),
         );
       },
+      "ledger.repairTail": (_params, credential) => context.repairLedgerTail(credential.principal),
     },
     messages: {
       "messages.push": (params, credential) => {

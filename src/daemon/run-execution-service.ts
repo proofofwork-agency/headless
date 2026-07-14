@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getProvider } from "../broker/providers";
 import type { ProviderBroker } from "../broker/server";
-import { getAdapter, resolveAdapterId, type BackendAdapter } from "../backends/registry";
+import { getBackendDefinition, resolveBackendId, type BackendDefinition } from "../backends/registry";
 import type { DurableSession, FinalityDecision, Job } from "../contracts/durable";
 import type { RunResult, SerializedRunRequest } from "../contracts/run";
-import { runHeadless } from "../runner/simple";
+import {
+  defaultExecutionSupervisor,
+  type ExecutionSupervisor,
+} from "../runner/simple";
 import type { ApprovalStore } from "../runtime/approval-store";
 import type { AuthorityStore } from "../runtime/authority-store";
 import type { BudgetStore } from "../runtime/budget-store";
@@ -33,6 +36,7 @@ import type { RunEventStore } from "./run-event-store";
 import type { RunToolEndpoint, RunToolEndpointManager } from "./run-tool-endpoint";
 import { reviewCandidateDiff } from "./candidate-service";
 import type { TaskStore } from "./task-store";
+import { experimentalExecResultToRunResult } from "../experimental/run-result-converter";
 
 export type RunExecutionServiceOptions = {
   paths: ProjectStatePaths;
@@ -52,12 +56,18 @@ export type RunExecutionServiceOptions = {
   integrationJournal: IntegrationJournal;
   writeGateChecks: readonly GateCheck[];
   completed: (job: Job) => void;
+  supervisor?: Pick<ExecutionSupervisor, "execute">;
 };
 
 export type RunExecutionControls = {
   /** A durable admin-resolved grant for mutating coder tools in this one turn. */
   coderToolApproved?: boolean;
 };
+
+const DEFAULT_BROKER_MAX_REQUESTS = 8;
+const DEFAULT_BROKER_MAX_INPUT_TOKENS = 200_000;
+const DEFAULT_BROKER_MAX_OUTPUT_TOKENS = 32_000;
+const DEFAULT_BROKER_MAX_COST_USD = 5;
 
 /**
  * Owns one-shot run execution after durable admission has selected a job.
@@ -68,8 +78,11 @@ export type RunExecutionControls = {
  */
 export class RunExecutionService {
   private readonly controllers = new Map<string, AbortController>();
+  private readonly supervisor;
 
-  constructor(private readonly options: RunExecutionServiceOptions) {}
+  constructor(private readonly options: RunExecutionServiceOptions) {
+    this.supervisor = options.supervisor ?? defaultExecutionSupervisor;
+  }
 
   cancel(jobId: string, reason = "cancel requested") {
     const controller = this.controllers.get(jobId);
@@ -160,7 +173,7 @@ export class RunExecutionService {
             && request.authMode === "native-login"
             && request.mode === "read-only"
             && isAuditedNativeSessionDriverBackend(durableSession.backend);
-          const adapter = getAdapter(resolveAdapterId(request.backend));
+          const adapter = getBackendDefinition(resolveBackendId(request.backend));
           if (request.containment === "required" && !useNativePersistentSession) {
             runToolEndpoint = await this.options.runTools.issue({
               projectId: this.options.paths.projectId,
@@ -172,8 +185,8 @@ export class RunExecutionService {
           }
           const legacy = useNativePersistentSession
             ? await this.options.nativeSessions.turn(durableSession, request.prompt, remainingRunMs, controller.signal)
-            : await runHeadless({
-                backend: resolveAdapterId(request.backend),
+            : await this.supervisor.execute({
+                backend: resolveBackendId(request.backend),
                 prompt: request.prompt,
                 cwd: this.options.paths.canonicalProjectRoot,
                 mode: request.mode,
@@ -338,7 +351,7 @@ export class RunExecutionService {
               { kind: "stdout", text: legacy.output, truncated: !!legacy.truncated },
             );
           }
-          result = toRunResult(legacy, request, jobId);
+          result = experimentalExecResultToRunResult(legacy, request, jobId);
           writeOutcome = legacy.writeOutcome ?? null;
           if (brokerLease && typeof legacy.cost === "number" && legacy.cost >= 0) {
             this.options.broker.observeCost(brokerLease.id, legacy.cost);
@@ -503,7 +516,7 @@ export class RunExecutionService {
             phase: "terminal",
             actor: principal,
             grantId: writeAuthorization?.grantId ?? null,
-            coordinator: writeAuthorization?.coordinator ?? false,
+            rootAuthority: writeAuthorization?.root ?? false,
             outcome: writeOutcome,
             baseCommit: result.commit?.base ?? null,
             candidateCommit: result.commit?.candidate ?? null,
@@ -536,7 +549,7 @@ export class RunExecutionService {
             `base:${result.commit.base ?? "unknown"}`,
             `candidate:${result.commit.candidate ?? "unknown"}`,
             `result:${result.commit.result ?? "unchanged"}`,
-            `grant:${writeAuthorization?.grantId ?? (writeAuthorization?.coordinator ? "coordinator" : "none")}`,
+            `grant:${writeAuthorization?.grantId ?? (writeAuthorization?.root ? "root" : "none")}`,
             ...budgetReasons,
             ...writeGates.flatMap((gate, index) => [
               `gate-${index + 1}:policy:${gate.policyPassed ? "PASS" : "FAIL"}`,
@@ -570,16 +583,33 @@ export class RunExecutionService {
         outcome: result.status === "succeeded" ? "completed" : "failed",
       });
     }
-    if (result.stderr) {
-      this.options.runEvents.append(
-        { jobId, sessionId: request.sessionId },
-        { kind: "stderr", text: result.stderr, truncated: result.truncation.stderr },
-      );
-    }
-    this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "usage", usage: result.usage, cost: result.cost });
-    this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "lifecycle", state: result.status });
-    this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "completion", result });
     const completed = this.options.jobs.complete(jobId, result);
+    if (result.stderr) {
+      try {
+        this.options.runEvents.append(
+          { jobId, sessionId: request.sessionId },
+          { kind: "stderr", text: result.stderr, truncated: result.truncation.stderr },
+        );
+      } catch (error) {
+        recordRuntimeDiagnostic("state", "terminal-stderr-event", error);
+      }
+    }
+    try {
+      this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "usage", usage: result.usage, cost: result.cost });
+    } catch (error) {
+      recordRuntimeDiagnostic("state", "terminal-usage-event", error);
+    }
+    try {
+      this.options.runEvents.reconcileTerminal(
+        { jobId, sessionId: request.sessionId },
+        completed.result!,
+        completed.updatedAt,
+      );
+    } catch (error) {
+      // The terminal job/result is authoritative. Startup reconciliation will
+      // deterministically repair missing lifecycle/completion projections.
+      recordRuntimeDiagnostic("state", "terminal-run-event-reconciliation", error);
+    }
     if (result.commit?.merged && result.commit.result) {
       try {
         this.options.integrationJournal.markCompleted(jobId, result.commit.result);
@@ -644,7 +674,22 @@ export class RunExecutionService {
     if (!providerId || !provider || !process.env[provider.credentialEnv]) return null;
     const models = modelScope(request.model, providerId);
     const limits = this.options.budgets.brokerLeaseLimits(jobId);
-    const maxCostUsd = minimumNullable(limits.maxCostUsd, grantCostLimitUsd);
+    const trustedPrice = request.model
+      ? calculateModelPricedCost({
+          provider: providerId,
+          model: request.model,
+          usage: {
+            input: DEFAULT_BROKER_MAX_INPUT_TOKENS,
+            output: DEFAULT_BROKER_MAX_OUTPUT_TOKENS,
+            reasoning: null,
+            cached: 0,
+            providerTotal: DEFAULT_BROKER_MAX_INPUT_TOKENS + DEFAULT_BROKER_MAX_OUTPUT_TOKENS,
+          },
+        }).amountUsd !== null
+      : false;
+    const maxCostUsd = trustedPrice
+      ? minimumNullable(minimumNullable(limits.maxCostUsd, grantCostLimitUsd), DEFAULT_BROKER_MAX_COST_USD)
+      : null;
     const leaseRemainingMs = Math.max(1, deadlineAt - Date.now());
     return this.options.broker.issueLease({
       runId: jobId,
@@ -656,11 +701,24 @@ export class RunExecutionService {
           ? ["generate", "models"]
           : ["chat", "responses", "embeddings", "models"],
       expiresAt: Date.now() + leaseRemainingMs + 10_000,
-      maxRequests: limits.maxRequests,
+      maxRequests: Math.min(DEFAULT_BROKER_MAX_REQUESTS, limits.maxRequests),
       maxBodyBytes: 4_000_000,
       maxStreamMs: Math.min(leaseRemainingMs, 3_600_000),
       maxCostUsd,
-      budgetQuotas: limits.budgetQuotas,
+      budgetQuotas: [
+        {
+          id: `headless-run-${createHash("sha256").update(jobId).digest("hex")}`,
+          maxRequests: DEFAULT_BROKER_MAX_REQUESTS,
+          usedRequests: 0,
+          maxInputTokens: DEFAULT_BROKER_MAX_INPUT_TOKENS,
+          usedInputTokens: 0,
+          maxOutputTokens: DEFAULT_BROKER_MAX_OUTPUT_TOKENS,
+          usedOutputTokens: 0,
+          maxCostUsd,
+          usedCostUsd: 0,
+        },
+        ...limits.budgetQuotas,
+      ],
     });
   }
 }
@@ -673,7 +731,7 @@ export class RunExecutionService {
 export function resumableNativeSessionId(
   request: Pick<SerializedRunRequest, "mode">,
   session: DurableSession | null,
-  adapter: BackendAdapter | undefined,
+  adapter: BackendDefinition | undefined,
 ) {
   if (request.mode !== "read-only" || !session || session.replay || !adapter?.buildResumeCommand) return undefined;
   return session.nativeSessionId ?? undefined;
@@ -700,7 +758,7 @@ function appendPreMergeDecision(session: HeadlessSession, input: {
       preMerge: true,
       actor: input.principal,
       grantId: input.authorization?.grantId ?? null,
-      coordinator: input.authorization?.coordinator ?? false,
+      rootAuthority: input.authorization?.root ?? false,
       baseCommit: input.context.baseCommit,
       candidateCommit: input.context.candidateCommit,
       diffSha256: diffHash,
@@ -785,64 +843,6 @@ function aggregateWriteGates(gates: WriteGateDecision[], budgetPassed: boolean) 
   };
 }
 
-function toRunResult(result: Awaited<ReturnType<typeof runHeadless>>, request: SerializedRunRequest, jobId: string): RunResult {
-  const status = result.status ?? (result.timedOut ? "timed_out" : result.ok ? "succeeded" : "failed");
-  return {
-    status,
-    error: result.ok
-      ? null
-      : result.error ?? {
-          code: result.timedOut ? "TIMED_OUT" : status === "cancelled" ? "CANCELLED" : "PROCESS_ERROR",
-          message: result.output || "Backend execution failed.",
-          retryable: false,
-        },
-    backend: result.backend,
-    output: result.output,
-    stderr: result.stderr ?? "",
-    diagnostics: result.diagnostics ?? { format: "legacy", malformedEvents: 0, ignoredEvents: 0, messages: [] },
-    exitCode: result.exitCode,
-    signal: result.signal ?? null,
-    usage: result.usage ?? { input: null, output: result.tokens, reasoning: null, cached: null, providerTotal: result.tokens },
-    cost: typeof result.cost === "number"
-      ? { amountUsd: result.cost, source: "provider", pricingId: null, observedRequests: 0 }
-      : result.cost && typeof result.cost === "object"
-        ? result.cost
-        : { amountUsd: null, source: "unknown", pricingId: null, observedRequests: 0 },
-    containment: result.containment ?? {
-      requirement: request.containment,
-      enforced: !!result.sandboxed,
-      platform: platform(),
-      mechanism: result.sandboxReason ?? null,
-      probe: result.sandboxReason ?? null,
-      isolatedHome: false,
-      credentialsIsolated: false,
-      network: request.containment === "unsafe"
-        ? "unrestricted"
-        : request.authMode === "native-login" ? "provider-direct" : "denied",
-      credentialAccess: request.authMode === "native-login" ? "backend-native" : "none",
-      unsafe: request.containment === "unsafe",
-    },
-    durationMs: result.durationMs,
-    sessionId: request.sessionId ?? null,
-    jobId,
-    diff: result.diff ? {
-      ...result.diff,
-      baseCommit: result.diff.baseCommit ?? result.commit?.base ?? null,
-      candidateCommit: result.diff.candidateCommit ?? result.commit?.candidate ?? null,
-      resultingCommit: result.diff.resultingCommit ?? result.commit?.result ?? null,
-    } : null,
-    commit: result.commit ?? null,
-    truncation: {
-      stdout: false,
-      stderr: false,
-      output: !!(result.outputTruncated ?? result.truncated),
-      events: false,
-      artifacts: false,
-      diff: !!result.diffTruncated,
-    },
-  };
-}
-
 function modelScope(model: string | undefined, provider: string) {
   if (!model) return ["default"];
   const values = new Set([model]);
@@ -919,9 +919,4 @@ function conservativeBudgetUsage(
 
 function messageOf(error: unknown) {
   return error instanceof Error ? error.message : String(error);
-}
-
-function platform(): RunResult["containment"]["platform"] {
-  if (process.platform === "darwin" || process.platform === "linux" || process.platform === "win32") return process.platform;
-  return "other";
 }

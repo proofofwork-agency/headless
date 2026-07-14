@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { BudgetSchema, GrantSchema } from "../../contracts/durable";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { BudgetSchema, GrantSchema, type Job } from "../../contracts/durable";
 import { HeadlessError } from "../../runtime/headless-error";
 import type { DaemonFamilyHandlerRegistrations } from "../route-dispatcher";
 import type { DaemonRouteContext } from "../route-context";
 
 type ControlFamilies = Pick<DaemonFamilyHandlerRegistrations,
   | "system"
+  | "lead"
+  | "observer"
   | "project-trust"
   | "fleet"
   | "goal"
@@ -27,12 +31,27 @@ export function controlRouteHandlers(context: DaemonRouteContext): ControlFamili
           projectId: context.projectId,
           projectRoot: context.projectRoot,
           principal: credential.principal,
+          scopes: credential.scopes,
+          experimentalSessionsEnabled: context.experimentalSessionsEnabled,
+          runtime: daemonRuntimeIdentity(),
           extensionConfigDigest: extensions.digest,
           extensionAdapters: extensions.adapters,
           extensionProviders: extensions.providers,
           extensionPricing: extensions.pricing,
         };
       },
+    },
+    lead: {
+      "lead.use": (params, credential) => context.useLead(params.host, credential),
+      "lead.status": () => context.leads.status(),
+      "lead.release": (_params, credential) => context.releaseLead(credential),
+      "lead.attach": (params, credential) => context.leads.attach(credential.principal, params.generation),
+      "lead.heartbeat": (params, credential) => context.leads.heartbeat(credential.principal, params.generation),
+      "lead.disconnect": (params, credential) => context.leads.disconnect(credential.principal, params.generation),
+    },
+    observer: {
+      "observer.snapshot": () => context.observerSnapshot(),
+      "observer.events": (params) => context.observerEvents(params),
     },
     "project-trust": {
       "project.trust.status": () => context.trust.status(),
@@ -139,8 +158,8 @@ export function controlRouteHandlers(context: DaemonRouteContext): ControlFamili
           pruned: result.pruned,
         };
       },
-      "collaboration.transferLeader": (params, credential) => context.goalCoordinator
-        .transferLeader(params.goalId, params.agentId, credential.principal),
+      "collaboration.transferSynthesizer": (params, credential) => context.goalCoordinator
+        .transferSynthesizer(params.goalId, params.agentId, credential.principal),
     },
     approval: {
       "approval.list": (params, credential) => {
@@ -157,12 +176,12 @@ export function controlRouteHandlers(context: DaemonRouteContext): ControlFamili
       "approval.resolve": (params, credential) => context.resolveApproval(params, credential),
     },
     candidate: {
-      "candidate.inspect": (params, credential) => context.candidates.inspect(params.candidateId, authorization(credential)),
-      "candidate.integrate": (params, credential) => context.candidates.integrate(params.candidateId, authorization(credential)),
-      "candidate.reject": (params, credential) => context.candidates.reject(params.candidateId, authorization(credential)),
+      "candidate.inspect": (params, credential) => context.candidates.inspect(params.candidateId, authorization(context, credential)),
+      "candidate.integrate": (params, credential) => context.candidates.integrate(params.candidateId, authorization(context, credential)),
+      "candidate.reject": (params, credential) => context.candidates.reject(params.candidateId, authorization(context, credential)),
     },
     authentication: {
-      "auth.provisionIntegration": (params, credential) => context.credentials.provisionIntegration(credential, params.name),
+      "auth.provisionObserver": (_params, credential) => context.provisionObserver(credential),
       "auth.list": (_params, credential) => context.credentials.list(credential),
       "auth.revoke": (params, credential) => context.credentials.revoke(credential, params.id),
     },
@@ -200,8 +219,42 @@ export function controlRouteHandlers(context: DaemonRouteContext): ControlFamili
   };
 }
 
-function authorization(credential: { principal: string; scopes: string[] }) {
-  return { actor: credential.principal, admin: credential.scopes.includes("admin") };
+let cachedRuntimeIdentity: Record<string, unknown> | undefined;
+const daemonStartedAt = Date.now();
+
+function daemonRuntimeIdentity() {
+  if (cachedRuntimeIdentity) return cachedRuntimeIdentity;
+  const entrypoint = process.argv[1] ?? null;
+  let buildDigest: string | null = null;
+  if (entrypoint && existsSync(entrypoint)) {
+    try {
+      buildDigest = createHash("sha256").update(readFileSync(entrypoint)).digest("hex");
+    } catch {
+      buildDigest = null;
+    }
+  }
+  cachedRuntimeIdentity = {
+    pid: process.pid,
+    entrypoint,
+    buildDigest,
+    startedAt: daemonStartedAt,
+  };
+  return cachedRuntimeIdentity;
+}
+
+function authorization(context: DaemonRouteContext, credential: { principal: string; scopes: string[] }) {
+  return {
+    actor: credential.principal,
+    admin: credential.scopes.includes("admin"),
+    canRead: (job: Job, actor: string) => context.authority.authorize({
+      projectId: context.projectId,
+      principal: actor,
+      operation: job.mode === "write" ? "write" : "run",
+      backend: job.backend,
+      estimatedCostUsd: 0,
+      merge: false,
+    }).allowed,
+  };
 }
 
 function visibleGoal(

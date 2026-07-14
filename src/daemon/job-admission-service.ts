@@ -1,5 +1,5 @@
 import { getProvider } from "../broker/providers";
-import { getAdapter, resolveAdapterId } from "../backends/registry";
+import { getBackendDefinition, resolveBackendId } from "../backends/registry";
 import type { ApprovalRequest } from "../contracts/collaboration";
 import type { Job } from "../contracts/durable";
 import { RunRequestSchema, type RunResult, type SerializedRunRequest } from "../contracts/run";
@@ -9,6 +9,7 @@ import type { BudgetStore } from "../runtime/budget-store";
 import { HeadlessError } from "../runtime/headless-error";
 import { estimateRunCost } from "../runtime/pricing";
 import type { ProjectTrustStore } from "../runtime/project-trust-store";
+import type { PersistentSessionStore } from "../runtime/persistent-sessions";
 import { redactAndTruncate } from "../runtime/redaction";
 import { safeAgentName } from "../runtime/validation";
 import type { JobStore } from "./job-store";
@@ -33,6 +34,7 @@ export type JobAdmissionServiceOptions = {
   tasks: TaskStore;
   runEvents: RunEventStore;
   approvals: ApprovalStore;
+  sessions: Pick<PersistentSessionStore, "get">;
   trust: ProjectTrustStore;
   authority: AuthorityStore;
   budgets: BudgetStore;
@@ -78,20 +80,21 @@ export class JobAdmissionService {
     if (this.options.isStopping()) {
       throw new HeadlessError("DAEMON_UNAVAILABLE", "Daemon is shutting down and cannot accept new jobs.");
     }
+    const bound = this.bindPersistedSession(params, principal);
     const request = RunRequestSchema.parse({
-      backend: params.backend,
-      prompt: params.prompt,
+      backend: bound.backend,
+      prompt: bound.prompt,
       projectRoot: this.options.projectRoot,
-      mode: params.mode,
-      model: params.model,
-      agent: params.agent,
-      timeoutMs: params.timeoutMs,
-      sessionId: params.sessionId,
-      containment: params.containment,
-      authMode: params.authMode,
-      approvalPolicy: params.approvalPolicy,
+      mode: bound.mode,
+      model: bound.model,
+      agent: bound.agent,
+      timeoutMs: bound.timeoutMs,
+      sessionId: bound.sessionId,
+      containment: bound.containment,
+      authMode: bound.authMode,
+      approvalPolicy: bound.approvalPolicy,
     });
-    const adapter = getAdapter(resolveAdapterId(request.backend));
+    const adapter = getBackendDefinition(resolveBackendId(request.backend));
     if (request.agent && !adapter?.supportsNamedAgent) {
       throw new HeadlessError("BACKEND_UNSUPPORTED", `Backend ${request.backend} does not support named agents in contained Headless runs.`);
     }
@@ -115,6 +118,44 @@ export class JobAdmissionService {
       councilSlot: options.councilSlot ?? null,
     });
     return this.admitDurableJob(job, request, true);
+  }
+
+  private bindPersistedSession(params: Record<string, unknown>, principal: string) {
+    if (typeof params.sessionId !== "string") return params;
+    const session = this.options.sessions.get(params.sessionId);
+    if (!session) throw new HeadlessError("INVALID_REQUEST", `Unknown session: ${params.sessionId}`);
+    if (session.principal !== principal) {
+      throw new HeadlessError("POLICY_DENIED", "Session-backed execution cannot cross authenticated principals.");
+    }
+    const requestedBackend = typeof params.backend === "string" ? resolveBackendId(params.backend) : session.backend;
+    if (requestedBackend !== resolveBackendId(session.backend)) {
+      throw new HeadlessError("CONFLICT", "Session-backed execution backend conflicts with the persisted session.");
+    }
+    const conflicts = [
+      ["model", session.model],
+      ["agent", session.agent],
+      ["containment", session.containment],
+      ["authMode", session.authMode],
+      ["approvalPolicy", session.approvalPolicy],
+    ] as const;
+    for (const [field, expected] of conflicts) {
+      if (params[field] !== undefined && params[field] !== expected) {
+        throw new HeadlessError("CONFLICT", `Session-backed execution ${field} conflicts with the persisted session.`);
+      }
+    }
+    if (params.mode !== undefined && params.mode !== "read-only") {
+      throw new HeadlessError("CONFLICT", "Persistent sessions support read-only turns only.");
+    }
+    return {
+      ...params,
+      backend: session.backend,
+      model: session.model ?? undefined,
+      agent: session.agent ?? undefined,
+      mode: "read-only",
+      containment: session.containment,
+      authMode: session.authMode,
+      approvalPolicy: session.approvalPolicy,
+    };
   }
 
   recoverBudgetReservations() {
@@ -180,6 +221,11 @@ export class JobAdmissionService {
       if (job.state !== "queued") continue;
       const request = this.options.jobs.request(job.id);
       if (!request) continue;
+      if (!this.options.budgets.getReservation(job.id)) {
+        this.admitDurableJob(job, request, false);
+        const recovered = this.options.jobs.get(job.id);
+        if (!recovered || recovered.state !== "queued" || !this.options.budgets.getReservation(job.id)) continue;
+      }
       if (!this.taskForJob(job.id)) {
         this.options.tasks.create({
           jobId: job.id,
@@ -203,6 +249,7 @@ export class JobAdmissionService {
   }
 
   handleApprovalResolution(approval: ApprovalRequest) {
+    if (approval.kind === "unpriced_broker_run") return this.handleUnpricedBrokerApproval(approval);
     if (approval.kind !== "coder_tool") return null;
     const job = this.options.jobs.get(approval.collaborationId);
     if (!job || isTerminal(job) || job.state !== "queued") return null;
@@ -246,8 +293,7 @@ export class JobAdmissionService {
       const request = this.options.jobs.request(jobId);
       if (!request) throw new HeadlessError("INTERNAL_ERROR", "Queued job request is missing.");
       const completed = this.options.jobs.complete(jobId, cancelledResult(request, jobId));
-      this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "lifecycle", state: "cancelled" });
-      this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "completion", result: completed.result! });
+      this.reconcileTerminalEvents(completed);
       this.options.completed(completed);
       return completed;
     }
@@ -285,13 +331,13 @@ export class JobAdmissionService {
         "Approval bypass is permitted only inside required outer containment.",
       ), "bypass-containment");
     }
-    const adapter = getAdapter(resolveAdapterId(request.backend));
+    const adapter = getBackendDefinition(resolveBackendId(request.backend));
     if (request.authMode === "native-login" && adapter?.security.strictAuth !== "credential-free") {
       const trust = this.options.trust.status();
-      if (!trust.trusted || !trust.nativeLoginAllowed || (request.approvalPolicy === "bypass" && !trust.bypassAllowed)) {
+      if (!trust.trusted || !trust.nativeLoginAllowed || !trust.nativeDirectUnrestrictedAcknowledged || (request.approvalPolicy === "bypass" && !trust.bypassAllowed)) {
         const reason = request.approvalPolicy === "bypass" && trust.trusted
           ? "Approval bypass has not been granted for this trusted project."
-          : "Native login requires one-time project trust.";
+          : "Native login requires project trust and explicit acknowledgement of unrestricted provider egress.";
         return this.completeAdmission(job, blockedResult(request, job.id, "NATIVE_AUTH_UNAVAILABLE", reason), "project-trust");
       }
     }
@@ -316,6 +362,30 @@ export class JobAdmissionService {
       }
     }
     const estimate = estimateRequestResources(request);
+    const unpricedBrokerNeedsApproval = request.authMode === "broker"
+      && adapter?.security.strictAuth === "broker-api-key"
+      && estimate.cost.amountUsd === null
+      && !this.options.budgets.hasCostLimit({
+        projectId: this.options.projectId,
+        principal: job.principal,
+        sessionId: request.sessionId ?? null,
+        workflowId: job.workflowId,
+        provider: providerForRequest(request),
+      });
+    if (unpricedBrokerNeedsApproval) {
+      const approval = this.unpricedBrokerApproval(job, request);
+      if (approval === "waiting") {
+        this.waitForUnpricedBrokerApproval(job, request);
+        return job;
+      }
+      if (approval === "denied") {
+        return this.completeAdmission(
+          job,
+          blockedResult(request, job.id, "APPROVAL_REQUIRED", "Unknown broker pricing was not explicitly approved for this run."),
+          "unpriced-broker-run",
+        );
+      }
+    }
     const authorization = this.options.authority.authorize({
       projectId: this.options.projectId,
       principal: job.principal,
@@ -326,6 +396,11 @@ export class JobAdmissionService {
     });
     if (!authorization.allowed) {
       return this.completeAdmission(job, blockedResult(request, job.id, "POLICY_DENIED", authorization.reason), "authority");
+    }
+    try {
+      this.options.authority.consumeIteration(authorization.grantId, job.id);
+    } catch (error) {
+      return this.completeAdmission(job, blockedResult(request, job.id, "POLICY_DENIED", error instanceof Error ? error.message : String(error)), "authority-iteration");
     }
     const reservation = this.options.budgets.reserve({
       id: job.id,
@@ -506,12 +581,8 @@ export class JobAdmissionService {
       Math.max(0, Date.now() - job.createdAt),
       "Job exceeded its total lifecycle timeout while queued.",
     ));
-    try {
-      this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "lifecycle", state: "timed_out" });
-      this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "completion", result: completed.result! });
-    } finally {
-      this.options.completed(completed);
-    }
+    this.reconcileTerminalEvents(completed);
+    this.options.completed(completed);
     return completed;
   }
 
@@ -556,6 +627,62 @@ export class JobAdmissionService {
       expiresAt: jobDeadlineAt(job, request),
     });
     return "waiting";
+  }
+
+  private unpricedBrokerApproval(job: Job, request: SerializedRunRequest) {
+    const approvals = this.options.approvals.list({ collaborationId: job.id });
+    const existing = [...approvals].reverse().find((approval) => approval.kind === "unpriced_broker_run");
+    if (existing) {
+      if (existing.status === "pending") return "waiting" as const;
+      return existing.status === "approved" ? "approved" as const : "denied" as const;
+    }
+    if (jobDeadlineAt(job, request) <= Date.now()) return "denied" as const;
+    this.options.approvals.create({
+      collaborationId: job.id,
+      requestedBy: job.principal,
+      assignedTo: job.principal,
+      kind: "unpriced_broker_run",
+      summary: "Approve one broker run whose USD price cannot be determined from trusted pricing data.",
+      details: {
+        jobId: job.id,
+        backend: request.backend,
+        model: request.model ?? null,
+        scope: "single-broker-run",
+        maxRequests: 8,
+        maxInputTokens: 200_000,
+        maxOutputTokens: 32_000,
+        cost: "unknown",
+      },
+      artifactIds: [job.id],
+      expiresAt: jobDeadlineAt(job, request),
+    });
+    return "waiting" as const;
+  }
+
+  private waitForUnpricedBrokerApproval(job: Job, request: SerializedRunRequest) {
+    this.waitingApprovalJobs.add(job.id);
+    this.scheduleQueueDeadline(job.id, request);
+    this.options.runEvents.append({ jobId: job.id, sessionId: request.sessionId }, {
+      kind: "policy",
+      decision: "deferred",
+      rule: "unpriced-broker-run",
+      reason: "Broker execution is waiting for explicit approval because trusted model pricing is unavailable.",
+    });
+  }
+
+  private handleUnpricedBrokerApproval(approval: ApprovalRequest) {
+    const job = this.options.jobs.get(approval.collaborationId);
+    if (!job || isTerminal(job) || job.state !== "queued") return null;
+    const request = this.options.jobs.request(job.id);
+    if (!request || request.authMode !== "broker") return null;
+    this.waitingApprovalJobs.delete(job.id);
+    if (approval.status === "approved") return this.admitDurableJob(job, request, true).id;
+    this.completeAdmission(
+      job,
+      blockedResult(request, job.id, "APPROVAL_REQUIRED", approval.resolution ?? "Unknown broker pricing was not approved."),
+      "unpriced-broker-run",
+    );
+    return job.id;
   }
 
   private waitForCoderToolApproval(job: Job, request: SerializedRunRequest) {
@@ -607,14 +734,17 @@ export class JobAdmissionService {
 
   private completeAdmission(job: Job, result: RunResult, rule: string) {
     const completed = this.options.jobs.complete(job.id, result);
-    this.options.runEvents.append({ jobId: job.id, sessionId: job.sessionId }, {
-      kind: "policy",
-      decision: "denied",
-      rule,
-      reason: result.error?.message ?? "Admission denied.",
-    });
-    this.options.runEvents.append({ jobId: job.id, sessionId: job.sessionId }, { kind: "lifecycle", state: result.status });
-    this.options.runEvents.append({ jobId: job.id, sessionId: job.sessionId }, { kind: "completion", result });
+    try {
+      this.options.runEvents.append({ jobId: job.id, sessionId: job.sessionId }, {
+        kind: "policy",
+        decision: "denied",
+        rule,
+        reason: result.error?.message ?? "Admission denied.",
+      });
+    } catch (error) {
+      this.diagnostic(`Admission policy event for ${job.id} was not persisted.`, error);
+    }
+    this.reconcileTerminalEvents(completed);
     this.options.completed(completed);
     return completed;
   }
@@ -640,10 +770,22 @@ export class JobAdmissionService {
     if (task && (task.state === "pending" || task.state === "claimed")) {
       this.options.tasks.resolveFromDaemon({ taskId: task.id, principal: job.principal, outcome: "failed" });
     }
-    this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "lifecycle", state: result.status });
-    this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "completion", result });
     const completed = this.options.jobs.complete(jobId, result);
+    this.reconcileTerminalEvents(completed);
     this.options.completed(completed);
+  }
+
+  private reconcileTerminalEvents(job: Job) {
+    if (!job.result) return;
+    try {
+      this.options.runEvents.reconcileTerminal(
+        { jobId: job.id, sessionId: job.sessionId },
+        job.result,
+        job.updatedAt,
+      );
+    } catch (error) {
+      this.diagnostic(`Terminal event reconciliation for ${job.id} was deferred to daemon recovery.`, error);
+    }
   }
 
   private taskForJob(jobId: string) {
@@ -735,11 +877,9 @@ export function jobDeadlineAt(job: Job, request: SerializedRunRequest) {
 
 export function providerForRequest(request: SerializedRunRequest) {
   if (request.authMode === "native-login") return null;
-  const adapter = getAdapter(request.backend);
+  const adapter = getBackendDefinition(request.backend);
   if (adapter?.security.strictAuth === "credential-free") return null;
-  if (request.backend === "claude-code") return "anthropic";
-  if (request.backend === "codex") return "openai";
-  if (request.backend === "grok-build") return "xai";
+  if (adapter?.provider) return adapter.provider;
   const prefix = request.model?.split("/", 1)[0]?.toLowerCase();
   if (prefix && getProvider(prefix)) return prefix;
   if (prefix === "anthropic") return "anthropic";

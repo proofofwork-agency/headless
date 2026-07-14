@@ -12,7 +12,7 @@ import {
   CandidateIdParamsSchema,
   CollaborationAcknowledgeParamsSchema,
   CollaborationListParamsSchema,
-  CollaborationTransferLeaderParamsSchema,
+  CollaborationTransferSynthesizerParamsSchema,
   FleetProfileIdParamsSchema,
   FleetProfileUpsertParamsSchema,
   GoalIdParamsSchema,
@@ -24,6 +24,7 @@ import {
   LedgerEventParamsSchema,
   LedgerNoteParamsSchema,
   LedgerProposeFinalParamsSchema,
+  LedgerRepairTailParamsSchema,
   LedgerTaskParamsSchema,
   MessagesMarkPushedParamsSchema,
   MessagesPullParamsSchema,
@@ -42,11 +43,23 @@ import {
   WorkflowIdParamsSchema,
   WorkflowRunParamsSchema,
   WorkflowWaitParamsSchema,
+  WorkflowDraftIdParamsSchema,
+  WorkflowDraftLaunchParamsSchema,
   type DaemonMethod,
+  SkillIdParamsSchema,
+  SkillImportParamsSchema,
+  SkillUseParamsSchema,
+  LoopStartParamsSchema,
+  LoopIdParamsSchema,
+  LeadGenerationParamsSchema,
+  LeadUseParamsSchema,
+  ObserverEventsParamsSchema,
 } from "./protocol";
 
 export type DaemonRouteFamily =
   | "system"
+  | "lead"
+  | "observer"
   | "project-trust"
   | "fleet"
   | "goal"
@@ -65,7 +78,9 @@ export type DaemonRouteFamily =
   | "workflow"
   | "gate"
   | "orchestrator"
-  | "session";
+  | "session"
+  | "skill"
+  | "loop";
 
 export type DaemonRouteDefinition<
   Method extends DaemonMethod = DaemonMethod,
@@ -100,6 +115,14 @@ function route<
 /** Single exhaustive source for daemon method validation, authorization, and dispatch family. */
 export const DAEMON_ROUTES = {
   "ping": route("ping", empty, null, "system"),
+  "lead.use": route("lead.use", LeadUseParamsSchema, "admin", "lead"),
+  "lead.status": route("lead.status", empty, null, "lead"),
+  "lead.release": route("lead.release", empty, "admin", "lead"),
+  "lead.attach": route("lead.attach", LeadGenerationParamsSchema, null, "lead"),
+  "lead.heartbeat": route("lead.heartbeat", LeadGenerationParamsSchema, null, "lead"),
+  "lead.disconnect": route("lead.disconnect", LeadGenerationParamsSchema, null, "lead"),
+  "observer.snapshot": route("observer.snapshot", empty, "observe", "observer"),
+  "observer.events": route("observer.events", ObserverEventsParamsSchema, "observe", "observer"),
   "project.trust.status": route("project.trust.status", empty, "run", "project-trust"),
   "project.trust.grant": route("project.trust.grant", ProjectTrustGrantParamsSchema, "admin", "project-trust"),
   "project.trust.revoke": route("project.trust.revoke", empty, "admin", "project-trust"),
@@ -117,13 +140,13 @@ export const DAEMON_ROUTES = {
   "collaboration.turns": route("collaboration.turns", CollaborationListParamsSchema, "session", "collaboration"),
   "collaboration.messages": route("collaboration.messages", CollaborationListParamsSchema, "messages", "collaboration"),
   "collaboration.messages.acknowledge": route("collaboration.messages.acknowledge", CollaborationAcknowledgeParamsSchema, "messages", "collaboration"),
-  "collaboration.transferLeader": route("collaboration.transferLeader", CollaborationTransferLeaderParamsSchema, "admin", "collaboration"),
+  "collaboration.transferSynthesizer": route("collaboration.transferSynthesizer", CollaborationTransferSynthesizerParamsSchema, "admin", "collaboration"),
   "approval.list": route("approval.list", ApprovalListParamsSchema, "session", "approval"),
   "approval.resolve": route("approval.resolve", ApprovalResolveParamsSchema, "admin", "approval"),
   "candidate.inspect": route("candidate.inspect", CandidateIdParamsSchema, "run", "candidate"),
-  "candidate.integrate": route("candidate.integrate", CandidateIdParamsSchema, "admin", "candidate"),
+  "candidate.integrate": route("candidate.integrate", CandidateIdParamsSchema, "run", "candidate"),
   "candidate.reject": route("candidate.reject", CandidateIdParamsSchema, "admin", "candidate"),
-  "auth.provisionIntegration": route("auth.provisionIntegration", z.object({ name: z.string().trim().min(1).max(128) }).strict(), "admin", "authentication"),
+  "auth.provisionObserver": route("auth.provisionObserver", empty, "admin", "authentication"),
   "auth.list": route("auth.list", empty, "admin", "authentication"),
   "auth.revoke": route("auth.revoke", id("id"), "admin", "authentication"),
   "authority.grant.add": route("authority.grant.add", AuthorityGrantAddParamsSchema, "admin", "authority"),
@@ -150,6 +173,7 @@ export const DAEMON_ROUTES = {
   "ledger.task": route("ledger.task", LedgerTaskParamsSchema, "ledger:read", "ledger"),
   "ledger.proposeFinal": route("ledger.proposeFinal", LedgerProposeFinalParamsSchema, "ledger:write", "ledger"),
   "ledger.event": route("ledger.event", LedgerEventParamsSchema, "ledger:write", "ledger"),
+  "ledger.repairTail": route("ledger.repairTail", LedgerRepairTailParamsSchema, "admin", "ledger"),
   "messages.push": route("messages.push", MessagesPushParamsSchema, "messages", "messages"),
   "messages.pull": route("messages.pull", MessagesPullParamsSchema, "messages", "messages"),
   "messages.markPushed": route("messages.markPushed", MessagesMarkPushedParamsSchema, "messages", "messages"),
@@ -160,6 +184,13 @@ export const DAEMON_ROUTES = {
   "workflow.list": route("workflow.list", empty, "run", "workflow"),
   "workflow.wait": route("workflow.wait", WorkflowWaitParamsSchema, "run", "workflow"),
   "workflow.cancel": route("workflow.cancel", workflowId, "run", "workflow"),
+  "workflow.pause": route("workflow.pause", workflowId, "run", "workflow"),
+  "workflow.resume": route("workflow.resume", workflowId, "run", "workflow"),
+  "workflow.validate": route("workflow.validate", WorkflowRunParamsSchema, "run", "workflow"),
+  "workflow.draft.create": route("workflow.draft.create", WorkflowRunParamsSchema, "session", "workflow"),
+  "workflow.draft.list": route("workflow.draft.list", empty, "session", "workflow"),
+  "workflow.draft.get": route("workflow.draft.get", WorkflowDraftIdParamsSchema, "session", "workflow"),
+  "workflow.draft.launch": route("workflow.draft.launch", WorkflowDraftLaunchParamsSchema, "session", "workflow"),
   "gate.run": route("gate.run", GateRunParamsSchema, "gate", "gate"),
   "orchestrator.start": route("orchestrator.start", empty, "orchestrator", "orchestrator"),
   "orchestrator.stop": route("orchestrator.stop", empty, "orchestrator", "orchestrator"),
@@ -170,6 +201,18 @@ export const DAEMON_ROUTES = {
   "session.cancel": route("session.cancel", sessionId, "session", "session"),
   "session.status": route("session.status", sessionId, "session", "session"),
   "session.result": route("session.result", sessionId, "session", "session"),
+  "skill.list": route("skill.list", empty, "run", "skill"),
+  "skill.inspect": route("skill.inspect", SkillIdParamsSchema, "run", "skill"),
+  "skill.import": route("skill.import", SkillImportParamsSchema, "admin", "skill"),
+  "skill.enable": route("skill.enable", SkillIdParamsSchema, "admin", "skill"),
+  "skill.use": route("skill.use", SkillUseParamsSchema, "session", "skill"),
+  "skill.revoke": route("skill.revoke", SkillIdParamsSchema, "admin", "skill"),
+  "loop.start": route("loop.start", LoopStartParamsSchema, "session", "loop"),
+  "loop.list": route("loop.list", empty, "session", "loop"),
+  "loop.status": route("loop.status", LoopIdParamsSchema, "session", "loop"),
+  "loop.pause": route("loop.pause", LoopIdParamsSchema, "session", "loop"),
+  "loop.resume": route("loop.resume", LoopIdParamsSchema, "session", "loop"),
+  "loop.cancel": route("loop.cancel", LoopIdParamsSchema, "session", "loop"),
 } satisfies Record<DaemonMethod, DaemonRouteDefinition>;
 
 export function daemonRoute(method: DaemonMethod) {

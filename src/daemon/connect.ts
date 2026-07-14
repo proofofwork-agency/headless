@@ -10,17 +10,20 @@ import {
   serializeDaemonExtensionManifest,
   type ResolvedDaemonExtensionConfig,
 } from "../runtime/daemon-extensions";
+import { LeadBindingStore, leadCredentialName } from "../runtime/lead-binding";
 
 export type ConnectDaemonOptions = {
   projectRoot: string;
   state?: ProjectStateOptions;
-  credential?: { integration: string };
-  /** Explicitly create a missing integration credential during trusted local first-install bootstrap. */
-  bootstrapIntegration?: boolean;
+  credential?: { integration: string } | { observer: true };
+  /** Explicitly create a missing read-only observer credential for the TUI. */
+  bootstrapObserver?: boolean;
   /** Trusted startup-only extension config; it is never sent in a daemon request. */
   extensionConfigPath?: string;
   /** Trusted absolute extension entrypoints used only when bootstrapping a daemon. */
   extensionModules?: readonly string[];
+  /** Start or require a daemon with the explicitly enabled experimental session routes. */
+  enableExperimentalSessions?: boolean;
 };
 
 /**
@@ -49,15 +52,17 @@ export async function connectOrStartDaemon(options: ConnectDaemonOptions) {
     // replaced config and no executable path enters a daemon request.
     delete childEnv.HEADLESS_EXTENSION_CONFIG;
     childEnv[DAEMON_EXTENSION_MANIFEST_ENV] = serializeDaemonExtensionManifest(spawnExtensions);
-    const child = Bun.spawn(
-      [
+    const childArguments = [
         process.execPath,
         entrypoint,
         "daemon",
         "serve",
         "--cwd",
         state.canonicalProjectRoot,
-      ],
+      ];
+    if (options.enableExperimentalSessions) childArguments.push("--experimental-sessions");
+    const child = Bun.spawn(
+      childArguments,
       {
         detached: true,
         stdin: "ignore",
@@ -73,6 +78,13 @@ export async function connectOrStartDaemon(options: ConnectDaemonOptions) {
   if (!options.credential) return root;
   const resumed = await tryClient(state.canonicalProjectRoot, options, 2_000, expectedExtensions);
   if (resumed) return resumed;
+  if ("observer" in options.credential) {
+    if (!options.bootstrapObserver) throw new HeadlessError("CREDENTIAL_MISSING", "Observer credential is not installed. Explicit bootstrap is required.");
+    await root.call("auth.provisionObserver");
+    const observer = await tryClient(state.canonicalProjectRoot, options, 2_000, expectedExtensions);
+    if (!observer) throw new HeadlessError("DAEMON_AUTH_FAILED", "Provisioned observer credential could not authenticate.");
+    return observer;
+  }
   const integrationId = `integration:${options.credential.integration.trim().toLowerCase()}`;
   const records = await root.call<Array<{ id: string; revokedAt: number | null }>>("auth.list");
   const record = records.find((candidate) => candidate.id === integrationId);
@@ -83,13 +95,63 @@ export async function connectOrStartDaemon(options: ConnectDaemonOptions) {
   if (existsSync(tokenPath)) {
     throw new HeadlessError("DAEMON_AUTH_FAILED", `Integration credential ${integrationId} could not authenticate; its existing token will not be rotated during connect.`);
   }
-  if (!options.bootstrapIntegration) {
-    throw new HeadlessError("CREDENTIAL_MISSING", `Integration credential ${integrationId} is not installed. Explicit bootstrap is required.`);
+  throw new HeadlessError(
+    "CREDENTIAL_MISSING",
+    `Integration credential ${integrationId} is not installed. Configure the foreground host with \`headless lead use <host>\`; generic integration bootstrap was removed.`,
+  );
+}
+
+export async function connectLeadDaemon(options: Omit<ConnectDaemonOptions, "credential" | "bootstrapObserver"> & { host: string }) {
+  const state = getProjectStatePaths(options.projectRoot, options.state);
+  const binding = new LeadBindingStore(state).status();
+  const host = options.host.trim().toLowerCase();
+  if (!binding || binding.host !== host) {
+    throw new HeadlessError("CREDENTIAL_MISSING", `No active ${host} foreground lead is configured. Run \`headless lead use ${host}\` first.`);
   }
-  await root.call("auth.provisionIntegration", { name: options.credential.integration });
-  const integration = await tryClient(state.canonicalProjectRoot, options, 2_000, expectedExtensions);
-  if (!integration) throw new HeadlessError("DAEMON_AUTH_FAILED", "Provisioned integration credential could not authenticate.");
-  return integration;
+  const client = await connectOrStartDaemon({
+    ...options,
+    credential: { integration: leadCredentialName(binding.host, binding.generation) },
+  });
+  return { client, binding };
+}
+
+/** Shared attach/heartbeat lifecycle used by foreground-host MCP and plugin clients. */
+export class LeadDaemonClientPool {
+  private readonly connections = new Map<string, Promise<{ client: HeadlessDaemonClient; generation: number }>>();
+  private readonly heartbeats = new Map<string, ReturnType<typeof setInterval>>();
+
+  async client(options: Omit<ConnectDaemonOptions, "credential" | "bootstrapObserver"> & { host: string }) {
+    const state = getProjectStatePaths(options.projectRoot, options.state);
+    const host = options.host.trim().toLowerCase();
+    const key = `${state.canonicalProjectRoot}\0${host}`;
+    let connection = this.connections.get(key);
+    if (!connection) {
+      connection = connectLeadDaemon({ ...options, projectRoot: state.canonicalProjectRoot, host }).then(async ({ client, binding }) => {
+        await client.call("lead.attach", { generation: binding.generation });
+        const timer = setInterval(() => {
+          void client.call("lead.heartbeat", { generation: binding.generation }, 5_000).catch(() => {});
+        }, 15_000);
+        timer.unref?.();
+        this.heartbeats.set(key, timer);
+        return { client, generation: binding.generation };
+      }).catch((error) => {
+        this.connections.delete(key);
+        throw error;
+      });
+      this.connections.set(key, connection);
+    }
+    return (await connection).client;
+  }
+
+  async disconnectAll() {
+    for (const timer of this.heartbeats.values()) clearInterval(timer);
+    this.heartbeats.clear();
+    const connections = await Promise.all([...this.connections.values()].map((value) => value.catch(() => null)));
+    this.connections.clear();
+    await Promise.all(connections.filter((value) => value !== null).map(({ client, generation }) =>
+      client.call("lead.disconnect", { generation }, 2_000).catch(() => {}),
+    ));
+  }
 }
 
 async function tryClient(
@@ -99,19 +161,27 @@ async function tryClient(
   expectedExtensions: ResolvedDaemonExtensionConfig | null,
 ) {
   const state = getProjectStatePaths(projectRoot, options.state);
-  const tokenPath = options.credential
-    ? integrationTokenPath(state, options.credential.integration)
-    : state.tokenPath;
+  const tokenPath = options.credential && "observer" in options.credential
+    ? state.observerTokenPath
+    : options.credential
+      ? integrationTokenPath(state, options.credential.integration)
+      : state.tokenPath;
   if (!existsSync(tokenPath) || !existsSync(state.socketPath)) return null;
   try {
     const client = new HeadlessDaemonClient({ projectRoot, state: options.state, timeoutMs, credential: options.credential });
-    const ping = await client.call<{ extensionConfigDigest?: string }>("ping", {}, timeoutMs);
+    const ping = await client.call<{ extensionConfigDigest?: string; experimentalSessionsEnabled?: boolean }>("ping", {}, timeoutMs);
     if (expectedExtensions && ping.extensionConfigDigest !== expectedExtensions.digest) {
       throw new HeadlessError("EXTENSION_CONFIG_MISMATCH", "The running Headless daemon uses a different extension configuration. Stop it before changing trusted extension modules.");
     }
+    if (options.enableExperimentalSessions && ping.experimentalSessionsEnabled !== true) {
+      throw new HeadlessError(
+        "CONFLICT",
+        "The running daemon does not enable experimental persistent sessions. Stop it before using the experimental session namespace.",
+      );
+    }
     return client;
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "EXTENSION_CONFIG_MISMATCH") throw error;
+    if (error && typeof error === "object" && "code" in error && (error.code === "EXTENSION_CONFIG_MISMATCH" || error.code === "CONFLICT")) throw error;
     return null;
   }
 }

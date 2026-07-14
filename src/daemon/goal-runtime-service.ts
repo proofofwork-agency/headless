@@ -26,7 +26,7 @@ import type { ProjectTrustStore } from "../runtime/project-trust-store";
 import { redactAndTruncate } from "../runtime/redaction";
 import { appendEvent, getOrCreateSession } from "../runtime/session";
 import { runGitStrict } from "../runtime/git";
-import { resolveAdapterId } from "../backends/registry";
+import { resolveBackendId } from "../backends/registry";
 import type { AuthenticatedCredential } from "../runtime/credential-store";
 import { GoalStartParamsSchema } from "./protocol";
 
@@ -65,6 +65,7 @@ export type GoalRuntimeServiceOptions = {
   trust: ProjectTrustStore;
   orchestration: OrchestrationStateStore;
   availability: (agent: AgentProfile, security: GoalSecurityControls) => GoalAgentAvailability;
+  activeLeadBackend?: () => string | null;
   createSession: (input: GoalRuntimeSessionInput, principal: string) => DurableSession;
   submitRun: (params: Record<string, unknown>, principal: string, options?: GoalRuntimeSubmitOptions) => Job;
   waitRun: (jobId: string, timeoutMs?: number) => Promise<Job>;
@@ -102,6 +103,7 @@ export class GoalRuntimeService {
       goals: options.goals,
       mailbox: options.mailbox,
       availability: options.availability,
+      activeLeadBackend: options.activeLeadBackend,
       executeTurn: ({ goal, agent, role, prompt, timeoutMs }) => this.executeGoalTurn(goal, agent, prompt, timeoutMs, role),
       integrateCandidate: (input) => this.integrateGoalCandidate(input),
       cancelJob: (jobId) => { options.cancelRun(jobId); },
@@ -130,7 +132,7 @@ export class GoalRuntimeService {
       principal: credential.principal,
       objective: params.objective,
       fleetProfileId: params.fleetProfileId,
-      coordinator: params.coordinator,
+      synthesizer: params.synthesizer,
       authMode: params.authMode,
       approvalPolicy: params.approvalPolicy,
       mode: params.mode,
@@ -230,7 +232,10 @@ export class GoalRuntimeService {
       mode,
       model: session.model ?? undefined,
       timeoutMs,
-      sessionId: session.id,
+      // Candidate/revision writes are deliberately one-shot. Persistent
+      // sessions are read-only and their immutable security tuple must never
+      // be repurposed to authorize a mutating turn.
+      sessionId: mode === "read-only" ? session.id : undefined,
       containment: session.containment,
       authMode: session.authMode,
       approvalPolicy: session.approvalPolicy,
@@ -322,7 +327,7 @@ export class GoalRuntimeService {
   }
 
   private compatibleGoalSession(goal: Goal, agent: AgentProfile) {
-    const backend = resolveAdapterId(agent.backend);
+    const backend = resolveBackendId(agent.backend);
     const turns = [...(this.options.goals.get(goal.id)?.turns ?? [])]
       .filter((turn) => turn.agentId === agent.id && turn.nativeSessionId !== null)
       .sort((left, right) => right.sequence - left.sequence);
@@ -505,7 +510,7 @@ export class GoalRuntimeService {
 
   private idleAgent(record: GoalRecord) {
     const profile = this.options.fleets.get(record.goal.fleetProfileId);
-    return profile?.agents.find((candidate) => candidate.id === record.goal.leaderAgentId && candidate.enabled)
+    return profile?.agents.find((candidate) => candidate.id === record.goal.synthesizerAgentId && candidate.enabled)
       ?? profile?.agents.find((candidate) => candidate.enabled)
       ?? null;
   }

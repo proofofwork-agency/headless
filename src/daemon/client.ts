@@ -15,9 +15,12 @@ export type HeadlessDaemonClientOptions = {
   projectRoot: string;
   state?: ProjectStateOptions;
   token?: string;
-  credential?: { integration: string };
+  credential?: { integration: string } | { observer: true };
   timeoutMs?: number;
 };
+
+export { connectLeadDaemon, connectOrStartDaemon, LeadDaemonClientPool } from "./connect";
+export type { ConnectDaemonOptions } from "./connect";
 
 export class HeadlessDaemonClient {
   readonly state;
@@ -26,9 +29,11 @@ export class HeadlessDaemonClient {
 
   constructor(options: HeadlessDaemonClientOptions) {
     this.state = getProjectStatePaths(options.projectRoot, options.state);
-    const tokenPath = options.credential
-      ? integrationTokenPath(this.state, options.credential.integration)
-      : this.state.tokenPath;
+    const tokenPath = options.credential && "observer" in options.credential
+      ? this.state.observerTokenPath
+      : options.credential
+        ? integrationTokenPath(this.state, options.credential.integration)
+        : this.state.tokenPath;
     if (!options.token) ensureOwnerOnlyFile(tokenPath);
     this.token = options.token ?? readFileSync(tokenPath, "utf8").trim();
     this.timeoutMs = boundedTimeout(options.timeoutMs ?? 180_000);
@@ -61,10 +66,19 @@ export class HeadlessDaemonClient {
         socket.end();
         try {
           const response = DaemonResponseSchema.parse(safeJsonParse(buffer.slice(0, newline)));
-          if (response.id !== id) throw new HeadlessError("DAEMON_UNAVAILABLE", "Daemon response id mismatch.");
+          // The daemon mints a fresh response id when it cannot validate the
+          // request envelope, so on this single-request connection an error
+          // with a foreign id still describes this request's failure. Only a
+          // success envelope must never be accepted across an id mismatch.
+          if (response.id !== id && response.ok) {
+            throw new HeadlessError("DAEMON_UNAVAILABLE", "Daemon response id mismatch.");
+          }
           if (!response.ok) {
             const error = response.error;
-            throw new HeadlessError(error?.code ?? "INTERNAL_ERROR", error?.message ?? "Daemon request failed.", {
+            const staleDaemonHint = response.id !== id
+              ? " The daemon answered under a different request id, which usually means it is running an older build that could not parse this request; restart it with `headless daemon serve`."
+              : "";
+            throw new HeadlessError(error?.code ?? "INTERNAL_ERROR", `${error?.message ?? "Daemon request failed."}${staleDaemonHint}`, {
               retryable: error?.retryable,
               details: error?.details,
             });

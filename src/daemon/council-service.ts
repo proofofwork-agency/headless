@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { BackendAdapter } from "../backends/registry";
+import type { BackendDefinition } from "../backends/registry";
 import type { FinalityDecision, Job } from "../contracts/durable";
 import { CouncilRunParamsSchema } from "./protocol";
 import { HeadlessError } from "../runtime/headless-error";
@@ -37,7 +37,7 @@ export type CouncilServiceOptions = {
   wait: (jobId: string, timeoutMs: number) => Promise<Job>;
   authorize: (request: AuthorizationRequest) => Pick<AuthorizationDecision, "allowed" | "reason">;
   resolveBackend: (backend: string) => string;
-  getBackend: (backend: string) => Pick<BackendAdapter, "capabilities"> | null;
+  getBackend: (backend: string) => Pick<BackendDefinition, "capabilities"> | null;
   latestFinality: (jobId: string) => FinalityDecision | null;
   listFinality: () => FinalityDecision[];
   evaluateFinality: (input: FinalityEvaluation) => FinalityDecision;

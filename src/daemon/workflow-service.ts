@@ -7,7 +7,7 @@ import { redactAndTruncate } from "../runtime/redaction";
 import { WorkflowStore } from "../runtime/workflow-store";
 import { RunRequestSchema, type SerializedRunRequest } from "../contracts/run";
 import type { FinalityDecision, Job, Workflow } from "../contracts/durable";
-import { getAdapter, resolveAdapterId } from "../backends/registry";
+import { getBackendDefinition, resolveBackendId } from "../backends/registry";
 import { assertPrincipalOwns } from "./auth";
 import { WorkflowRunParamsSchema } from "./protocol";
 import {
@@ -66,11 +66,26 @@ export class WorkflowService {
     if (this.options.isStopping()) {
       throw new HeadlessError("DAEMON_UNAVAILABLE", "Daemon is shutting down and cannot accept workflows.");
     }
+    const { parsed, steps } = this.validate(params, credential);
+    const workflow = this.store.create({
+      id: parsed.id,
+      principal: credential.principal,
+      sessionId: parsed.sessionId,
+      authMode: parsed.authMode,
+      approvalPolicy: parsed.approvalPolicy,
+      steps,
+      requirements: parsed.requirements,
+    });
+    this.launch(workflow.id);
+    return workflow;
+  }
+
+  validate(params: Record<string, unknown>, credential: AuthenticatedCredential) {
     const parsed = WorkflowRunParamsSchema.parse(params);
     if (parsed.sessionId) this.options.assertSessionOwnership(parsed.sessionId, credential);
     const steps = parsed.steps.map((step) => {
-      const backend = resolveAdapterId(step.backend);
-      const adapter = getAdapter(backend);
+      const backend = resolveBackendId(step.backend);
+      const adapter = getBackendDefinition(backend);
       if (!adapter) throw new HeadlessError("INVALID_REQUEST", `Unknown workflow backend: ${step.backend}`);
       if (step.mode === "write" && !adapter.capabilities.write) {
         throw new HeadlessError("BACKEND_UNSUPPORTED", `Workflow backend ${backend} does not support write mode.`);
@@ -101,17 +116,8 @@ export class WorkflowService {
       if (!authorization.allowed) throw new HeadlessError("POLICY_DENIED", authorization.reason);
       return { ...step, backend, authMode, approvalPolicy };
     });
-    const workflow = this.store.create({
-      id: parsed.id,
-      principal: credential.principal,
-      sessionId: parsed.sessionId,
-      authMode: parsed.authMode,
-      approvalPolicy: parsed.approvalPolicy,
-      steps,
-      requirements: parsed.requirements,
-    });
-    this.launch(workflow.id);
-    return workflow;
+    validateDependencies(steps);
+    return { valid: true as const, parsed, steps };
   }
 
   recover() {
@@ -171,6 +177,21 @@ export class WorkflowService {
     return cancelling;
   }
 
+  pause(id: string) {
+    const workflow = this.require(id);
+    if (isTerminalWorkflow(workflow)) return workflow;
+    if (workflow.state === "cancelling") throw new HeadlessError("INVALID_REQUEST", "A cancelling workflow cannot be paused.");
+    return this.store.update(id, (current) => ({ ...current, state: "paused" }));
+  }
+
+  resume(id: string) {
+    const workflow = this.require(id);
+    if (workflow.state !== "paused") throw new HeadlessError("INVALID_REQUEST", "Only a paused workflow can resume.");
+    const resumed = this.store.update(id, (current) => ({ ...current, state: "running" }));
+    this.launch(id);
+    return resumed;
+  }
+
   async wait(id: string, timeoutMs: number) {
     const deadline = this.now() + timeoutMs;
     for (;;) {
@@ -196,6 +217,7 @@ export class WorkflowService {
       workflow = this.require(workflowId);
       if (isTerminalWorkflow(workflow)) return workflow;
       if (workflow.state === "cancelling") return this.finishCancellation(workflow);
+      if (workflow.state === "paused") { await this.sleep(100); continue; }
 
       const actions: Array<Promise<void>> = [];
       let stateChanged = false;
@@ -363,6 +385,22 @@ export class WorkflowService {
     if (this.options.diagnostic) return this.options.diagnostic(message, error);
     console.error(redactAndTruncate(`${message} ${messageOf(error)}`, 2_048).text);
   }
+}
+
+function validateDependencies(steps: Array<{ id: string; dependsOn: string[] }>) {
+  const ids = new Set(steps.map((step) => step.id));
+  if (ids.size !== steps.length) throw new HeadlessError("INVALID_REQUEST", "Workflow step ids must be unique.");
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string) => {
+    if (visiting.has(id)) throw new HeadlessError("INVALID_REQUEST", "Workflow dependencies must form an acyclic graph.");
+    if (visited.has(id)) return;
+    visiting.add(id);
+    const step = steps.find((item) => item.id === id)!;
+    for (const dependency of step.dependsOn) { if (!ids.has(dependency)) throw new HeadlessError("INVALID_REQUEST", `Unknown workflow dependency: ${dependency}`); visit(dependency); }
+    visiting.delete(id); visited.add(id);
+  };
+  for (const step of steps) visit(step.id);
 }
 
 function messageOf(error: unknown) {
