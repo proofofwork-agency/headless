@@ -19,6 +19,8 @@ afterEach(async () => {
 });
 
 describe("daemon-owned worker cooperation", () => {
+  // The internal submit/wait budgets alone exceed bun's 5s default test
+  // timeout; the Linux relay path needs the full window on slower CI hosts.
   test.skipIf(!strictContainmentAvailable())("injects the scoped helper into the contained worker and revokes it at terminal state", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-daemon-run-tool-"));
     roots.push(root);
@@ -64,7 +66,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(unsafeCompleted.result?.status).toBe("failed");
     expect(preparedPrompt).toBe("Unsafe local escape hatch does not receive daemon authority.");
     expect(readdirSync(daemon.state.daemonRuntimeDir).filter((name) => name.endsWith(".tool.sock"))).toEqual([]);
-  });
+  }, 30_000);
 });
 
 function fixtureAdapter(capturePrompt: (prompt: string) => void): BackendDefinition {

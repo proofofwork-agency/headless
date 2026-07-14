@@ -48,10 +48,12 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           # setup-bun installs under ~/.bun, but contained workers see a tmpfs
-          # HOME, so bun-based test fixtures cannot resolve `bun` inside the
-          # sandbox. Expose the real binary through a system path that the
-          # read-only root bind keeps visible.
-          sudo ln -sf "$(command -v bun)" /usr/local/bin/bun
+          # over the real home, so bun-based test fixtures cannot resolve `bun`
+          # inside the sandbox. A symlink is not enough — its target would be
+          # masked by the same tmpfs — so copy the static binary to a system
+          # path that the read-only root bind keeps visible.
+          sudo cp "$(command -v bun)" /usr/local/bin/bun
+          sudo chmod 755 /usr/local/bin/bun
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
