@@ -63,6 +63,10 @@ jobs:
         run: |
           bwrap --version
           bun -e 'const { probeLinuxBwrap } = await import("./src/runtime/os-sandbox.ts"); const result = probeLinuxBwrap(); console.log(result); if (!result.ok) process.exit(1)'
+          # Diagnostic visibility, not a gate: print the run-tool relay probe
+          # verdict so hosted-runner transport regressions are explained in the
+          # job log instead of surfacing as opaque downstream test failures.
+          bun -e 'const { probeLinuxRunToolRelay } = await import("./src/runtime/os-sandbox.ts"); console.log("run-tool relay probe:", JSON.stringify(probeLinuxRunToolRelay()))'
 
       - name: Verify real macOS containment
         if: runner.os == 'macOS'
