@@ -10,6 +10,16 @@ export type RunToolWorkerAccess = {
   sessionId: string;
 };
 
+export const DEFAULT_RUN_TOOL_TIMEOUT_MS = 5_000;
+export const MIN_RUN_TOOL_TIMEOUT_MS = 1_000;
+export const MAX_RUN_TOOL_TIMEOUT_MS = 60_000;
+
+export function runToolCallTimeoutMs(env: Readonly<Record<string, string | undefined>> = process.env) {
+  const configured = Number(env.HEADLESS_RUN_TOOL_TIMEOUT_MS);
+  if (!Number.isSafeInteger(configured)) return DEFAULT_RUN_TOOL_TIMEOUT_MS;
+  return Math.max(MIN_RUN_TOOL_TIMEOUT_MS, Math.min(MAX_RUN_TOOL_TIMEOUT_MS, configured));
+}
+
 /** Install a disposable client inside this worker's isolated runtime root. */
 export function installRunToolClient(worker: WorkerEnvironment, access: RunToolWorkerAccess) {
   if (!statSync(access.socketPath).isSocket()) throw new Error("Daemon run tool socket is unavailable.");
@@ -26,6 +36,7 @@ export function installRunToolClient(worker: WorkerEnvironment, access: RunToolW
     HEADLESS_RUN_TOOL_EXPIRES_AT: String(access.expiresAt),
     HEADLESS_RUN_JOB_ID: access.jobId,
     HEADLESS_RUN_SESSION_ID: access.sessionId,
+    HEADLESS_RUN_TOOL_TIMEOUT_MS: String(runToolCallTimeoutMs()),
   } satisfies NodeJS.ProcessEnv;
 }
 
@@ -75,7 +86,11 @@ const request = JSON.stringify({ version: 1, id, token, operation, params }) + "
 const socket = hasRelay ? createConnection({ host: relayHost, port: relayPort }) : createConnection(socketPath);
 socket.setEncoding("utf8");
 let buffer = "";
-const timeout = setTimeout(() => socket.destroy(new Error("run tool timeout")), 5000);
+const configuredTimeoutMs = Number(process.env.HEADLESS_RUN_TOOL_TIMEOUT_MS);
+const timeoutMs = Number.isSafeInteger(configuredTimeoutMs)
+  ? Math.max(${MIN_RUN_TOOL_TIMEOUT_MS}, Math.min(${MAX_RUN_TOOL_TIMEOUT_MS}, configuredTimeoutMs))
+  : ${DEFAULT_RUN_TOOL_TIMEOUT_MS};
+const timeout = setTimeout(() => socket.destroy(new Error("run tool timeout")), timeoutMs);
 socket.once("connect", () => socket.write(request));
 socket.on("data", (chunk) => {
   buffer += chunk;

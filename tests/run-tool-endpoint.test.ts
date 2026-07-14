@@ -19,7 +19,7 @@ import {
   DARWIN_SANDBOX_EXEC,
   writeDarwinReadOnlySandboxProfile,
 } from "../src/runtime/os-sandbox";
-import { installRunToolClient } from "../src/runtime/run-tool-client";
+import { installRunToolClient, runToolCallTimeoutMs } from "../src/runtime/run-tool-client";
 import { createWorkerEnvironment } from "../src/runtime/worker-environment";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 
@@ -34,6 +34,14 @@ afterEach(async () => {
 });
 
 describe("run-scoped daemon tool endpoint", () => {
+  test("bounds the runtime call timeout override", () => {
+    expect(runToolCallTimeoutMs({})).toBe(5_000);
+    expect(runToolCallTimeoutMs({ HEADLESS_RUN_TOOL_TIMEOUT_MS: "999" })).toBe(1_000);
+    expect(runToolCallTimeoutMs({ HEADLESS_RUN_TOOL_TIMEOUT_MS: "15000" })).toBe(15_000);
+    expect(runToolCallTimeoutMs({ HEADLESS_RUN_TOOL_TIMEOUT_MS: "60001" })).toBe(60_000);
+    expect(runToolCallTimeoutMs({ HEADLESS_RUN_TOOL_TIMEOUT_MS: "invalid" })).toBe(5_000);
+  });
+
   test("authenticates an immutable scope, bounds calls, redacts replies, and revokes the socket", async () => {
     const root = temporaryDirectory();
     let observed: { scope: Readonly<RunToolScope>; operation: RunToolOperation; params: Record<string, unknown> } | null = null;
@@ -85,6 +93,7 @@ describe("run-scoped daemon tool endpoint", () => {
       sessionId: endpoint.scope.sessionId,
     });
     try {
+      expect(env.HEADLESS_RUN_TOOL_TIMEOUT_MS).toBe(String(runToolCallTimeoutMs()));
       const helper = join(worker.runtime, "headless-run-tool");
       const first = Bun.spawn([helper, "note", JSON.stringify({ text: "from child" })], { env, stdout: "pipe", stderr: "pipe" });
       expect(await first.exited).toBe(0);

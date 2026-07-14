@@ -6,6 +6,7 @@ import { z } from "zod";
 import { IdentifierSchema, PrincipalIdSchema, ProjectIdSchema, TimestampSchema } from "../contracts/common";
 import { ensureOwnerOnlyDirectory } from "../runtime/project-state";
 import { redactAndTruncate, redactDeep } from "../runtime/redaction";
+import { runToolCallTimeoutMs } from "../runtime/run-tool-client";
 import { safeJsonParse } from "../runtime/safe-json";
 
 export const RUN_TOOL_PROTOCOL_VERSION = 1 as const;
@@ -212,7 +213,7 @@ export class RunToolEndpointManager {
     }
     record.sockets.add(socket);
     socket.setEncoding("utf8");
-    socket.setTimeout(5_000, () => socket.destroy());
+    socket.setTimeout(runToolCallTimeoutMs(), () => socket.destroy());
     socket.once("close", () => record.sockets.delete(socket));
     let buffer = "";
     let handled = false;

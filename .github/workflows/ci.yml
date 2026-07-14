@@ -54,6 +54,10 @@ jobs:
           # path that the read-only root bind keeps visible.
           sudo cp "$(command -v bun)" /usr/local/bin/bun
           sudo chmod 755 /usr/local/bin/bun
+          # Two-core hosted runners under full-suite load exceed the 5s
+          # run-tool round-trip default; raise the clamped operability bound
+          # (1s-60s) for this environment only.
+          echo "HEADLESS_RUN_TOOL_TIMEOUT_MS=15000" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts

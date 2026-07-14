@@ -25,6 +25,12 @@ export interface SandboxProbeResult {
   reason: string;
 }
 
+const LINUX_RUN_TOOL_RELAY_READY_TIMEOUT_MS = 10_000;
+const LINUX_RUN_TOOL_RELAY_ECHO_TIMEOUT_MS = 15_000;
+const LINUX_RUN_TOOL_RELAY_PROCESS_TIMEOUT_MS = 30_000;
+const LINUX_RUN_TOOL_RELAY_SERVER_TIMEOUT_MS = 45_000;
+let linuxRunToolRelayProbe: Readonly<SandboxProbeResult> | null = null;
+
 export interface DarwinReadSandboxProfileOptions {
   workdir: string;
   worker?: WorkerEnvironmentPaths;
@@ -920,6 +926,21 @@ export function probeLinuxBwrap(): SandboxProbeResult {
  * generic write/seccomp probe is not sufficient evidence for run tools.
  */
 export function probeLinuxRunToolRelay(): SandboxProbeResult {
+  if (!linuxRunToolRelayProbe) {
+    try {
+      linuxRunToolRelayProbe = Object.freeze(runLinuxRunToolRelayProbe());
+    } catch (error) {
+      const detail = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+      linuxRunToolRelayProbe = Object.freeze({
+        ok: false,
+        reason: `Linux run-tool relay probe failed unexpectedly: ${detail}`,
+      });
+    }
+  }
+  return { ...linuxRunToolRelayProbe };
+}
+
+function runLinuxRunToolRelayProbe(): SandboxProbeResult {
   if (process.platform !== "linux") return { ok: false, reason: `unsupported platform: ${process.platform}` };
   if (!hasBwrap()) return { ok: false, reason: `${BWRAP} not found in PATH` };
   const supervisor = resolveLinuxContainmentSupervisorEntry();
@@ -942,7 +963,7 @@ export function probeLinuxRunToolRelay(): SandboxProbeResult {
     "const value=buffer.slice(0,newline);socket.end((value===expected?expected:'mismatch')+'\\n');server.close();});",
     "});",
     `server.listen(${JSON.stringify(socketPath)},()=>{chmodSync(${JSON.stringify(socketPath)},0o600);writeFileSync(${JSON.stringify(readyPath)},'ready',{mode:0o600});});`,
-    "setTimeout(()=>process.exit(78),10000);",
+    `setTimeout(()=>process.exit(78),${LINUX_RUN_TOOL_RELAY_SERVER_TIMEOUT_MS});`,
   ].join("");
   const server = spawn(bun, ["-e", serverSource], { cwd: dir, stdio: "ignore" });
   // A launch failure is reported by the bounded readiness check below. Keep
@@ -950,7 +971,7 @@ export function probeLinuxRunToolRelay(): SandboxProbeResult {
   // exception while this synchronous capability probe is waiting.
   server.once("error", () => {});
   try {
-    const readyDeadline = Date.now() + 2_000;
+    const readyDeadline = Date.now() + LINUX_RUN_TOOL_RELAY_READY_TIMEOUT_MS;
     while (!existsSync(readyPath) && Date.now() < readyDeadline) sleepSync(5);
     if (!existsSync(readyPath) || !existsSync(socketPath) || !statSync(socketPath).isSocket()) {
       return { ok: false, reason: "Linux run-tool relay probe server did not become ready" };
@@ -962,7 +983,7 @@ export function probeLinuxRunToolRelay(): SandboxProbeResult {
       "const host=process.env.HEADLESS_RUN_TOOL_HOST;const port=Number(process.env.HEADLESS_RUN_TOOL_PORT);",
       "if(host!=='127.0.0.1'||!Number.isSafeInteger(port))process.exit(79);",
       "const socket=createConnection({host,port});let buffer='';socket.setEncoding('utf8');",
-      "const timeout=setTimeout(()=>{socket.destroy();process.exit(80);},5000);",
+      `const timeout=setTimeout(()=>{socket.destroy();process.exit(80);},${LINUX_RUN_TOOL_RELAY_ECHO_TIMEOUT_MS});`,
       "socket.once('connect',()=>socket.write(expected+'\\n'));",
       "socket.on('data',(chunk)=>{buffer+=chunk;const newline=buffer.indexOf('\\n');if(newline<0)return;clearTimeout(timeout);socket.end();process.exit(buffer.slice(0,newline)===expected?0:81);});",
       "socket.once('error',()=>{clearTimeout(timeout);process.exit(82);});",
@@ -985,7 +1006,7 @@ export function probeLinuxRunToolRelay(): SandboxProbeResult {
       bun,
       "-e",
       clientSource,
-    ], { encoding: "utf-8", timeout: 10_000 });
+    ], { encoding: "utf-8", timeout: LINUX_RUN_TOOL_RELAY_PROCESS_TIMEOUT_MS });
     if (result.error) return { ok: false, reason: `Linux run-tool relay probe failed: ${result.error.message}` };
     if (result.status !== 0) {
       const detail = (result.stderr || result.stdout || `exit ${result.status}`).trim().slice(0, 300);
