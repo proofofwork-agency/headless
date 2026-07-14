@@ -71,7 +71,8 @@ Default help exposes only the recovery-critical surface:
 - `doctor` / `status` — daemon and backend readiness.
 - `project trust status|grant|revoke` — project and native-egress consent.
 - `daemon serve|status` — project-daemon lifecycle.
-- `init` — initialize external state without editing the checkout.
+- `init [--lead <host>]` — initialize external state and optionally configure a foreground lead without editing the checkout.
+- `mcp install|remove|status|serve` — manage the published foreground-lead MCP server.
 
 Advanced compatibility commands require the explicit `headless experimental` namespace. List them with `headless experimental --help`; their contracts may change or be removed before beta. The [generated command reference](./docs/command-reference.md) is checked against the command registry.
 
@@ -112,9 +113,10 @@ The daemon still contains experimental worker sessions, MCP/plugin integrations,
 One durable foreground lead may be configured per project:
 
 ```bash
-headless lead use codex --cwd .
-headless mcp install codex --cwd .
+headless init --lead codex --cwd .
 ```
+
+This one-shot path initializes external state, installs the host's global or project-associated MCP registration, then binds the foreground lead. It does not grant project trust or native egress. The equivalent explicit sequence is `headless init --cwd .`, `headless mcp install codex --cwd .`, then `headless lead use codex --cwd .`.
 
 The provider host remains an externally launched, visible process. Its MCP or plugin attaches and heartbeats; Headless never launches, injects into, elects, or kills the foreground lead. Explicit switching rotates the credential generation and invalidates state-changing access from the previous host without deleting jobs, sessions, messages, artifacts, or ledger history. Automatic worker routing avoids the active lead backend; an explicit backend or synthesizer selection may still create a separate headless worker using that provider.
 

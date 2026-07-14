@@ -5,6 +5,13 @@ import {
   flagArgsBeforeSeparator,
   getArg,
 } from "../shared";
+import { normalizeMcpHost, runMcpInstall } from "./mcp";
+
+export type InitCommandDependencies = {
+  client?: typeof daemonClient;
+  installMcp?: typeof runMcpInstall;
+  log?: (message: string) => void;
+};
 
 export async function runTuiCommand(args: string[]) {
   ensureSupportedPlatform();
@@ -16,13 +23,21 @@ export function tuiProjectRoot(args: string[], fallback = process.cwd()) {
   return getArg(flagArgsBeforeSeparator(args), "--cwd") || fallback;
 }
 
-export async function runInitCommand(args: string[]) {
+export async function runInitCommand(args: string[], dependencies: InitCommandDependencies = {}) {
   const flags = flagArgsBeforeSeparator(args);
-  const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
+  const lead = getArg(flags, "--lead");
+  const host = lead ? normalizeMcpHost(lead) : null;
+  const log = dependencies.log ?? console.log;
+  const client = await (dependencies.client ?? daemonClient)(getArg(flags, "--cwd") || process.cwd(), flags);
   const ping = await client.call<{ projectId: string; projectRoot: string; principal: string }>("ping");
-  console.log(`Initialized Headless v0.2 external state for ${ping.projectRoot}.`);
-  console.log(`State: ${client.state.projectDir}`);
-  console.log("The project checkout and .gitignore were not modified.");
+  log(`Initialized Headless v0.2 external state for ${ping.projectRoot}.`);
+  log(`State: ${client.state.projectDir}`);
+  log("The project checkout and .gitignore were not modified.");
+  if (host) {
+    await (dependencies.installMcp ?? runMcpInstall)(host, { checkoutRoot: ping.projectRoot });
+    await client.call("lead.use", { host });
+    log(`Configured ${host} as the foreground lead. Project trust and native egress remain unchanged.`);
+  }
 }
 
 export async function runDoctorCommand(args: string[]) {

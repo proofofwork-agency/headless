@@ -1,20 +1,31 @@
 # Foreground-lead MCP and OpenCode plugin
 
-> Experimental private alpha. Build the package from this checkout; it is not published.
+Foreground-lead onboarding is part of the Beta 1 CLI surface. The orchestration tools exposed through the MCP server remain experimental unless documented otherwise.
 
 Headless has one externally launched foreground lead per project. The provider CLI remains visible and owns its own lifecycle. Headless does not start, inject into, elect, or kill it. The host’s MCP process or OpenCode plugin attaches to the configured binding and sends a heartbeat.
 
 ## Configure a lead
 
-Build Headless, bind the host, then install or print its native MCP configuration:
+Install Headless, then initialize external project state, install the host integration, and bind the foreground lead in one command:
 
 ```bash
 bun install --frozen-lockfile --ignore-scripts
 bun run build
 
-headless lead use codex --cwd /absolute/project
-headless mcp install codex --cwd /absolute/project
+headless init --lead codex --cwd /absolute/project
 ```
+
+Supported lead names are `codex`, `claude`, `opencode`, and `grok`. The one-shot command does not grant project trust or native egress. Those remain explicit, separate policy decisions.
+
+The equivalent manual sequence is:
+
+```bash
+headless init --cwd /absolute/project
+headless mcp install codex --cwd /absolute/project
+headless lead use codex --cwd /absolute/project
+```
+
+Codex, Claude Code, and Grok are installed through their native MCP commands. Grok uses user scope. OpenCode is merged into its global `~/.config/opencode/opencode.json`; Headless refuses to place that configuration inside the project checkout. If a native command or config update fails, `headless mcp install` prints a complete command and configuration snippet for manual use.
 
 `headless lead status` reports `configured`, `connected`, or `disconnected`. `headless lead release` revokes the current generation. Calling `lead use` again explicitly switches hosts, increments the generation, and invalidates the previous host’s state-changing access. Detached jobs, worker sessions, messages, artifacts, candidates, and ledger history remain intact.
 
@@ -38,7 +49,7 @@ A generic stdio configuration is:
 }
 ```
 
-Use the compiled binary, not `src/mcp/server.ts` or `plugin/index.ts`. The OpenCode plugin attaches as host `opencode` and therefore requires `headless lead use opencode` first.
+Use the compiled binary, not `src/mcp/server.ts` or `plugin/index.ts`. OpenCode attaches as host `opencode`; `headless init --lead opencode` performs both its global MCP registration and lead binding.
 
 ## Identity and authority
 

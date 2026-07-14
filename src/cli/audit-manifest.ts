@@ -60,7 +60,7 @@ function commandRisk(command: CliCommandName): CliAuditCase["risk"] {
 }
 
 function subcommandRisk(command: CliCommandName, subcommand: string): CliAuditCase["risk"] {
-  if (command === "mcp") return subcommand.endsWith(" codex") ? "destructive" : "safe";
+  if (command === "mcp") return /^(install|remove)(?: |$)/.test(subcommand) ? "destructive" : "safe";
   if (command === "collaboration" && (subcommand === "ack" || subcommand === "acknowledge")) return "destructive";
   if (command === "approval" && subcommand === "resolve") return "destructive";
   if (command === "candidate" && (subcommand === "integrate" || subcommand === "reject")) return "destructive";

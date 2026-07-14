@@ -95,8 +95,8 @@ export const COMMAND_SPECS = [
   },
   {
     name: "init",
-    valueFlags: ["--cwd", "--extension-config", "--extension-module"],
-    help: "init [--cwd dir]                 Initialize external per-project state without modifying the checkout.",
+    valueFlags: ["--lead", "--cwd", "--extension-config", "--extension-module"],
+    help: "init [--lead codex|grok|claude|opencode] [--cwd dir]   Initialize external per-project state and optionally configure its foreground lead.",
   },
   {
     name: "status",
@@ -108,7 +108,8 @@ export const COMMAND_SPECS = [
   { name: "pair", valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"] },
   {
     name: "mcp",
-    help: "mcp <serve|install|remove|status> [codex|grok|claude|opencode]",
+    valueFlags: ["--cwd"],
+    help: "mcp <serve|install|remove|status> [codex|grok|claude|opencode] [--cwd dir]",
   },
   {
     name: "launch",
@@ -158,7 +159,7 @@ export function parseCliInvocation(args: string[]): CliInvocation {
     : { kind: "unknown", name };
 }
 
-export const STABLE_COMMAND_NAMES = new Set(["exec", "lead", "daemon", "project", "init", "status", "doctor"]);
+export const STABLE_COMMAND_NAMES = new Set(["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp"]);
 
 export function renderHelp(includeExperimental = false) {
   return [

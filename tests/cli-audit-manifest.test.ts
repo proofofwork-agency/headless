@@ -24,7 +24,11 @@ describe("CLI audit manifest", () => {
     for (const id of ["exec", "run", "council", "goal:start", "goal:run", "session:send", "session:resume", "workflow:run", "autonomy:start"]) {
       expect(risk(id)).toBe("cost");
     }
-    for (const id of ["project:trust grant", "project:trust revoke", "collaboration:acknowledge", "collaboration:ack", "approval:resolve", "candidate:integrate", "mcp:install codex", "mcp:remove codex"]) {
+    for (const id of [
+      "project:trust grant", "project:trust revoke", "collaboration:acknowledge", "collaboration:ack", "approval:resolve", "candidate:integrate",
+      "mcp:install codex", "mcp:install claude", "mcp:install grok", "mcp:install opencode",
+      "mcp:remove codex", "mcp:remove claude", "mcp:remove grok", "mcp:remove opencode",
+    ]) {
       expect(risk(id)).toBe("destructive");
     }
   });

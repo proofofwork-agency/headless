@@ -46,7 +46,7 @@ describe("v0.2 CLI contracts", () => {
     const help = renderHelp();
     const experimentalHelp = renderHelp(true);
     for (const spec of COMMAND_SPECS) if ("valueFlags" in spec) for (const flag of spec.valueFlags) expect(VALUE_FLAGS.has(flag)).toBe(true);
-    for (const command of ["exec", "daemon", "project", "init", "status", "doctor"]) {
+    for (const command of ["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp"]) {
       const spec = COMMAND_SPECS.find((candidate) => candidate.name === command);
       expect(spec && "help" in spec ? help : "").toContain(`  ${spec && "help" in spec ? spec.help : ""}`);
     }
@@ -55,6 +55,7 @@ describe("v0.2 CLI contracts", () => {
     for (const spec of COMMAND_SPECS) if ("help" in spec) expect(experimentalHelp).toContain(spec.help);
     expect(parseCliInvocation(["session"])).toEqual({ kind: "unknown", name: "session" });
     expect(parseCliInvocation(["experimental", "session"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "session")! });
+    expect(parseCliInvocation(["mcp", "status", "codex"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "mcp")! });
     expect(parseCliInvocation(["exec", "--version", "--help"])).toEqual({ kind: "help" });
     expect(parseCliInvocation(["missing"])).toEqual({ kind: "unknown", name: "missing" });
   });
@@ -85,7 +86,7 @@ describe("v0.2 CLI contracts", () => {
   });
 
   test("recognizes all value-taking v0.2 flags", () => {
-    for (const flag of ["--session-id", "--limit", "--check", "--timeout-ms", "--cwd", "--extension-config"]) {
+    for (const flag of ["--session-id", "--limit", "--check", "--timeout-ms", "--cwd", "--extension-config", "--lead"]) {
       expect(VALUE_FLAGS.has(flag)).toBe(true);
     }
     expect(getPrompt(["exec", "--session-id", "session-1", "--limit", "2", "prompt"])).toBe("prompt");
