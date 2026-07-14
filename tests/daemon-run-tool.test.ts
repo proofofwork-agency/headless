@@ -45,7 +45,9 @@ describe("daemon-owned worker cooperation", () => {
     });
     const completed = await client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 }, 15_000);
 
-    expect(completed.result?.status).toBe("succeeded");
+    // Include the full structured result so a hosted-CI-only failure is
+    // diagnosable from the log (fixture run; bounded and already redacted).
+    expect(completed.result?.status, JSON.stringify(completed.result, null, 2)).toBe("succeeded");
     expect(completed.result?.containment.enforced).toBe(true);
     expect(completed.result?.output).toContain("verified from contained worker");
     expect(completed.result?.output).toContain(submitted.id);
