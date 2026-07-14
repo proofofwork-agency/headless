@@ -14,6 +14,7 @@ The orchestration surfaces are the product, not compatibility baggage; the conta
 - One authenticated daemon owns one canonical project root.
 - One externally launched foreground lead binds by explicit host and generation; Headless never elects or owns its provider process.
 - The TUI authenticates as an observer and can read snapshots/events only. Any future configuration surface renders state and generates root-CLI commands; it does not hold mutation authority.
+- Run-tool cooperation health is not containment evidence. Linux launch still fails closed when the required supervisor, relay runtime, scoped socket, namespace, or seccomp arrangement is absent, but the active relay round-trip remains diagnostic-only and a real helper failure is local to that call.
 - State is external, owner-only, and keyed by the canonical-root hash.
 - Persisted state is upgrade-compatible: durable read boundaries decode known superseded schema values through an explicit legacy-aware codec (fail-closed for unknown values); new writes and RPC remain strict. A release that renames or removes a persisted enum/field ships the corresponding read-compatibility entry and an upgraded-state fixture in the same change.
 - Workers receive isolated filesystem/environment roots and no ambient host credentials.
@@ -27,26 +28,27 @@ The orchestration surfaces are the product, not compatibility baggage; the conta
 
 ## Gate A — kernel beta (`0.2.0-beta.1`)
 
-Scope: one bounded contained execution, the daemon control plane, project trust, lead binding, and MCP lead attachment. This is the "open one CLI coder, bind it as lead, and go" entry point.
+Scope: one bounded contained execution, the daemon control plane, project trust, lead binding, MCP lead attachment, and the read-only observer log/Config TUI. This is the "open one CLI coder, bind it as lead, and go" entry point.
 
 | Area | Evidence required before Gate A publish |
 | --- | --- |
 | Contracts | Runtime validation and golden tests for requests, results, bounded events, adapters, jobs, tasks, native session metadata, grants, budgets, and structured errors. |
-| Upgrade compatibility | Legacy-aware persisted-RunResult decoding at every durable read boundary (run-event projection, protected archive with raw-bytes hash verification before normalization, jobs, sessions, workflow steps); an upgraded-state fixture proving daemon/doctor/exec start against pre-rename state with canonical in-memory values, unchanged archive bytes/hashes, and fail-closed unknown values. |
+| Upgrade compatibility | Legacy-aware persisted-RunResult decoding at every durable read boundary (run-event projection, protected archive with raw-bytes hash verification before normalization, jobs, sessions, workflow steps); an upgraded-state fixture proving daemon/doctor startup and canonical RPC reads against pre-rename state with unchanged archive bytes/hashes and fail-closed unknown values. |
 | Daemon | Typed route registration, cross-process authentication, project/principal/root spoof rejection, lead attach/heartbeat/switch/release, observer-only snapshots/events, trust/approval operations, durable jobs/tasks/events, restart recovery, cancellation, leases/integration journals, and bounded FIFO queuing. |
 | Lead onboarding | `lead use|status|release` plus automated MCP install/attach parity for OpenCode, Claude Code, Codex, and Grok config paths; generation-bound MCP clients share attach/heartbeat behavior; MCP cannot select arbitrary roots/principals or self-confirm approvals/integration. |
+| Observer TUI | Dedicated observer credentials limited to ping/snapshots/events; log and Config views for daemon, backend, trust, lead, and budget state; exact root-CLI command generation only; exhaustive denial of every mutation route. |
 | Ledger/state | Reserved-field protection, incremental verified reads, partial lines, exact full-prefix duplicate suppression, ownership-aware locks, digest-bound ledger and semantic context/task projections, and valid/invalid/crash-restarted v1 migration. |
 | Policy/budgets | Persisted root/lead/grant authority, project/backend/operation/expiry/cost/iteration scope, model-aware immutable cost reservation, concrete pre-egress request pricing, shared aggregate request/input/output quotas across current and later leases, crash-unknown quota exhaustion, cost/artifact/concurrency/retry enforcement, and once-only provider/broker reconciliation. |
 | Containment | Real Seatbelt, bubblewrap, and backend-seccomp probes in native-direct-unrestricted and broker-only modes plus adversarial auth-capsule, nested repository `.env`/Git-config, project/sibling, symlink/hardlink, startup-hook, egress, pre-existing/late-created socket, and x86-64 x32-ABI tests. |
 | Broker | Fake OpenAI, Anthropic, Gemini, and xAI upstreams covering streaming, cancellation, body/model/route limits, positive text-model policy, opaque context/tool/server-search/non-text-output/automatic-tier rejection under caps, deterministic standard-tier injection, extension bounded-input validation, conservative conflicting token maxima and multi-candidate multiplication, shared multi-lease request/token exhaustion, per-lease/global concurrency and body-memory caps, lease pruning, bounded quota retention, and credential non-exposure. |
-| Execution | Durable lifecycle with a total creation-to-exit deadline, bounded FIFO queueing and overflow evidence, complete descendant cancellation and TERM-to-KILL escalation, positive timeout bounds, bounded/redacted streams/artifacts/diffs, malformed-output classification, stable-ID-only deduplication, and stream/subscriber/mailbox backpressure. |
+| Execution | Durable lifecycle with a total creation-to-exit deadline, bounded FIFO queueing and overflow evidence, complete descendant cancellation and TERM-to-KILL escalation, positive timeout bounds, bounded/redacted streams/artifacts/diffs, malformed-output classification, stable-ID-only deduplication, stream/subscriber/mailbox backpressure, and bounded per-call run-tool failure without launch-wide probe poisoning. |
 | Sessions | Deterministic fake-CLI and required-containment E2E for Codex app-server/fallback, Claude, OpenCode, and Grok: login detection, create/resume, one active turn, cancellation, malformed/out-of-order/reconnected events, rate limits, restart, and bounded redacted replay fallback. |
 | Package | v0.2 metadata alignment, clean build/declarations, tarball allowlists, clean tarball install, CLI/MCP/daemon startup, and generated-artifact cleanliness. |
 | CI | Current macOS and Linux jobs exercise real containment and the complete release check. macOS CI explicitly enables the sanitized public DNS/TLS Seatbelt probe; ordinary local tests retain deterministic local IP/Unix-socket coverage without public network. Provider-key broker smoke and installed-CLI native-subscription smoke remain separate protected/opt-in jobs. |
 
 ## Gate B — orchestration beta
 
-Scope: the lead's multi-agent surfaces — deliberation fan-out, councils/judge panels, fleets, goals, workflows, loops, skills — plus the TUI and plugin. Requires Gate A published.
+Scope: the lead's multi-agent surfaces — deliberation fan-out, councils/judge panels, fleets, goals, workflows, loops, skills — plus their projections in the observer TUI and the plugin. Requires Gate A published.
 
 | Area | Evidence required before Gate B publish |
 | --- | --- |
@@ -84,7 +86,7 @@ Do not carry forward an older local release pass after control-plane, native-aut
 1. Characterize and split the daemon/CLI control plane; centralize errors, validation, result normalization, process-tree termination, and owner-only persistence. (Gate A)
 2. Contracts, external state, upgrade-compatibility codec, project trust, auth capsules, broker protocols, strict platform containment, sessions, policy, budgets, and finality. (Gate A)
 3. Durable execution, adapters/parsers, bounded FIFO scheduling/backpressure, rate-limit/watchdog recovery, lead binding, and automated MCP lead onboarding for all advertised backends. (Gate A)
-4. Addressed collaboration, goals, fleets, councils/workflows, deterministic idle opportunities, approvals, and the observer TUI. (Gate B)
+4. Addressed collaboration, goals, fleets, councils/workflows, deterministic idle opportunities, approvals, and their projections in the observer TUI. (Gate B)
 5. Candidates and gated write integration with per-backend enablement. (Gate C)
 6. Package/CI/documentation checks re-run at every gate boundary.
 

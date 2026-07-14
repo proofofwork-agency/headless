@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { generatedCommandReference } from "./generate-command-reference";
 
 const root = resolve(import.meta.dir, "..");
-const documents = ["README.md", "SECURITY.md", "CHANGELOG.md", "docs/command-reference.md", "docs/mcp-integration.md", "docs/native-login.md", "docs/plan.md"];
+const documents = ["README.md", "SECURITY.md", "CHANGELOG.md", "docs/command-reference.md", "docs/cli-and-tui-guide.md", "docs/mcp-integration.md", "docs/native-login.md", "docs/plan.md"];
 const failures: string[] = [];
 
 for (const relative of documents) {

@@ -54,6 +54,8 @@ describe("v0.2 CLI contracts", () => {
     expect(help).not.toContain("workflow <");
     expect(experimentalHelp).toContain("workflow <");
     for (const spec of COMMAND_SPECS) if ("help" in spec) expect(experimentalHelp).toContain(spec.help);
+    expect(COMMAND_SPECS.filter((spec) => "internal" in spec).map((spec) => spec.name)).toEqual(["pair", "ask", "coop-proof"]);
+    for (const spec of COMMAND_SPECS) if ("internal" in spec) expect("help" in spec).toBe(false);
     expect(parseCliInvocation(["session"])).toEqual({ kind: "unknown", name: "session" });
     expect(parseCliInvocation(["experimental", "session"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "session")! });
     expect(parseCliInvocation(["mcp", "status", "codex"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "mcp")! });

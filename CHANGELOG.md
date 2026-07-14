@@ -1,16 +1,39 @@
 # Changelog
 
-## Unreleased — private alpha recovery
+## Unreleased
 
-- Publication is blocked. Both package manifests are private and use `0.2.0-alpha.0` until the cross-platform, provider, native-login, clean-clone, and npm release gates are satisfied.
-- The supported recovery focus is bounded read-only execution through one authenticated project daemon. Advanced orchestration remains experimental; the private-alpha Core/operator/proposal control layer was removed.
-- Broker authentication is now the default. Every broker run receives finite request and token ceilings plus a $5 ceiling when trusted pricing exists; unknown pricing requires explicit per-run approval and remains unknown.
+Publication remains blocked. Both package manifests are private at `0.2.0-alpha.0`; the staged Gate A, B, and C evidence in `docs/plan.md` is an acceptance checklist, not a completion claim.
+
+### Fixed
+
+- Added one legacy-aware durable RunResult decoder for the superseded `provider-direct` value. Run-event projections, protected archives, jobs, sessions, and workflow steps now return canonical `native-direct-unrestricted`; protected archive hashes are verified before normalization, historical bytes remain unchanged, and malformed or unknown values still fail closed.
+- Restored daemon and `doctor` startup for upgraded real project state instead of allowing strict current-write validation to brick the daemon on its own pre-rename history.
+- Separated Linux run-tool feature health from containment integrity. The loopback relay round-trip probe remains a fresh CI/test diagnostic but no longer denies unrelated contained runs or caches a transient failure process-wide; actual helper failures remain bounded and explicit.
+- Added the clamped `HEADLESS_RUN_TOOL_TIMEOUT_MS` operability control (1,000–60,000 ms, 5,000 ms default) to the helper and daemon endpoint for slow hosts without weakening OS containment.
+- Corrected the GitHub Actions workflow so macOS and Linux release-gate jobs are instantiated and exercise real platform checks. A workflow run is still evidence to inspect, not a release claim.
+
+### Added
+
+- Promoted `mcp` into the Beta 1 CLI surface. Codex, Claude Code, and Grok installs use their native commands; OpenCode receives a safely merged global configuration outside the checkout, with complete manual fallbacks where automation cannot finish.
+- Added `headless init --lead codex|claude|opencode|grok`, which initializes external state, installs that host's MCP entry, and binds the foreground lead without granting project trust or native egress.
+- Promoted the observer `tui` into the Beta 1 CLI surface and added a read-only Config view for trust, lead generation/connection, budgets, backend readiness, and daemon state. It generates exact root-CLI commands but cannot execute mutations.
+- Added the experimental root-only `budget list|upsert` CLI over the existing bounded durable budget store.
+- Reframed the release plan as cumulative Gate A kernel beta, Gate B orchestration beta, and Gate C writes GA, preserving all later-gate evidence instead of treating orchestration as compatibility baggage.
+
+### Documentation
+
+- Consolidated lead onboarding, MCP host behavior, observer authority, budget examples, upgrade compatibility, run-tool timeout/probe behavior, native-login limits, and staged release language across the README, operator guides, security model, generated command reference, and changelog.
+- Marked `pair`, `ask`/`ask-for-work`/`ask-for-more-work`, and `coop-proof`/`autonomy-coop-proof` as internal audit fixtures; they remain intentionally hidden from operator help.
+
+### Earlier unreleased recovery changes
+
+- Broker authentication is the default. Every broker run receives finite request and token ceilings plus a $5 ceiling when trusted pricing exists; unknown pricing requires explicit per-run approval and remains unknown.
 - Native login requires project trust plus explicit acknowledgement of arbitrary outbound IP access. Network evidence is reported as `native-direct-unrestricted`.
 - Session-backed requests are bound to persisted backend/model/agent/containment/auth/approval values before authorization, pricing, budget reservation, or launch.
 - Headless no longer ingests or replays ContextRelay runtime state. Grok requires a contained compatibility attestation before provider access, and terminal jobs/results precede deterministically reconciled completion events.
 - One durable foreground lead is configured explicitly per project. MCP/plugin attach and heartbeat without owning the provider process; explicit switching rotates the credential generation.
-- The TUI is now a read-only observer over daemon snapshots/events. Prompt, palette, provider lifecycle, mutation, approval, and integration controls were removed.
-- The stable SDK returns `RunResult` directly. Legacy execution shapes, persistent sessions, MCP, broker relay internals, and orchestration remain explicit experimental surfaces.
+- The TUI is a read-only observer over daemon snapshots/events. Prompt, palette, provider lifecycle, mutation, approval, and integration controls were removed.
+- The stable SDK returns `RunResult` directly. Legacy execution shapes, persistent sessions, MCP package internals, broker relay internals, and orchestration remain explicit experimental surfaces.
 - Ledger verification supports mixed SHA/HMAC history and declared key rotation; unknown keys fail closed. Partial trailing bytes can be repaired only through an explicit admin command that verifies the prefix and writes a backup/recovery record.
 
 ## 0.2.0 — draft, never published

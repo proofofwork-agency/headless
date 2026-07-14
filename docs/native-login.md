@@ -2,14 +2,17 @@
 
 Headless defaults to brokered provider access. Native login is an explicit private-alpha opt-in for trusted disposable projects because its outbound destination IPs are unrestricted. Both modes retain Headless's outer operating-system containment, project boundary, durable state, worktree isolation, budgets, and finality gates.
 
+Examples assume the compiled `headless` binary is on `PATH`. From this checkout, run `bun run build` and use `./dist/cli.js` in its place.
+
 ## Project trust
 
 Native login is available only after an authenticated operator grants trust to the daemon's canonical project root. Trust is stored outside the repository and cannot be supplied in a run request. The CLI mirrors the `project.trust.status`, `project.trust.grant`, and `project.trust.revoke` daemon methods:
 
 ```bash
-headless project trust status --cwd /path/to/project
-headless project trust grant --allow-native-direct-unrestricted --cwd /path/to/project
-headless project trust revoke --cwd /path/to/project
+PROJECT="${PROJECT:-$(pwd)}"
+headless project trust status --cwd "$PROJECT"
+headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
+headless project trust revoke --cwd "$PROJECT"
 ```
 
 Plain `grant` records project trust without allowing backend-native credentials. `grant --allow-native-direct-unrestricted` explicitly acknowledges arbitrary outbound IP access and permits backend-native credentials. `grant --allow-bypass` separately permits the `bypass` approval policy. Revocation prevents new native runs and does not let a client redirect the daemon to another root.
@@ -60,7 +63,7 @@ Grok hardening prepares a Headless-owned `config.toml` in its isolated `GROK_HOM
 | `auto` | Resolve from daemon policy | Integrate only after all configured gates |
 | `bypass` | Use the backend's noninteractive approval mode inside containment | Integrate only after all configured gates |
 
-`bypass` is not `--unsafe-no-sandbox`. It does not disable project trust, clean-primary checks, leased worktrees, filesystem or credential scope, budgets, finality, tests, reviews, votes, or merge authority. A tool or integration pause is reported as `APPROVAL_REQUIRED`; unattended clients can inspect and resolve it through `approval.list` and `approval.resolve` if their authenticated scope allows it.
+`bypass` is not `--unsafe-no-sandbox`. It does not disable project trust, clean-primary checks, leased worktrees, filesystem or credential scope, budgets, finality, tests, reviews, votes, or merge authority. A tool or integration pause is reported as `APPROVAL_REQUIRED`; authenticated operators can use the experimental `approval list` and `approval resolve` subcommands when their scope allows it.
 
 ## Experimental native session drivers
 
@@ -95,7 +98,7 @@ Queue overflow returns `QUEUE_CAPACITY_EXCEEDED`; jobs are never silently droppe
 
 Automatic task synthesis is sticky while healthy. `synthesizer: election` instead records attributable, deterministic policy ballots derived from the same authentication, health, capability, rate-limit, priority, load, and failure snapshot. It requires a real multi-agent quorum and strict winner; the evidence explicitly does not claim model-authored consensus. Synthesizer failover never changes the configured foreground lead.
 
-For unattended use, `headless experimental goal run --autonomous --detach <objective>` starts a detached autonomous goal, while goal follow/send/status/cancel/result commands and MCP expose the same daemon state. The idle scanner waits for eight seconds of quiescence, durably deduplicates opportunity fingerprints across restart, and detects failed gates without follow-up, unverified completion, stalled work, unresolved candidates, and idle workers without a model call. `suggest` publishes only a visible lane, `read-only` may verify it within bounds, and `write` may submit a change only through the normal daemon write path. Autonomous writes still require project trust, an `auto` or allowed `bypass` goal, a clean primary checkout, a daemon-leased worktree, budgets, checks, review, finality, and merge authority. Headless reports a dirty primary checkout but never modifies or cleans it automatically.
+For unattended use, `headless experimental goal run --autonomous --detach -- "Analyze the fixture."` starts a detached autonomous goal, while goal follow/send/status/cancel/result commands and MCP expose the same daemon state. The idle scanner waits for eight seconds of quiescence, durably deduplicates opportunity fingerprints across restart, and detects failed gates without follow-up, unverified completion, stalled work, unresolved candidates, and idle workers without a model call. `suggest` publishes only a visible lane, `read-only` may verify it within bounds, and `write` may submit a change only through the normal daemon write path. Autonomous writes still require project trust, an `auto` or allowed `bypass` goal, a clean primary checkout, a daemon-leased worktree, budgets, checks, review, finality, and merge authority. Headless reports a dirty primary checkout but never modifies or cleans it automatically.
 
 Collaborative goals remain read-only unless `--mode write` is explicit. A write goal preserves the candidate first, sends its real job ID, output, diff, file list, and commit evidence to reviewers, requires a structured citation and attributable vote, then integrates through the candidate service. In `ask` mode, each mutating candidate/revision turn first waits on its own `coder_tool` approval; after the gates, the goal pauses again in `waiting_approval` for a distinct merge approval. Resolving that merge approval resumes the same candidate rather than running the coder again.
 
@@ -150,4 +153,4 @@ env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY \
 
 Do not specify a model: the smoke must prove that model omission uses each CLI's configured default. For OpenCode, first ensure the fixed global `~/.config/opencode/opencode.json` or `opencode.jsonc` contains a safe scalar `model`; custom XDG/config overrides are intentionally ignored and do not satisfy this check. Use read-only mode and a bounded prompt. For each backend, retain the CLI version, selected session-driver kind, auth-profile fingerprint (never auth contents), containment mechanism, `native-direct-unrestricted`/`backend-native` evidence, terminal status, usage if reported, and cost attribution. Confirm the project and primary checkout remain unchanged and no API key appeared in output, events, artifacts, or logs.
 
-A missing binary or login may be recorded as an explicit local skip, but it does not satisfy the v0.2 release gate for that backend. Never paste auth files, keychain material, or raw tokens into an issue or test artifact.
+A missing binary or login may be recorded as an explicit local skip, but it does not satisfy Gate A for that backend. Later orchestration and write claims additionally require Gates B and C in [plan.md](./plan.md). Never paste auth files, keychain material, or raw tokens into an issue or test artifact.

@@ -3,11 +3,12 @@ export type CliCommandSpec<Name extends string = string> = {
   aliases?: readonly string[];
   valueFlags?: readonly string[];
   help?: string;
+  internal?: true;
 };
 
 /**
  * The single command/flag catalog used by dispatch, prompt parsing, and help.
- * Hidden compatibility commands omit `help` but remain explicit here.
+ * Hidden internal audit commands omit `help` but remain explicit here.
  */
 export const COMMAND_SPECS = [
   {
@@ -103,9 +104,9 @@ export const COMMAND_SPECS = [
     valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"],
     help: "status [--cwd dir]              Show project and daemon status.",
   },
-  { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "doctor [--cwd dir]              Check backend, containment, and daemon readiness." },
+  { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "doctor [--cwd dir]              Show runtime, backend inventory, daemon state, and containment defaults." },
   { name: "tui", valueFlags: ["--cwd"], help: "tui [--cwd dir]                 Open the read-only observer log and configuration pane." },
-  { name: "pair", valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"] },
+  { name: "pair", valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"], internal: true },
   {
     name: "mcp",
     valueFlags: ["--cwd"],
@@ -120,8 +121,9 @@ export const COMMAND_SPECS = [
     name: "ask",
     aliases: ["ask-for-work", "ask-for-more-work"],
     valueFlags: ["--strength", "--completed", "--session-id", "--cwd", "--extension-config", "--extension-module"],
+    internal: true,
   },
-  { name: "coop-proof", aliases: ["autonomy-coop-proof"], valueFlags: ["--cwd", "--extension-config", "--extension-module"] },
+  { name: "coop-proof", aliases: ["autonomy-coop-proof"], valueFlags: ["--cwd", "--extension-config", "--extension-module"], internal: true },
   { name: "skill", aliases: ["skills"], valueFlags: ["--source", "--backend", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"], help: "skill | skills <list|inspect|import|enable|use|revoke> [options]" },
   { name: "loop", valueFlags: ["--loop-id", "--file", "--mode", "--deadline-ms", "--max-iterations", "--per-iteration-cost-usd", "--total-cost-usd", "--cwd", "--extension-config", "--extension-module"], help: "loop <start|list|status|pause|resume|cancel> --confirm [finite policy options]" },
   { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "ledger repair-tail --confirm [--cwd dir]   Admin-only partial-tail recovery." },
@@ -179,8 +181,8 @@ export function renderHelp(includeExperimental = false) {
     "Required containment is the default. --unsafe-no-sandbox is the only local bypass and is visibly marked in results.",
     "Broker authentication is the default; native login requires explicit project consent to unrestricted provider egress.",
     includeExperimental
-      ? "Experimental compatibility commands require the `headless experimental` namespace and are outside the beta stability promise."
-      : "Run `headless experimental --help` to list compatibility commands outside the beta stability promise.",
+      ? "Experimental commands require the `headless experimental` namespace and are outside the beta stability promise."
+      : "Run `headless experimental --help` to list commands outside the beta stability promise.",
     "Use a literal -- before prompts that begin with a flag.",
   ].join("\n");
 }

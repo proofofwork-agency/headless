@@ -12,7 +12,9 @@ Install Headless, then initialize external project state, install the host integ
 bun install --frozen-lockfile --ignore-scripts
 bun run build
 
-headless init --lead codex --cwd /absolute/project
+PROJECT="$(pwd)"
+HEADLESS=./dist/cli.js
+"$HEADLESS" init --lead codex --cwd "$PROJECT"
 ```
 
 Supported lead names are `codex`, `claude`, `opencode`, and `grok`. The one-shot command does not grant project trust or native egress. Those remain explicit, separate policy decisions.
@@ -20,19 +22,24 @@ Supported lead names are `codex`, `claude`, `opencode`, and `grok`. The one-shot
 The equivalent manual sequence is:
 
 ```bash
-headless init --cwd /absolute/project
-headless mcp install codex --cwd /absolute/project
-headless lead use codex --cwd /absolute/project
+PROJECT="${PROJECT:-$(pwd)}"
+HEADLESS="${HEADLESS:-./dist/cli.js}"
+"$HEADLESS" init --cwd "$PROJECT"
+"$HEADLESS" mcp install codex --cwd "$PROJECT"
+"$HEADLESS" lead use codex --cwd "$PROJECT"
 ```
 
-Codex, Claude Code, and Grok are installed through their native MCP commands. Grok uses user scope. OpenCode is merged into its global `~/.config/opencode/opencode.json`; Headless refuses to place that configuration inside the project checkout. If a native command or config update fails, `headless mcp install` prints a complete command and configuration snippet for manual use.
+Codex, Claude Code, and Grok are installed through their native MCP commands. Grok uses user scope. OpenCode is merged into its global `~/.config/opencode/opencode.json`; Headless refuses to place that configuration inside the project checkout. Claude and Grok failures print their complete native command plus configuration fallback. A Codex failure reports the complete retry command. An OpenCode update failure prints the exact JSON entry to merge manually.
+
+Install is automated for all four hosts. In the current Beta 1 tree, `mcp remove` and `mcp status` invoke Codex directly; for Claude, Grok, and OpenCode they print guidance to use that host's MCP command, configuration file, or UI.
 
 `headless lead status` reports `configured`, `connected`, or `disconnected`. `headless lead release` revokes the current generation. Calling `lead use` again explicitly switches hosts, increments the generation, and invalidates the previous host’s state-changing access. Detached jobs, worker sessions, messages, artifacts, candidates, and ledger history remain intact.
 
 The compiled server command always names the host:
 
 ```bash
-HEADLESS_PROJECT_ROOT=/absolute/project headless-mcp --host codex
+PROJECT="${PROJECT:-$(pwd)}"
+HEADLESS_PROJECT_ROOT="$PROJECT" headless-mcp --host codex
 ```
 
 A generic stdio configuration is:
@@ -57,7 +64,7 @@ The process connects to the owner-only project daemon with a generation-specific
 
 The active lead may create contained runs, goals, workflows, messages, reviews, and finality proposals. It cannot administer credentials, trust, budgets, fleet profiles, or authority grants. Approval and candidate tools are deliberately inspection-only; a lead cannot resolve its own approval or integrate/reject a candidate through this tool surface.
 
-The normal integration path is a human CLI action. A finite grant may permit lead-direct integration only when project, principal, backend, operation, cost, expiry, and iteration limits all match. Root CLI recovery remains attributable in the verified ledger.
+The normal integration path is a human CLI action. A daemon-managed goal may integrate its candidate only when project, principal, backend, operation, cost, expiry, and iteration grant limits all match; this does not add an integration mutation to the lead tool surface. Root CLI recovery remains attributable in the verified ledger.
 
 Automatic worker and synthesizer selection excludes the active lead backend. An explicit backend or per-goal synthesizer selection may still create a separate contained worker using the same provider.
 
@@ -85,7 +92,7 @@ There is no generic `claude/channel` fallback and no process-local queue or ledg
 
 ## Containment and results
 
-Required containment is the default. Broker authentication and `ask` approval remain the default policy. Native login additionally requires project trust and explicit unrestricted-egress acknowledgement. Grok is advertised only for read-only contained work until lifetime write-containment can prove that late-created project control files are denied.
+Required containment is the default. Broker authentication and `ask` approval remain the default policy. Native login additionally requires project trust and explicit unrestricted-egress acknowledgement. Grok remains experimental and read-only until lifetime write-containment can prove that late-created project control files are denied.
 
 `headless_run` returns the complete structured result, including output, diagnostics, usage, cost, containment evidence, diff/commit data, and truncation fields. Its timeout covers queueing, preparation, provider access, and execution. Expected failures remain structured and redacted.
 

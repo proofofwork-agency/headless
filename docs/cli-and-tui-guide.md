@@ -8,6 +8,8 @@ description: Configure one foreground lead, run contained workers, and observe d
 
 > Unreleased Beta 1. Use disposable projects and bounded spend until the release gate is green.
 
+Examples assume the compiled `headless` binary is on `PATH`. From this checkout, run `bun run build` and use `./dist/cli.js` in its place.
+
 ## Operating model
 
 ```text
@@ -47,15 +49,22 @@ External state is keyed by the canonical project path. `init` must not edit the 
 
 ## Configure and attach the foreground lead
 
-For Codex:
+The recommended Codex path initializes external state, installs MCP, then binds the lead:
 
 ```bash
-headless lead use codex --cwd "$PROJECT"
-headless mcp install codex --cwd "$PROJECT"
+headless init --lead codex --cwd "$PROJECT"
 headless lead status --cwd "$PROJECT"
 ```
 
-For OpenCode, use `opencode` in both commands; its packaged plugin attaches with that host identity. Other registered hosts use the same binding contract.
+The equivalent explicit sequence is:
+
+```bash
+headless init --cwd "$PROJECT"
+headless mcp install codex --cwd "$PROJECT"
+headless lead use codex --cwd "$PROJECT"
+```
+
+For OpenCode, use `opencode`; the installer updates its global MCP configuration outside the checkout. Claude and Grok use their native MCP installers. All four hosts use the same generation-bound lead contract.
 
 `lead use` rotates a generation-specific credential. Switching hosts explicitly invalidates the previous generation but preserves all project work. `lead release` removes the binding without cancelling jobs or deleting state. A host that stops heartbeating becomes `disconnected`; Headless does not elect or launch a replacement.
 
@@ -66,7 +75,7 @@ Broker mode is the default:
 ```bash
 headless exec --cwd "$PROJECT" \
   --backend opencode \
-  --model openai/your-model \
+  --model openai/gpt-5 \
   --timeout-ms 60000 \
   --json -- "Inspect the request schema."
 ```
@@ -82,6 +91,15 @@ headless exec --cwd "$PROJECT" --backend codex --auth-mode native-login --json -
 
 Provider login is always performed in the provider’s own externally launched CLI. Headless does not capture credentials or start an interactive login process.
 
+The run-scoped cooperation helper defaults to a 5,000 ms call window. On a slow CI host, set `HEADLESS_RUN_TOOL_TIMEOUT_MS` in the daemon environment before it starts; values are clamped to 1,000–60,000 ms:
+
+```bash
+export HEADLESS_RUN_TOOL_TIMEOUT_MS=15000
+headless doctor --cwd "$PROJECT"
+```
+
+The Linux relay round-trip probe is diagnostic and gates only its dedicated cooperation test. It does not deny unrelated contained runs; a real helper transport failure is reported by that helper call.
+
 ## Durable work and communication
 
 Advanced commands live under `headless experimental`:
@@ -92,8 +110,32 @@ headless experimental fleet health --cwd "$PROJECT"
 headless experimental goal start --cwd "$PROJECT" --detach -- "Analyze the fixture."
 headless experimental goal list --cwd "$PROJECT"
 headless experimental approval list --cwd "$PROJECT"
-headless experimental candidate inspect --cwd "$PROJECT" --candidate-id <id>
+headless experimental budget list --cwd "$PROJECT"
 ```
+
+To inspect a candidate ID returned by a goal or council:
+
+```bash
+: "${CANDIDATE_ID:?set CANDIDATE_ID from the durable goal or council result}"
+headless experimental candidate inspect --cwd "$PROJECT" --candidate-id "$CANDIDATE_ID"
+```
+
+Create or replace a project-wide budget with an explicit future expiry:
+
+```bash
+headless experimental budget upsert \
+  --id project-default \
+  --max-requests 20 \
+  --max-input-tokens 50000 \
+  --max-output-tokens 10000 \
+  --max-cost-usd 10 \
+  --max-concurrency 2 \
+  --max-retries 1 \
+  --expires-at 4102444800000 \
+  --cwd "$PROJECT"
+```
+
+Budget administration remains a root-only experimental CLI operation. The foreground lead and observer TUI can inspect budget state but cannot change it.
 
 Automatic worker selection avoids the active lead backend. To intentionally create a separate worker using the same provider, name that backend or per-goal synthesizer explicitly.
 
@@ -104,10 +146,11 @@ Directed messages, queues, task claims, handoffs, artifacts, votes, and finality
 Candidate integration is human-controlled by default:
 
 ```bash
-headless experimental candidate integrate --cwd "$PROJECT" --candidate-id <id>
+: "${CANDIDATE_ID:?set CANDIDATE_ID from candidate inspect output}"
+headless experimental candidate integrate --cwd "$PROJECT" --candidate-id "$CANDIDATE_ID"
 ```
 
-The lead-facing MCP/plugin surface can list approvals and inspect candidates but cannot resolve or integrate them. A finite grant may enable direct integration only while every project, principal, backend, operation, cost, expiry, and iteration bound matches. Root CLI recovery remains available and attributable.
+The lead-facing MCP/plugin surface can list approvals and inspect candidates but cannot resolve or integrate them. Daemon-managed goal integration may proceed only while every project, principal, backend, operation, cost, expiry, and iteration grant bound matches. Root CLI recovery remains available and attributable.
 
 ## Observer TUI
 
@@ -134,10 +177,12 @@ On first daemon ownership after this private-alpha break, Headless:
 - migrates goal `leaderAgentId` to `synthesizerAgentId`;
 - removes fleet coordinator-selection fields;
 - revokes shared generic integration credentials;
+- decodes the known persisted `provider-direct` RunResult value as `native-direct-unrestricted` at durable read boundaries while keeping new writes/RPC strict;
+- verifies protected archive bytes and hashes before that in-memory normalization and never rewrites those historical bytes;
 - leaves ledger bytes, worktrees, jobs, tasks, artifacts, messages, approvals, candidates, grants, budgets, identifiers, and provenance intact;
 - intentionally leaves any external ContextRelay state untouched.
 
-The migration manifest records that the verified ledger was not modified.
+The private-alpha control-layer migration manifest records that the verified ledger was not modified.
 
 ## Verification
 
@@ -148,3 +193,5 @@ bun run smoke:pack
 ```
 
 Installed-provider smoke is opt-in. OpenCode and Grok release status must not be upgraded without real installed CLI evidence. Grok remains read-only under required containment.
+
+The staged release checklist is cumulative: Gate A covers the kernel and lead onboarding, Gate B orchestration, and Gate C writes. See [plan.md](./plan.md); the checklist is not a completion claim.

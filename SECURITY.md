@@ -10,6 +10,8 @@ The trusted computing base is the local Headless daemon, its configured project/
 
 The daemon canonicalizes one project root at startup and owns an authenticated, owner-only Unix socket. It derives the principal from server configuration and the authenticated connection. Client `cwd`, `source`, actor, coordinator, and ownership claims do not establish authority.
 
+The TUI receives a dedicated observer credential limited to `ping` and `observer.*`. Its Config view is a read-only projection that generates copy-paste root-CLI commands; it does not receive mutation routes or root, lead, budget, trust, approval, or candidate authority.
+
 This is not a boundary against an attacker who already controls the same host user, daemon process, executable `PATH`, Bun/Git installation, operating-system sandbox, or `HEADLESS_LEDGER_KEY`.
 
 ## Required containment
@@ -24,7 +26,7 @@ Required containment is the default.
 - Backend-native restrictions remain defense in depth. OpenCode project configuration/plugins/skills are disabled; Claude receives allowed/disallowed tool restrictions; Codex retains its native sandbox while explicitly disabling project plugins, hooks, apps, browsers, hidden subagents, MCP skill dependencies, and both repository skill roots. Grok is experimental and must pass a contained, network-denied `inspect --json` attestation proving native and Cursor/Claude/Codex compatibility surfaces disabled before any provider access.
 - Windows returns `UNSUPPORTED_PLATFORM` before launch.
 
-Missing/degraded capabilities return `CONTAINMENT_UNAVAILABLE`. Headless does not silently fall back to a weaker sandbox.
+Missing/degraded containment capabilities return `CONTAINMENT_UNAVAILABLE`. Headless does not silently fall back to a weaker sandbox. Cooperation-helper transport health is a separate feature-health signal and is not used as evidence that the OS boundary succeeded or failed.
 
 `--unsafe-no-sandbox` is the only local containment bypass. The `bypass` approval policy is different: it selects a backend's noninteractive tool approval inside the outer sandbox and remains subject to project trust, credential scope, budgets, clean-primary checks, worktree isolation, finality gates, and merge authority. Unsafe results and ledger records are marked, and unsafe mode is prohibited for autonomous jobs and councils.
 
@@ -41,6 +43,8 @@ Built-in broker protocols cover OpenAI, Anthropic, Gemini, and xAI/OpenAI-compat
 Linux runs start a non-dumpable supervisor inside the isolated namespaces when scoped daemon proxies are needed. It listens only on selected worker-loopback ports and forwards to explicitly mounted owner-only broker/run-tool sockets. A pre-spawned helper first unshares its file-descriptor table, then—after the proxies bind—installs no-new-privileges and an architecture-checked, mode-specific seccomp filter before `execve` replaces it with the backend. The filter denies `AF_UNIX`, io_uring setup, ptrace/process-memory access, and pidfd descriptor theft. Because x86-64 and x32 share an audit architecture, the filter explicitly rejects x32 syscall numbers before comparing native syscall IDs; the Linux capability probe repeats that check. Broker mode shares no host network interface; native-direct-unrestricted mode deliberately permits outbound IP connections without exposing host pathname sockets. Missing required supervisor, relay, socket, or filter capabilities fail closed.
 
 Required daemon workers receive a distinct owner-only Unix run-tool socket and an opaque credential held only for that run. The credential is immutable-scoped to project, job, session, principal, expiry, call count, and a fixed non-administrative operation set. Requests cannot supply identity or authority fields, select other jobs/sessions/tasks, start nested runs, alter grants/policy/budgets, or request write roots. Replies and failures are bounded and deeply redacted. Expiry or terminal cleanup closes all connections and removes the socket; unsafe runs do not receive this capability.
+
+On Linux, launch still requires the trusted supervisor, scoped socket, relay runtime, namespace, and seccomp arrangement. The active loopback-to-Unix echo probe is diagnostic-only because scheduler load can make a healthy transport miss its diagnostic latency window; it is not a run-admission gate. A real helper call that cannot connect fails loudly without poisoning later or unrelated runs. `HEADLESS_RUN_TOOL_TIMEOUT_MS` controls both helper and daemon-side idle windows, defaults to 5,000 ms, and is clamped to 1,000–60,000 ms. It must be set in the daemon environment before startup.
 
 ## Writes
 
@@ -59,6 +63,8 @@ Every candidate and integration checkout has an owner-bound durable lease. A for
 Runtime state is outside the repository in an owner-only, project-hashed directory. Ledger v2 daemon-assigns reserved envelope fields and chains entries by sequence, previous hash, and SHA-256 or HMAC-SHA256 metadata. Reads verify incrementally, reject malformed sequences and chain changes, and suppress duplicate event IDs exactly across the full verified prefix. Explicit retries are suppressed before append; the bounded persisted cache is supplemented by an exact in-process prefix index, and semantic projections apply only accepted records. The ledger read projection is digest-bound and size-bounded. Context and task-state reads use maintained, bounded per-principal/session semantic projections tied to the verified ledger head; a mismatch rebuilds from verified history. Full history is loaded only when explicitly requested or when a projection must be rebuilt.
 
 Locks contain PID, process-start identity, host, and nonce. A lock with a verified live owner is not removed, and an active lock from an unverifiable foreign host fails closed. v1 repository ledgers are verified before import; the source is preserved unchanged. A write-ahead `importing` manifest binds the source hash/dimensions and target starting head before the first v2 append. Deterministic import event IDs and reconciled progress make restart after a durable append idempotent; unexpected target activity during an unfinished import fails closed.
+
+Persisted RunResult reads have a narrow schema-evolution decoder for the superseded `provider-direct` network value. It verifies protected archive hashes against the unmodified historical object before returning canonical in-memory `native-direct-unrestricted`, preserves every other field, and does not rewrite archive bytes. New writes and RPC use the strict current schema; malformed records and every other unknown enum value fail closed.
 
 An unkeyed chain detects accidental or unaudited modification but can be recomputed by a state-file writer. HMAC only prevents forgery when `HEADLESS_LEDGER_KEY` is kept outside that writer’s reach. Neither mode detects deletion/rollback of a valid tail without an external head/sequence anchor.
 

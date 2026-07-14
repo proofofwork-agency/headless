@@ -4,7 +4,7 @@
 
 Headless is a local execution boundary for heterogeneous coding CLIs. Its current focus is one reliable path: admit a bounded request, run OpenCode, Claude Code, or Codex inside a contained worker, and return a structured result with attributable usage, cost, policy, and durable event evidence.
 
-Grok remains experimental and is blocked unless a contained `grok inspect --json` attestation proves every project and compatibility surface disabled. Grok writes remain disabled. Writes, persistent worker sessions, the OpenCode plugin, workflows, fleets, councils, autonomy, loops, and skills are experimental compatibility surfaces; they are not part of the first beta stability promise. The stable observer TUI remains read-only even when it displays those experimental projections.
+Grok remains experimental and is blocked unless a contained `grok inspect --json` attestation proves every project and compatibility surface disabled. Grok writes remain disabled. Writes, persistent worker sessions, the OpenCode plugin, workflows, fleets, councils, autonomy, loops, and skills are later-gate product surfaces; they are experimental and are not part of the first beta stability promise. The stable observer TUI remains read-only even when it displays those experimental projections.
 
 ## Current execution boundary
 
@@ -35,7 +35,8 @@ bun run build
 Broker authentication is the default. Supply the provider credential to the daemon environment and select a provider-qualified model:
 
 ```bash
-OPENAI_API_KEY=... ./dist/cli.js exec \
+: "${OPENAI_API_KEY:?export OPENAI_API_KEY before running broker mode}"
+./dist/cli.js exec \
   --backend opencode \
   --model openai/gpt-5 \
   --json \
@@ -64,18 +65,20 @@ Native results report `network: "native-direct-unrestricted"`. This is truthful 
 
 ## Beta 1 commands
 
-Default help exposes only the recovery-critical surface:
+Default help exposes only the Gate A kernel surface:
 
 - `exec` / `run` — one bounded execution.
 - `lead use|status|release` — bind the externally launched foreground host.
-- `doctor` / `status` — daemon and backend readiness.
+- `doctor` / `status` — runtime/backend inventory and durable daemon state.
 - `project trust status|grant|revoke` — project and native-egress consent.
 - `daemon serve|status` — project-daemon lifecycle.
 - `init [--lead <host>]` — initialize external state and optionally configure a foreground lead without editing the checkout.
-- `mcp install|remove|status|serve` — manage the published foreground-lead MCP server.
+- `mcp install|remove|status|serve` — manage the compiled foreground-lead MCP server.
 - `tui` — open the read-only durable log and configuration pane.
 
-Advanced compatibility commands require the explicit `headless experimental` namespace. List them with `headless experimental --help`; their contracts may change or be removed before beta. The [generated command reference](./docs/command-reference.md) is checked against the command registry.
+Commands outside that surface require the explicit `headless experimental` namespace. List them with `headless experimental --help`; their contracts may change before their own release gate. The [generated command reference](./docs/command-reference.md) is checked against the command registry. Internal audit fixtures are intentionally hidden from help and are not operator commands.
+
+Release staging is cumulative: Gate A publishes the contained execution kernel and lead onboarding, Gate B publishes orchestration, and Gate C publishes gated writes. The checklist in [docs/plan.md](./docs/plan.md) is an acceptance plan, not a claim that any gate is already green.
 
 ## Backend status
 
@@ -103,16 +106,18 @@ An unavailable or incompatible backend fails before provider access. Session-bac
 
 Every backend is treated as arbitrary code. Output and events are bounded and redacted. Broker leases are run-scoped and enforce aggregate request/input/output quotas across concurrent requests. A terminal job/result is persisted before completion events; startup reconciliation repairs missing deterministic terminal events without rerunning the backend.
 
+Required workers may receive a run-scoped cooperation helper. On Linux its loopback-to-Unix round-trip probe is diagnostic only: a transient cooperation failure does not weaken containment or deny an otherwise valid run. Helper calls still fail loudly and remain bounded. `HEADLESS_RUN_TOOL_TIMEOUT_MS` sets the daemon/helper call window before daemon startup; it defaults to 5,000 ms and is clamped to 1,000–60,000 ms.
+
 Headless owns its ledger and communication state. It does not read, import, or depend on a ContextRelay runtime.
 
 ## Writes and experimental orchestration
 
 Write mode is not part of the read-only beta gate. Its intended invariant is that ambiguity never mutates the primary checkout: a clean primary is required, work occurs in a leased worktree, bounded secret/diff checks and configured gates run, and only an authorized integration decision may advance primary.
 
-The daemon still contains experimental worker sessions, plugin integrations, fleets, goals, workflows, councils, autonomy, loops, and skills. The stable TUI is observer-only: it reads snapshots/events, displays durable logs and configuration state, and generates root-CLI commands; it cannot dispatch work, resolve approvals, integrate candidates, mutate policy, or control provider processes.
+The daemon already contains experimental worker sessions, plugin integrations, fleets, goals, workflows, councils, autonomy, loops, and skills for the later gates. The stable TUI is observer-only: it reads snapshots/events, displays durable logs and configuration state, and generates root-CLI commands; it cannot dispatch work, resolve approvals, integrate candidates, mutate policy, or control provider processes.
 
 ```bash
-headless tui --cwd .
+./dist/cli.js tui --cwd .
 ```
 
 The Config view shows project trust, foreground lead binding, budgets, backend readiness, and daemon state. Its commands are copy-paste guidance labeled “run from your shell”; the TUI never executes them and never holds root authority.
@@ -120,14 +125,14 @@ The Config view shows project trust, foreground lead binding, budgets, backend r
 One durable foreground lead may be configured per project:
 
 ```bash
-headless init --lead codex --cwd .
+./dist/cli.js init --lead codex --cwd .
 ```
 
-This one-shot path initializes external state, installs the host's global or project-associated MCP registration, then binds the foreground lead. It does not grant project trust or native egress. The equivalent explicit sequence is `headless init --cwd .`, `headless mcp install codex --cwd .`, then `headless lead use codex --cwd .`.
+This one-shot path initializes external state, installs the host's global or project-associated MCP registration, then binds the foreground lead. It does not grant project trust or native egress. The equivalent explicit sequence is `./dist/cli.js init --cwd .`, `./dist/cli.js mcp install codex --cwd .`, then `./dist/cli.js lead use codex --cwd .`.
 
 The provider host remains an externally launched, visible process. Its MCP or plugin attaches and heartbeats; Headless never launches, injects into, elects, or kills the foreground lead. Explicit switching rotates the credential generation and invalidates state-changing access from the previous host without deleting jobs, sessions, messages, artifacts, or ledger history. Automatic worker routing avoids the active lead backend; an explicit backend or synthesizer selection may still create a separate headless worker using that provider.
 
-Human CLI integration is the default. Lead tools may inspect approvals and candidates but cannot resolve or integrate them themselves unless a finite authority grant matches the project, backend, operation, cost, expiry, and iteration bounds. The root CLI retains credential, trust, budget, recovery, and emergency integration authority.
+Human CLI integration is the default. Lead tools may inspect approvals and candidates but cannot resolve or directly integrate them. Daemon-managed goal integration may proceed only when a finite authority grant matches the project, principal, backend, operation, cost, expiry, and iteration bounds. The root CLI retains credential, trust, budget, recovery, and emergency integration authority.
 
 ## State and public API
 
@@ -136,6 +141,8 @@ State lives outside the repository, keyed by `sha256(canonical project root)`:
 - macOS: `~/Library/Application Support/Headless/projects/<project-id>`
 - Linux: `${XDG_STATE_HOME:-~/.local/state}/headless/projects/<project-id>`
 - Tests: set `HEADLESS_STATE_HOME` and `HEADLESS_RUNTIME_HOME` to disposable directories.
+
+Durable reads have an explicit compatibility boundary. State written before the network-evidence rename may contain exactly `provider-direct`; Headless verifies protected archive bytes and hashes before decoding that value as the canonical in-memory `native-direct-unrestricted`. New writes and RPC remain strict, unknown values fail closed, and compatibility reads do not rewrite historical archive bytes.
 
 The root library surface contains `exec`, the `RunRequest`/`RunResult`/`RunEvent` types, backend identifiers/metadata, and structured errors. The authenticated daemon client remains available through `./daemon`. Runtime schemas, MCP, provider relay code, and orchestration internals live under `./experimental` subpaths.
 
@@ -169,9 +176,9 @@ bun run build
 bun run smoke:pack
 ```
 
-Do not infer release readiness from a stale test count. The gate requires zero failures/errors on macOS and Linux, clean-clone build and tarball installation, protected broker smoke for OpenAI/Anthropic/Gemini/xAI, installed native-login smoke for each advertised backend/version, operational GitHub Actions jobs, and two consecutive clean commits. Publication is additionally blocked until both npm packages resolve through `npm view` after an authorized `0.2.0-beta.1` release.
+Do not infer release readiness from a stale test count. Gate A requires zero failures/errors on macOS and Linux, clean-clone build and tarball installation, protected broker smoke for OpenAI/Anthropic/Gemini/xAI, installed native-login smoke for each advertised backend/version, and operational GitHub Actions jobs. Gates B and C add their recorded orchestration and per-backend write evidence. Publication remains blocked until the applicable gate is complete and the packages resolve through `npm view` after an authorized release.
 
-See [native authentication](./docs/native-login.md), [MCP development integration](./docs/mcp-integration.md), [security limits](./SECURITY.md), and the [current plan](./docs/plan.md).
+See [native authentication](./docs/native-login.md), [foreground-lead MCP integration](./docs/mcp-integration.md), [security limits](./SECURITY.md), and the [current plan](./docs/plan.md).
 
 ## License
 
