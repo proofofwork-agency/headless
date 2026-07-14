@@ -55,6 +55,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(completed.result?.output).not.toMatch(/hlt_[A-Za-z0-9_-]{40,}/);
     expect(preparedPrompt).toContain("HEADLESS AUTHENTICATED RUN TOOLS");
     expect(preparedPrompt).toContain("headless-run-tool note");
+    expect(preparedPrompt).toContain("helper fails loudly");
     expect(readFileSync(daemon.state.ledgerPath, "utf8")).toContain("verified from contained worker");
     expect(readdirSync(daemon.state.daemonRuntimeDir).filter((name) => name.endsWith(".tool.sock"))).toEqual([]);
 

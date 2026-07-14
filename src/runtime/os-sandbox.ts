@@ -29,7 +29,6 @@ const LINUX_RUN_TOOL_RELAY_READY_TIMEOUT_MS = 10_000;
 const LINUX_RUN_TOOL_RELAY_ECHO_TIMEOUT_MS = 15_000;
 const LINUX_RUN_TOOL_RELAY_PROCESS_TIMEOUT_MS = 30_000;
 const LINUX_RUN_TOOL_RELAY_SERVER_TIMEOUT_MS = 45_000;
-let linuxRunToolRelayProbe: Readonly<SandboxProbeResult> | null = null;
 
 export interface DarwinReadSandboxProfileOptions {
   workdir: string;
@@ -924,20 +923,18 @@ export function probeLinuxBwrap(): SandboxProbeResult {
  * supervisor, which forwards to the one read-only-bound daemon socket. Some
  * hosts admit bwrap while rejecting that later supervisor connection, so the
  * generic write/seccomp probe is not sufficient evidence for run tools.
+ * This is a fresh diagnostic, not a containment or run-admission gate.
  */
 export function probeLinuxRunToolRelay(): SandboxProbeResult {
-  if (!linuxRunToolRelayProbe) {
-    try {
-      linuxRunToolRelayProbe = Object.freeze(runLinuxRunToolRelayProbe());
-    } catch (error) {
-      const detail = (error instanceof Error ? error.message : String(error)).slice(0, 300);
-      linuxRunToolRelayProbe = Object.freeze({
-        ok: false,
-        reason: `Linux run-tool relay probe failed unexpectedly: ${detail}`,
-      });
-    }
+  try {
+    return runLinuxRunToolRelayProbe();
+  } catch (error) {
+    const detail = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+    return {
+      ok: false,
+      reason: `Linux run-tool relay probe failed unexpectedly: ${detail}`,
+    };
   }
-  return { ...linuxRunToolRelayProbe };
 }
 
 function runLinuxRunToolRelayProbe(): SandboxProbeResult {
@@ -981,13 +978,13 @@ function runLinuxRunToolRelayProbe(): SandboxProbeResult {
       "const {createConnection}=require('node:net');",
       `const expected=${JSON.stringify(nonce)};`,
       "const host=process.env.HEADLESS_RUN_TOOL_HOST;const port=Number(process.env.HEADLESS_RUN_TOOL_PORT);",
-      "if(host!=='127.0.0.1'||!Number.isSafeInteger(port))process.exit(79);",
-      "const socket=createConnection({host,port});let buffer='';socket.setEncoding('utf8');",
-      `const timeout=setTimeout(()=>{socket.destroy();process.exit(80);},${LINUX_RUN_TOOL_RELAY_ECHO_TIMEOUT_MS});`,
-      "socket.once('connect',()=>socket.write(expected+'\\n'));",
-      "socket.on('data',(chunk)=>{buffer+=chunk;const newline=buffer.indexOf('\\n');if(newline<0)return;clearTimeout(timeout);socket.end();process.exit(buffer.slice(0,newline)===expected?0:81);});",
-      "socket.once('error',()=>{clearTimeout(timeout);process.exit(82);});",
-      "socket.once('close',()=>{if(buffer.indexOf('\\n')<0){clearTimeout(timeout);process.exit(83);}});",
+      "if(host!=='127.0.0.1'||!Number.isSafeInteger(port)){console.error('stage=configuration invalid relay endpoint');process.exit(79);}",
+      "let stage='connect';const socket=createConnection({host,port});let buffer='';socket.setEncoding('utf8');",
+      `const timeout=setTimeout(()=>{console.error('stage='+stage+' timeout after ${LINUX_RUN_TOOL_RELAY_ECHO_TIMEOUT_MS}ms');socket.destroy();process.exit(80);},${LINUX_RUN_TOOL_RELAY_ECHO_TIMEOUT_MS});`,
+      "socket.once('connect',()=>{stage='echo';socket.write(expected+'\\n');});",
+      "socket.on('data',(chunk)=>{buffer+=chunk;const newline=buffer.indexOf('\\n');if(newline<0)return;clearTimeout(timeout);socket.end();const actual=buffer.slice(0,newline);if(actual!==expected)console.error('stage=echo foreign response');process.exit(actual===expected?0:81);});",
+      "socket.once('error',(error)=>{clearTimeout(timeout);console.error('stage='+stage+' error '+(error.code||error.message));process.exit(82);});",
+      "socket.once('close',()=>{if(buffer.indexOf('\\n')<0){clearTimeout(timeout);console.error('stage='+stage+' closed before response');process.exit(83);}});",
     ].join("");
     const result = spawnSync(BWRAP, [
       ...buildLinuxReadOnlyArgs({

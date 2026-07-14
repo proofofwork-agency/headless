@@ -14,7 +14,6 @@ import {
   probeDarwinSandboxWriteDenial,
   probeHardlinkRisk,
   probeLinuxBwrap,
-  probeLinuxRunToolRelay,
   sandboxCredentialRoots,
   writeDarwinReadOnlySandboxProfile,
   writeDarwinWriteSandboxProfile,
@@ -53,7 +52,6 @@ type ExecutionSupervisorState = {
   activeProcesses: Set<Subprocess>;
   darwinProbe: ReturnType<typeof probeDarwinSandboxWriteDenial> | null;
   linuxProbe: ReturnType<typeof probeLinuxBwrap> | null;
-  linuxRunToolProbe: ReturnType<typeof probeLinuxRunToolRelay> | null;
 };
 
 type SandboxWrap = {
@@ -87,7 +85,6 @@ export class ExecutionSupervisor {
     activeProcesses: new Set(),
     darwinProbe: null,
     linuxProbe: null,
-    linuxRunToolProbe: null,
   };
 
   execute(options: InternalRunOptions): Promise<ExecResult> {
@@ -685,22 +682,6 @@ function wrapWithSandboxWithoutState(
     const linuxProbe = supervisor?.linuxProbe?.ok ? supervisor.linuxProbe : probeLinuxBwrap();
     if (supervisor) supervisor.linuxProbe = linuxProbe;
     if (!linuxProbe.ok) return { cmd: command, cleanup: noop, sandboxed: false, reason: linuxProbe.reason, network: "denied", credentialAccess };
-    if (options.runTool) {
-      const runToolProbe = supervisor?.linuxRunToolProbe?.ok
-        ? supervisor.linuxRunToolProbe
-        : probeLinuxRunToolRelay();
-      if (supervisor) supervisor.linuxRunToolProbe = runToolProbe;
-      if (!runToolProbe.ok) {
-        return {
-          cmd: command,
-          cleanup: noop,
-          sandboxed: false,
-          reason: runToolProbe.reason,
-          network: "denied",
-          credentialAccess,
-        };
-      }
-    }
     const relay = resolveLinuxRelayEntry();
     const bun = resolveExecutable("bun", worker.env.PATH);
     if (!relay || !bun) return { cmd: command, cleanup: noop, sandboxed: false, reason: "Linux containment supervisor runtime is unavailable", network: "denied", credentialAccess };

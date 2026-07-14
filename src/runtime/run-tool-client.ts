@@ -43,7 +43,7 @@ export function installRunToolClient(worker: WorkerEnvironment, access: RunToolW
 export function withRunToolInstructions(prompt: string) {
   return [
     "HEADLESS AUTHENTICATED RUN TOOLS",
-    "A short-lived, run-scoped cooperation endpoint is available only during this worker run.",
+    "A short-lived, run-scoped cooperation endpoint is provisioned only during this worker run.",
     "Call it through the protected helper: headless-run-tool <operation> '<json-params>'.",
     "Allowed operations: context, task_status, note, artifact, propose_final, message_send, messages_pull, ask_for_more_work, ask_for_backup.",
     "Examples:",
@@ -52,6 +52,7 @@ export function withRunToolInstructions(prompt: string) {
     `  headless-run-tool ask_for_backup '{"reason":"Concrete blocker and required capability."}'`,
     `  headless-run-tool ask_for_more_work '{"completed":"What was completed and verified."}'`,
     "The helper authenticates from protected environment variables. Never print those variables or copy their values.",
+    "If transport is unavailable, the helper fails loudly; report that cooperation failure without bypassing containment.",
     "The endpoint cannot start runs, change policy or budgets, grant authority, choose a filesystem root, merge writes, or administer credentials.",
     "",
     "ORIGINAL REQUEST",

@@ -35,6 +35,14 @@ describe("backend architecture boundary", () => {
     expect(sources).not.toMatch(/(?:interface\s+Adapter\b|type\s+BackendAdapter\b)/);
     expect(sources).toContain("export type BackendDefinition =");
   });
+
+  test("keeps run-tool transport probing diagnostic-only", () => {
+    const runner = readFileSync(resolve(root, "src/runner/simple.ts"), "utf8");
+    const diagnostics = readFileSync(resolve(root, "src/runtime/os-sandbox.ts"), "utf8");
+    expect(runner).not.toContain("probeLinuxRunToolRelay");
+    expect(diagnostics).toContain("export function probeLinuxRunToolRelay()");
+    expect(diagnostics).not.toContain("let linuxRunToolRelayProbe");
+  });
 });
 
 function sourceFiles() {
