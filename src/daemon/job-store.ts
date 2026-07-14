@@ -6,6 +6,7 @@ import { RunRequestSchema, type RunResult, type SerializedRunRequest } from "../
 import { atomicWriteFile } from "../runtime/atomic-write";
 import { ensureOwnerOnlyDirectory, ensureOwnerOnlyFile } from "../runtime/project-state";
 import { safeJsonParse } from "../runtime/safe-json";
+import { decodePersistedRunResult } from "../runtime/persisted-run-result";
 
 const terminalStates = new Set<Job["state"]>(["succeeded", "failed", "timed_out", "cancelled", "blocked"]);
 const transitions: Record<Job["state"], Job["state"][]> = {
@@ -72,7 +73,7 @@ export class JobStore {
   get(id: string) {
     const path = this.jobPath(id);
     if (!existsSync(path)) return null;
-    return JobSchema.parse(safeJsonParse(readFileSync(path, "utf8")));
+    return parsePersistedJob(safeJsonParse(readFileSync(path, "utf8")));
   }
 
   request(id: string) {
@@ -84,7 +85,7 @@ export class JobStore {
   list() {
     return readdirSync(this.jobsDir)
       .filter((name) => name.endsWith(".job.json"))
-      .map((name) => JobSchema.parse(safeJsonParse(readFileSync(join(this.jobsDir, name), "utf8"))))
+      .map((name) => parsePersistedJob(safeJsonParse(readFileSync(join(this.jobsDir, name), "utf8"))))
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
@@ -214,6 +215,18 @@ export class JobStore {
   private requestPath(id: string) {
     return join(this.jobsDir, `${safeId(id)}.request.json`);
   }
+}
+
+function parsePersistedJob(value: unknown) {
+  if (!isRecord(value)) return JobSchema.parse(value);
+  return JobSchema.parse({
+    ...value,
+    result: value.result === null ? null : decodePersistedRunResult(value.result),
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function safeId(id: string) {

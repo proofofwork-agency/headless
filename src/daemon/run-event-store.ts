@@ -4,7 +4,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { IdentifierSchema } from "../contracts/common";
-import { RunEventSchema, type RunEvent } from "../contracts/run";
+import { RunEventSchema, type RunEvent, type RunResult } from "../contracts/run";
 import {
   buildRunEvent,
   DEFAULT_MAX_RUN_EVENT_BYTES,
@@ -15,6 +15,7 @@ import { readOwnerOnlyJson, writeOwnerOnlyJson } from "../runtime/owner-json";
 import { ensureOwnerOnlyDirectory, ensureOwnerOnlyFile } from "../runtime/project-state";
 import { HeadlessError } from "../runtime/headless-error";
 import { atomicAppendFile } from "../runtime/atomic-write";
+import { decodePersistedRunEvent } from "../runtime/persisted-run-result";
 
 export const DEFAULT_MAX_RUN_EVENT_STORE_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_MAX_RETAINED_RUN_EVENTS = 4_000;
@@ -26,6 +27,14 @@ const RunEventRecordSchema = z.object({
   event: RunEventSchema,
 }).strict();
 
+const PersistedRunEventRecordSchema = z.object({
+  cursor: SafeIntegerSchema.positive(),
+  event: z.record(z.unknown()),
+}).strict().transform((record) => RunEventRecordSchema.parse({
+  ...record,
+  event: decodePersistedRunEvent(record.event),
+}));
+
 const ProtectedRunEventRecordSchema = z.object({
   version: z.literal(1),
   cursor: SafeIntegerSchema.positive(),
@@ -33,6 +42,10 @@ const ProtectedRunEventRecordSchema = z.object({
   previousHash: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   hash: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
+
+const PersistedProtectedRunEventRecordSchema = ProtectedRunEventRecordSchema.extend({
+  event: z.record(z.unknown()),
+});
 
 type ProtectedRunEventRecord = z.infer<typeof ProtectedRunEventRecordSchema>;
 
@@ -47,6 +60,10 @@ const RunEventStoreStateSchema = z.object({
   streams: z.record(StreamStateSchema),
   records: z.array(RunEventRecordSchema),
 }).strict();
+
+const PersistedRunEventStoreStateSchema = RunEventStoreStateSchema.extend({
+  records: z.array(PersistedRunEventRecordSchema),
+});
 
 export type RunEventRecord = z.infer<typeof RunEventRecordSchema>;
 export type RunEventSnapshot = {
@@ -108,7 +125,7 @@ export class RunEventStore {
     this.now = options.now ?? Date.now;
     this.emitter.setMaxListeners(256);
     ensureOwnerOnlyDirectory(dirname(path));
-    const existing = readOwnerOnlyJson(path, RunEventStoreStateSchema);
+    const existing = readOwnerOnlyJson(path, PersistedRunEventStoreStateSchema);
     this.state = validateState(existing ?? emptyState());
     this.protectedArchive = new ProtectedRunEventArchive(
       `${path}.protected`,
@@ -131,6 +148,31 @@ export class RunEventStore {
   }
 
   append(context: { jobId: string; sessionId?: string | null }, input: RunEventInput): RunEventRecord {
+    return this.appendTrusted(context, input);
+  }
+
+  reconcileTerminal(
+    context: { jobId: string; sessionId?: string | null },
+    result: RunResult,
+    timestamp = this.now(),
+  ) {
+    const events = [
+      { id: terminalEventId(context.jobId, "lifecycle"), input: { kind: "lifecycle", state: result.status } as RunEventInput },
+      { id: terminalEventId(context.jobId, "completion"), input: { kind: "completion", result } as RunEventInput },
+    ];
+    const records: RunEventRecord[] = [];
+    for (const event of events) {
+      if (this.hasEventId(event.id)) continue;
+      records.push(this.appendTrusted(context, event.input, { eventId: event.id, timestamp }));
+    }
+    return records;
+  }
+
+  private appendTrusted(
+    context: { jobId: string; sessionId?: string | null },
+    input: RunEventInput,
+    envelope: { eventId?: string; timestamp?: number } = {},
+  ): RunEventRecord {
     if (this.protectedArchiveFailure) {
       throw new HeadlessError("INTERNAL_ERROR", `Protected run event archive is unavailable: ${this.protectedArchiveFailure.message}`);
     }
@@ -145,7 +187,13 @@ export class RunEventStore {
     if (sequence >= Number.MAX_SAFE_INTEGER) throw new Error("Run event sequence space is exhausted.");
     const cursor = this.state.nextCursor;
     const event = buildRunEvent(
-      { jobId, sessionId, sequence, timestamp: checkedTimestamp(this.now()) },
+      {
+        jobId,
+        sessionId,
+        sequence,
+        timestamp: checkedTimestamp(envelope.timestamp ?? this.now()),
+        eventId: envelope.eventId,
+      },
       input,
       this.builder,
     );
@@ -173,6 +221,11 @@ export class RunEventStore {
     }
     this.emitter.emit("append", record);
     return record;
+  }
+
+  private hasEventId(eventId: string) {
+    return this.state.records.some((record) => record.event.eventId === eventId)
+      || this.protectedArchive.hasEventId(eventId);
   }
 
   /** Bounded evidence access; ordinary subscribers continue using snapshot(). */
@@ -327,6 +380,7 @@ class ProtectedRunEventArchive {
   private segmentBytes = 0;
   private lastCursor = 0;
   private lastHash: string | null = null;
+  private readonly eventIds = new Set<string>();
 
   constructor(
     private readonly directory: string,
@@ -336,7 +390,7 @@ class ProtectedRunEventArchive {
   ) {
     ensureOwnerOnlyDirectory(directory);
     const targetCursors = new Set(projected.map((record) => record.cursor));
-    const scan = this.scan(targetCursors);
+    const scan = this.scan(targetCursors, (record) => this.eventIds.add(record.event.eventId));
     this.segment = scan.lastSegment;
     this.segmentBytes = scan.lastSegmentBytes;
     this.lastCursor = scan.lastCursor;
@@ -382,6 +436,7 @@ class ProtectedRunEventArchive {
     this.segmentBytes += bytes;
     this.lastCursor = archived.cursor;
     this.lastHash = archived.hash;
+    this.eventIds.add(archived.event.eventId);
   }
 
   snapshot(afterCursor: number, limit: number) {
@@ -399,6 +454,10 @@ class ProtectedRunEventArchive {
       latestCursor: this.lastCursor,
       hasMore,
     };
+  }
+
+  hasEventId(eventId: string) {
+    return this.eventIds.has(eventId);
   }
 
   private scan(targetCursors: Set<number>, visitor?: (record: ProtectedRunEventRecord) => void) {
@@ -427,14 +486,18 @@ class ProtectedRunEventArchive {
         } catch (error) {
           throw new Error(`Invalid protected run event JSON in ${file.name}:${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
         }
-        const record = ProtectedRunEventRecordSchema.parse(parsed);
-        if (record.cursor <= previousCursor) throw new Error(`Protected run event cursor order is invalid at ${record.cursor}.`);
-        if (record.previousHash !== previousHash) throw new Error(`Protected run event hash chain breaks at cursor ${record.cursor}.`);
-        const { hash, ...withoutHash } = record;
-        if (hash !== protectedRecordHash(withoutHash)) throw new Error(`Protected run event hash mismatch at cursor ${record.cursor}.`);
-        previousCursor = record.cursor;
-        previousHash = record.hash;
-        if (targetCursors.has(record.cursor)) foundTargets.add(record.cursor);
+        const persisted = PersistedProtectedRunEventRecordSchema.parse(parsed);
+        if (persisted.cursor <= previousCursor) throw new Error(`Protected run event cursor order is invalid at ${persisted.cursor}.`);
+        if (persisted.previousHash !== previousHash) throw new Error(`Protected run event hash chain breaks at cursor ${persisted.cursor}.`);
+        const { hash, ...withoutHash } = persisted;
+        if (hash !== protectedRecordHash(withoutHash)) throw new Error(`Protected run event hash mismatch at cursor ${persisted.cursor}.`);
+        const record = ProtectedRunEventRecordSchema.parse({
+          ...persisted,
+          event: decodePersistedRunEvent(persisted.event),
+        });
+        previousCursor = persisted.cursor;
+        previousHash = persisted.hash;
+        if (targetCursors.has(persisted.cursor)) foundTargets.add(persisted.cursor);
         visitor?.(record);
       }
       lastSegmentBytes = size;
@@ -453,6 +516,14 @@ class ProtectedRunEventArchive {
   }
 }
 
+export function terminalEventId(jobId: string, kind: "lifecycle" | "completion") {
+  const hex = createHash("sha256").update(`headless-terminal\0${jobId}\0${kind}`).digest("hex").slice(0, 32).split("");
+  hex[12] = "5";
+  hex[16] = "8";
+  const value = hex.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
 function protectedSegmentFiles(directory: string) {
   if (!existsSync(directory)) return [];
   return readdirSync(directory)
@@ -464,7 +535,7 @@ function protectedSegmentFiles(directory: string) {
     .sort((left, right) => left.segment - right.segment);
 }
 
-function protectedRecordHash(record: Omit<ProtectedRunEventRecord, "hash">) {
+function protectedRecordHash(record: { version: 1; cursor: number; event: unknown; previousHash: string | null }) {
   return createHash("sha256").update(JSON.stringify(record)).digest("hex");
 }
 

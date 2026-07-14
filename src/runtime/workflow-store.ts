@@ -6,6 +6,7 @@ import type { ProjectStatePaths } from "./project-state";
 import { atomicWriteFile } from "./atomic-write";
 import { ensureOwnerOnlyDirectory, ensureOwnerOnlyFile } from "./project-state";
 import { safeJsonParse } from "./safe-json";
+import { decodePersistedRunResult } from "./persisted-run-result";
 
 export type WorkflowStepInput = Pick<WorkflowStep, "id" | "kind" | "backend" | "prompt" | "mode" | "authMode" | "approvalPolicy" | "model" | "agent" | "timeoutMs" | "dependsOn" | "maxAttempts">;
 
@@ -60,7 +61,7 @@ export class WorkflowStore {
     const path = this.path(id);
     if (!existsSync(path)) return null;
     ensureOwnerOnlyFile(path);
-    const workflow = WorkflowSchema.parse(safeJsonParse(readFileSync(path, "utf8")));
+    const workflow = parsePersistedWorkflow(safeJsonParse(readFileSync(path, "utf8")));
     if (workflow.projectId !== this.paths.projectId) throw new Error("Workflow project mismatch.");
     return workflow;
   }
@@ -95,4 +96,22 @@ export class WorkflowStore {
     if (!/^[a-zA-Z0-9_-]{1,160}$/.test(id)) throw new Error("Invalid workflow id.");
     return join(this.directory, `${id}.json`);
   }
+}
+
+function parsePersistedWorkflow(value: unknown) {
+  if (!isRecord(value) || !Array.isArray(value.steps)) return WorkflowSchema.parse(value);
+  return WorkflowSchema.parse({
+    ...value,
+    steps: value.steps.map((step) => {
+      if (!isRecord(step)) return step;
+      return {
+        ...step,
+        result: step.result === null ? null : decodePersistedRunResult(step.result),
+      };
+    }),
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

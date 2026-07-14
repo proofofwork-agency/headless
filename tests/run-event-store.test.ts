@@ -215,6 +215,21 @@ describe("durable run event store", () => {
     expect(() => new RunEventStore(fixture.path, { compactOnOpen: false }))
       .toThrow("cursor metadata");
   });
+
+  test("reconciles terminal lifecycle and completion events idempotently across restart", () => {
+    const fixture = createStore();
+    const result = failedResult("terminal-recovery");
+    const first = fixture.store.reconcileTerminal({ jobId: "terminal-job", sessionId: "terminal-session" }, result, 123);
+    expect(first).toHaveLength(2);
+    expect(first.map((record) => record.event.kind)).toEqual(["lifecycle", "completion"]);
+    expect(first.every((record) => record.event.timestamp === 123)).toBe(true);
+    expect(fixture.store.reconcileTerminal({ jobId: "terminal-job", sessionId: "terminal-session" }, result, 456)).toEqual([]);
+
+    const eventIds = first.map((record) => record.event.eventId);
+    const reopened = new RunEventStore(fixture.path, { createId: fixture.createId });
+    expect(reopened.reconcileTerminal({ jobId: "terminal-job", sessionId: "terminal-session" }, result, 789)).toEqual([]);
+    expect(reopened.snapshot({ jobId: "terminal-job" }).events.map((event) => event.eventId)).toEqual(eventIds);
+  });
 });
 
 function createStore(options: ConstructorParameters<typeof RunEventStore>[1] = {}) {

@@ -8,6 +8,7 @@ import { NativeSessionMetadataSchema, type NativeSessionMetadata } from "../cont
 import { redactAndTruncate } from "./redaction";
 import { ensureOwnerOnlyDirectory, type ProjectStatePaths } from "./project-state";
 import { readOwnerOnlyJson, writeOwnerOnlyJson } from "./owner-json";
+import { decodePersistedRunResult } from "./persisted-run-result";
 
 const MAX_TRANSCRIPT_BYTES = 1_000_000;
 const MAX_REPLAY_BYTES = 200_000;
@@ -167,7 +168,7 @@ export class PersistentSessionStore {
   private read(id: string) {
     const path = this.path(id);
     if (!existsSync(path)) return null;
-    return readOwnerOnlyJson(path, SessionFileSchema);
+    return readOwnerOnlyJson(path, { parse: parsePersistedSessionFile });
   }
 
   private write(value: z.infer<typeof SessionFileSchema>) {
@@ -179,6 +180,21 @@ export class PersistentSessionStore {
     if (!/^[a-zA-Z0-9-]{1,160}$/.test(id)) throw new Error("Invalid session id.");
     return join(this.paths.sessionsDir, `${id}.json`);
   }
+}
+
+function parsePersistedSessionFile(value: unknown) {
+  if (!isRecord(value) || !isRecord(value.session)) return SessionFileSchema.parse(value);
+  return SessionFileSchema.parse({
+    ...value,
+    session: {
+      ...value.session,
+      result: value.session.result === null ? null : decodePersistedRunResult(value.session.result),
+    },
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function transcriptBytes(entries: TranscriptEntry[]) {
