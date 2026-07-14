@@ -23,11 +23,18 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    env:
-      HEADLESS_STATE_HOME: ${{ runner.temp }}/headless-state
-      HEADLESS_REAL_NETWORK_TEST: ${{ runner.os == 'macOS' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
+
+      # The `runner` context is unavailable in job-level `env` (it fails workflow
+      # validation before any job starts), so export these from a step instead.
+      - name: Prepare environment
+        env:
+          STATE_HOME: ${{ runner.temp }}/headless-state
+          REAL_NETWORK_TEST: ${{ runner.os == 'macOS' && '1' || '0' }}
+        run: |
+          echo "HEADLESS_STATE_HOME=$STATE_HOME" >> "$GITHUB_ENV"
+          echo "HEADLESS_REAL_NETWORK_TEST=$REAL_NETWORK_TEST" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
