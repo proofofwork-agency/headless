@@ -1,5 +1,7 @@
 # OpenCode Analysis (cloned 2026-07-09)
 
+> Historical analysis. The current OpenCode adapter already implements pure JSON execution, permission isolation, native session resume, model resolution, parsing, cancellation, and contained worker execution. Consult current code and release evidence rather than treating the future-work sections below as a live plan.
+
 **Source**: `opencode/` (shallow clone of https://github.com/anomalyco/opencode , dev branch at time of clone).
 **Purpose**: Deep understanding to design best headless runner adapter, feature mapping (ultrathink / ultraplan / agents / workflows), and potential extension points for the Headless project.
 

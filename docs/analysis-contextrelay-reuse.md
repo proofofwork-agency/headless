@@ -1,5 +1,7 @@
 # ContextRelay Reuse Analysis
 
+> Historical analysis. Headless now owns a verified ledger, directed mailbox, persistent queues, handoffs, artifacts, task state, and finality. It does not ingest or replay ContextRelay runtime state; the compatibility routes described below were intentionally removed.
+
 **Date**: 2026-07-09
 **Source**: `../agenttalk/contextrelay` (and the livetest copy). The most mature local coordination + headless runtime in the ecosystem.
 

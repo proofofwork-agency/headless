@@ -1,6 +1,6 @@
 # Native login, sessions, and fleet operation
 
-Headless v0.2 defaults to the installed coding CLI's existing subscription login. API-key brokering remains available as an explicit hardened mode. Both modes keep Headless's outer operating-system containment, project boundary, durable state, worktree isolation, budgets, and finality gates.
+Headless defaults to brokered provider access. Native login is an explicit private-alpha opt-in for trusted disposable projects because its outbound destination IPs are unrestricted. Both modes retain Headless's outer operating-system containment, project boundary, durable state, worktree isolation, budgets, and finality gates.
 
 ## Project trust
 
@@ -8,25 +8,25 @@ Native login is available only after an authenticated operator grants trust to t
 
 ```bash
 headless project trust status --cwd /path/to/project
-headless project trust grant --cwd /path/to/project
+headless project trust grant --allow-native-direct-unrestricted --cwd /path/to/project
 headless project trust revoke --cwd /path/to/project
 ```
 
-`grant --deny-native-login` records project trust without allowing backend-native credentials. `grant --allow-bypass` separately permits the `bypass` approval policy. Revocation prevents new native runs and does not let a client redirect the daemon to another root.
+Plain `grant` records project trust without allowing backend-native credentials. `grant --allow-native-direct-unrestricted` explicitly acknowledges arbitrary outbound IP access and permits backend-native credentials. `grant --allow-bypass` separately permits the `bypass` approval policy. Revocation prevents new native runs and does not let a client redirect the daemon to another root.
 
 ## Authentication modes
 
-| Property | `native-login` (default) | `broker` (explicit) |
+| Property | `broker` (default) | `native-login` (explicit) |
 | --- | --- | --- |
-| Account source | Official CLI's existing subscription login | Daemon-owned provider API key |
-| Worker credential | Backend-specific auth capsule | Opaque, short-lived broker lease |
-| Network evidence | `provider-direct` | `broker-only` |
-| Credential evidence | `backend-native` | `broker-lease` |
-| Model | Optional; omission uses the CLI default, with the fail-closed OpenCode extraction described below | Provider/model policy may require a model under caps |
-| Cost | `amountUsd: null` unless the CLI reports a real charge | Broker-observed and reconciled where pricing is known |
-| Trust requirement | One-time project trust | Existing daemon policy/grant requirements |
+| Account source | Daemon-owned provider API key | Official CLI's existing subscription login |
+| Worker credential | Opaque, short-lived broker lease | Backend-specific auth capsule |
+| Network evidence | `broker-only` | `native-direct-unrestricted` |
+| Credential evidence | `broker-lease` | `backend-native` |
+| Model | Provider/model policy may require a model under caps | Optional; omission uses the CLI default, with the fail-closed OpenCode extraction described below |
+| Cost | Broker-observed and reconciled where pricing is known | `amountUsd: null` unless the CLI reports a real charge |
+| Trust requirement | Existing daemon policy/grant requirements | Project trust plus explicit unrestricted-egress acknowledgement |
 
-The authentication mode is part of every run, durable session, goal, workflow, council, agent profile, and fleet profile. Select broker mode with `--auth-mode broker` or the equivalent schema field; omission selects native login. A goal's execution mode is a separate persisted field: `read-only` is the default, while `headless goal run --mode write ...` explicitly requests the normal leased-worktree and integration-gate path.
+The authentication mode is part of every run and persisted execution record. Select native mode with `--auth-mode native-login`; omission selects broker. Experimental orchestration objects retain the same field but are outside the first beta contract. A goal's execution mode is separate: `read-only` is the default, while write mode requests the leased-worktree and integration-gate path.
 
 ## Minimal auth capsules
 
@@ -50,7 +50,7 @@ Host `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, and alternate config paths are intent
 
 An unavailable, invalid, symlinked, or oversized login produces `NATIVE_AUTH_UNAVAILABLE`. Native authentication deliberately means the official backend can use its own scoped account state and contact its provider; it does not claim broker-style network or credential invisibility.
 
-Grok hardening prepares a Headless-owned `config.toml` in its isolated `GROK_HOME`, explicit environment-level disables for every Claude/Cursor compatibility cell, no memory/subagents/web fetch/update/telemetry, a Headless system-prompt override, a mode-specific built-in tool allowlist, and startup-snapshot masks for existing project control paths. A real `grok inspect --json` characterization proves that malicious native and compatibility rules, skills, agents, hooks, MCP servers, plugins, permissions, LSP configuration, and startup files present at launch do not become effective. Grok 0.2.93 automatically watches native skills and exposes manual reloads for other surfaces; Linux cannot kernel-mask future glob matches. Required Grok runs therefore remain fail-closed until late-created control paths can be denied for the entire process lifetime on both release platforms.
+Grok hardening prepares a Headless-owned `config.toml` in its isolated `GROK_HOME`, explicit environment-level disables for every Cursor/Claude/Codex compatibility cell, no memory/subagents/web fetch/update/telemetry, a Headless system-prompt override, a mode-specific built-in tool allowlist, and startup-snapshot masks for existing project control paths. Before any provider access, a contained, network-denied `grok inspect --json` must attest that native project surfaces and every compatibility cell are disabled. Grok remains experimental and blocked when the installed version cannot produce that evidence.
 
 ## Approval policies
 
@@ -62,7 +62,9 @@ Grok hardening prepares a Headless-owned `config.toml` in its isolated `GROK_HOM
 
 `bypass` is not `--unsafe-no-sandbox`. It does not disable project trust, clean-primary checks, leased worktrees, filesystem or credential scope, budgets, finality, tests, reviews, votes, or merge authority. A tool or integration pause is reported as `APPROVAL_REQUIRED`; unattended clients can inspect and resolve it through `approval.list` and `approval.resolve` if their authenticated scope allows it.
 
-## Native session drivers
+## Experimental native session drivers
+
+Persistent sessions are disabled by default in Beta 1. The details below describe the explicit `headless experimental session` compatibility surface and do not enlarge the stable one-shot execution contract.
 
 Headless capability-probes the installed CLI before opening a session and records every selection decision.
 
@@ -73,7 +75,7 @@ Named backend agents are supported for OpenCode and Grok and are persisted acros
 | Codex | Hidden persistent `codex app-server` after JSON-RPC handshake | Fall back to `codex exec resume` |
 | Claude | `claude -p` with a durable session ID | `--resume <session-id>` |
 | OpenCode | Structured `opencode run` | `--session <session-id>` |
-| Grok | Structured headless execution (driver complete; required launch fail-closed on Grok 0.2.93) | `--resume <session-id>` |
+| Grok | Experimental structured execution after contained compatibility attestation | `--resume <session-id>` |
 
 Persisted metadata includes the native session/thread ID, driver kind, backend version, auth-profile fingerprint, capability snapshot, last turn, rate-limit evidence, and recovery status. Only one turn may be active per native session. Cancellation targets the entire process tree; persistent transports use bounded frames, event counts, stderr, request timeouts, and TERM-to-KILL shutdown.
 
@@ -85,15 +87,15 @@ If a backend loses native resume, Headless may start a fresh session with at mos
 
 ## Fleet defaults and unattended operation
 
-Fleet profiles contain agent backends, optional models, authentication and approval modes, coordinator selection, bounds, and idle-autonomy policy. Public daemon methods are `fleet.profile.upsert|get|list|remove`, `fleet.health`, and `goal.start|send|status|list|cancel|result`. Defaults are four active workers, 64 queued delegations per project, one active turn per native session, eight deliberation rounds, two attempts per delegation, and a 60-minute goal deadline.
+Fleet profiles contain worker backends, optional models, authentication and approval modes, bounds, and idle-autonomy policy. Task synthesis is selected per goal; it does not grant foreground authority. Public daemon methods are `fleet.profile.upsert|get|list|remove`, `fleet.health`, and `goal.start|send|status|list|cancel|result`. Defaults are four active workers, 64 queued delegations per project, one active turn per native session, eight deliberation rounds, two attempts per delegation, and a 60-minute goal deadline.
 
 An automatic goal begins with a durable read-only planning turn. Headless accepts only the bounded `HEADLESS_PLAN_V1` delegation envelope and uses one safe deterministic fallback task when the planner output is malformed. It assigns at most `maxActiveWorkers` distinct eligible workers, executes independent work concurrently through the durable FIFO scheduler, and gives the sticky leader a bounded bundle containing every admitted worker's actual output, diff, turn ID, and artifact IDs for candidate synthesis. Planning, worker, and review turns remain read-only; only candidate synthesis and revision turns can create a preserved write candidate. Grounded reviewers run concurrently where capacity permits, and revisions remain bounded by `maxDeliberationRounds` before deterministic gates and integration.
 
 Queue overflow returns `QUEUE_CAPACITY_EXCEEDED`; jobs are never silently dropped. Rate-limited work carries retry-after evidence. Addressed collaboration messages include sender, recipient, sequence, acknowledgement, artifact references, and bounded redacted content. `collaboration.messages.acknowledge` lets the authenticated recipient or recorded goal coordinator explicitly acknowledge and optionally prune a bounded ID batch; clients cannot declare the recipient identity, and protected events are never discarded merely because a mailbox is full. Reviewers and voters receive the referenced artifacts and candidate diff; a vote must cite actual turn or artifact evidence.
 
-Automatic leadership is sticky while healthy. `coordinator: election` instead records attributable, deterministic policy ballots derived from the same authentication, health, capability, rate-limit, priority, load, and failure snapshot. It requires a real multi-agent quorum and strict winner; the evidence explicitly does not claim model-authored consensus.
+Automatic task synthesis is sticky while healthy. `synthesizer: election` instead records attributable, deterministic policy ballots derived from the same authentication, health, capability, rate-limit, priority, load, and failure snapshot. It requires a real multi-agent quorum and strict winner; the evidence explicitly does not claim model-authored consensus. Synthesizer failover never changes the configured foreground lead.
 
-For unattended use, `headless goal run --autonomous --detach <objective>` starts a detached autonomous goal, while goal follow/send/status/cancel/result commands and MCP expose the same daemon state. The idle scanner waits for eight seconds of quiescence, durably deduplicates opportunity fingerprints across restart, and detects failed gates without follow-up, unverified completion, stalled work, unresolved candidates, and idle workers without a model call. `suggest` publishes only a visible lane, `read-only` may verify it within bounds, and `write` may submit a change only through the normal daemon write path. Autonomous writes still require project trust, an `auto` or allowed `bypass` goal, a clean primary checkout, a daemon-leased worktree, budgets, checks, review, finality, and merge authority. Headless reports a dirty primary checkout but never modifies or cleans it automatically.
+For unattended use, `headless experimental goal run --autonomous --detach <objective>` starts a detached autonomous goal, while goal follow/send/status/cancel/result commands and MCP expose the same daemon state. The idle scanner waits for eight seconds of quiescence, durably deduplicates opportunity fingerprints across restart, and detects failed gates without follow-up, unverified completion, stalled work, unresolved candidates, and idle workers without a model call. `suggest` publishes only a visible lane, `read-only` may verify it within bounds, and `write` may submit a change only through the normal daemon write path. Autonomous writes still require project trust, an `auto` or allowed `bypass` goal, a clean primary checkout, a daemon-leased worktree, budgets, checks, review, finality, and merge authority. Headless reports a dirty primary checkout but never modifies or cleans it automatically.
 
 Collaborative goals remain read-only unless `--mode write` is explicit. A write goal preserves the candidate first, sends its real job ID, output, diff, file list, and commit evidence to reviewers, requires a structured citation and attributable vote, then integrates through the candidate service. In `ask` mode, each mutating candidate/revision turn first waits on its own `coder_tool` approval; after the gates, the goal pauses again in `waiting_approval` for a distinct merge approval. Resolving that merge approval resumes the same candidate rather than running the coder again.
 
@@ -108,7 +110,7 @@ The following are release requirements, not backend best-effort promises:
 - every process timeout, cancellation, output overflow, daemon shutdown, and transport close performs bounded process-tree termination;
 - lifecycle, policy, approval, and completion evidence is retained durably even when display updates are coalesced;
 - native cost remains unknown rather than being reported as zero when the CLI supplies no charge;
-- macOS Seatbelt and Linux bubblewrap/seccomp adversarial suites pass in both provider-direct and broker-only modes;
+- macOS Seatbelt and Linux bubblewrap/seccomp adversarial suites pass in both native-direct-unrestricted and broker-only modes;
 - deterministic credential-free fake-CLI coverage passes for create/resume, cancellation, malformed events, rate limits, reconnects, daemon restart, and replay fallback for all four backends.
 
 ## Opt-in real subscription smoke
@@ -122,6 +124,8 @@ HEADLESS_NATIVE_SMOKE=1 bun run smoke:native
 
 The harness uses only `dist/cli.js`, creates disposable clean project/state/runtime roots, grants trust only to that fixture, removes provider API-key and known provider-token variables from every child, starts one owned daemon, and runs one bounded read-only durable native-session turn per installed backend. It reports the selected driver/version/auth fingerprint and containment/cost/usage evidence, verifies Git remains clean at the original commit, and performs bounded TERM-to-KILL daemon cleanup on success, failure, timeout, output overflow, or an interrupt.
 
+Grok is experimental. Headless installs an isolated configuration, masks every project control path present at startup, removes shell execution from the admitted tool set, and requires a contained, network-denied inspection attestation before provider access. A failed or incomplete attestation blocks the run. Direct Grok write execution remains fail-closed.
+
 The equivalent manual shape is shown below for diagnosing a single backend:
 
 ```bash
@@ -133,7 +137,7 @@ touch "$tmp/README.md"
 git -C "$tmp" add README.md
 git -C "$tmp" -c commit.gpgsign=false commit -m fixture
 
-headless project trust grant --cwd "$tmp"
+headless project trust grant --allow-native-direct-unrestricted --cwd "$tmp"
 
 env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY \
   -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN -u CODEX_API_KEY \
@@ -144,6 +148,6 @@ env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY \
 # Repeat with --backend codex, opencode, and grok-build.
 ```
 
-Do not specify a model: the smoke must prove that model omission uses each CLI's configured default. For OpenCode, first ensure the fixed global `~/.config/opencode/opencode.json` or `opencode.jsonc` contains a safe scalar `model`; custom XDG/config overrides are intentionally ignored and do not satisfy this check. Use read-only mode and a bounded prompt. For each backend, retain the CLI version, selected session-driver kind, auth-profile fingerprint (never auth contents), containment mechanism, `provider-direct`/`backend-native` evidence, terminal status, usage if reported, and cost attribution. Confirm the project and primary checkout remain unchanged and no API key appeared in output, events, artifacts, or logs.
+Do not specify a model: the smoke must prove that model omission uses each CLI's configured default. For OpenCode, first ensure the fixed global `~/.config/opencode/opencode.json` or `opencode.jsonc` contains a safe scalar `model`; custom XDG/config overrides are intentionally ignored and do not satisfy this check. Use read-only mode and a bounded prompt. For each backend, retain the CLI version, selected session-driver kind, auth-profile fingerprint (never auth contents), containment mechanism, `native-direct-unrestricted`/`backend-native` evidence, terminal status, usage if reported, and cost attribution. Confirm the project and primary checkout remain unchanged and no API key appeared in output, events, artifacts, or logs.
 
 A missing binary or login may be recorded as an explicit local skip, but it does not satisfy the v0.2 release gate for that backend. Never paste auth files, keychain material, or raw tokens into an issue or test artifact.

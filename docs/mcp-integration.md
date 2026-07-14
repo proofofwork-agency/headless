@@ -1,141 +1,81 @@
-# MCP integration
+# Foreground-lead MCP and OpenCode plugin
 
-Headless v0.2 ships a compiled stdio MCP server as the `headless-mcp` binary and the `@proofofwork-agency/headless/mcp` export. The MCP process is a client of the same authenticated project daemon used by the CLI, plugin, and TUI.
+> Experimental private alpha. Build the package from this checkout; it is not published.
 
-## Install
+Headless has one externally launched foreground lead per project. The provider CLI remains visible and owns its own lifecycle. Headless does not start, inject into, elect, or kill it. The host’s MCP process or OpenCode plugin attaches to the configured binding and sends a heartbeat.
 
-```bash
-bun add -g @proofofwork-agency/headless@0.2.0
-headless-mcp
-```
+## Configure a lead
 
-Or let an MCP host launch the published package without a global install:
+Build Headless, bind the host, then install or print its native MCP configuration:
 
 ```bash
-bunx --bun -p @proofofwork-agency/headless@0.2.0 headless-mcp
+bun install --frozen-lockfile --ignore-scripts
+bun run build
+
+headless lead use codex --cwd /absolute/project
+headless mcp install codex --cwd /absolute/project
 ```
 
-Do not configure an installed client to execute `src/mcp/server.ts` or `plugin/index.ts`; those files are not part of the published package.
+`headless lead status` reports `configured`, `connected`, or `disconnected`. `headless lead release` revokes the current generation. Calling `lead use` again explicitly switches hosts, increments the generation, and invalidates the previous host’s state-changing access. Detached jobs, worker sessions, messages, artifacts, candidates, and ledger history remain intact.
 
-## Bind the project
+The compiled server command always names the host:
 
-Set `HEADLESS_PROJECT_ROOT` to the one project the MCP server is allowed to operate on. If it is omitted, the server binds to its startup working directory.
+```bash
+HEADLESS_PROJECT_ROOT=/absolute/project headless-mcp --host codex
+```
 
-A generic stdio host configuration looks like:
+A generic stdio configuration is:
 
 ```json
 {
   "mcpServers": {
     "headless": {
       "command": "headless-mcp",
-      "env": {
-        "HEADLESS_PROJECT_ROOT": "/absolute/path/to/project"
-      }
+      "args": ["--host", "codex"],
+      "env": { "HEADLESS_PROJECT_ROOT": "/absolute/project" }
     }
   }
 }
 ```
 
-When using `bunx`, set `command` to `bunx` and use:
+Use the compiled binary, not `src/mcp/server.ts` or `plugin/index.ts`. The OpenCode plugin attaches as host `opencode` and therefore requires `headless lead use opencode` first.
 
-```json
-{
-  "args": [
-    "--bun",
-    "-p",
-    "@proofofwork-agency/headless@0.2.0",
-    "headless-mcp"
-  ]
-}
-```
+## Identity and authority
 
-Codex, Claude Code, Grok Build, and OpenCode each have their own location and syntax for stdio MCP configuration. Translate the same command, arguments, and environment into the host’s current MCP configuration format.
+The process connects to the owner-only project daemon with a generation-specific principal such as `integration:lead-codex-g3`. Client-supplied project roots, principals, actors, sources, credentials, and grants cannot replace authenticated identity.
 
-## Admission and authority
+The active lead may create contained runs, goals, workflows, messages, reviews, and finality proposals. It cannot administer credentials, trust, budgets, fleet profiles, or authority grants. Approval and candidate tools are deliberately inspection-only; a lead cannot resolve its own approval or integrate/reject a candidate through this tool surface.
 
-The process canonicalizes the configured project and connects to that project’s owner-only daemon socket. Tool arguments cannot replace the project root, choose an unrestricted `cwd`, or grant coordinator authority. Supplied `source`, actor, coordinator, or claimed principal fields are treated only as untrusted payload metadata or ignored.
+The normal integration path is a human CLI action. A finite grant may permit lead-direct integration only when project, principal, backend, operation, cost, expiry, and iteration limits all match. Root CLI recovery remains attributable in the verified ledger.
 
-Required containment is the default for `headless_run`. Autonomous and council operations reject unsafe containment. Write and merge operations still require the daemon’s persisted coordinator policy or a scoped grant.
-
-Native login and `ask` approval are the defaults after one-time project trust; callers may explicitly select broker authentication or another allowed approval policy but cannot supply credential paths. Model is optional and omission uses the selected CLI's configured default. Native results report provider-direct/backend-native evidence and unknown cost unless the CLI reports a real charge. MCP admission preserves structured `NATIVE_AUTH_UNAVAILABLE`, `NATIVE_SESSION_LOST`, `APPROVAL_REQUIRED`, `RATE_LIMITED`, and `QUEUE_CAPACITY_EXCEEDED` failures.
+Automatic worker and synthesizer selection excludes the active lead backend. An explicit backend or per-goal synthesizer selection may still create a separate contained worker using the same provider.
 
 ## Tool surface
 
-Execution and deliberation:
+Execution and orchestration:
 
-- `headless_run` submits one durable job and returns its complete structured result.
-- `headless_deliberate` runs bounded read-only jobs across selected backends and returns each attributable result.
-- `council_deliberate` uses daemon-owned proposal, execution, review, vote, and decision phases.
-- `headless_gate` runs only configured release-gate checks with timeout/cancellation.
+- `headless_run` submits one contained daemon job and returns its full structured result.
+- `headless_deliberate` fans out a bounded read-only question. Its default backends are OpenCode and Codex.
+- `council_deliberate` runs daemon-owned proposal, execution, review, vote, and decision phases.
+- `headless_goal` starts, messages, inspects, lists, cancels, or reads a durable goal result.
+- `headless_workflow_run` and `headless_workflow_status` operate bounded workflow DAGs.
+- `headless_gate` runs configured release-gate checks.
 
-Durable workflows:
+Read and communication tools:
 
-- `headless_workflow_run` accepts `definition`, a JSON string containing a v0.2 workflow DAG, and starts it with required containment.
-- `headless_workflow_status` accepts `action: "list" | "status" | "wait" | "cancel"`; non-list actions also require `workflowId`, and `wait` accepts a bounded `timeoutMs`.
+- `headless_project_trust`, `headless_fleet_profile`, and `headless_fleet_health` are read-only.
+- `headless_collaboration` reads turns/messages and acknowledges addressed messages.
+- `headless_approval` lists visible approvals.
+- `headless_candidate` inspects a candidate.
+- `headless_append_note`, `headless_record_artifact`, `headless_read_context`, `headless_task_state`, and finality/task/vote helpers use the existing verified ledger and stores.
+- `send_message`, `wait_for_handoff`, and `get_messages` use Headless’s durable, redacted, principal-isolated communication paths.
 
-The definition contains one to 64 acyclic steps. Each step has `id`, `backend`, and `prompt`; optional fields are `kind: "execution" | "test" | "review" | "vote"`, `mode`, `model`, `agent`, `timeoutMs`, `dependsOn`, and `maxAttempts`. Top-level `requirements` selects policy, tests, review, vote, and budget finality gates. Workflow ownership comes from the authenticated MCP connection, dependency results/diffs are supplied to downstream steps by the daemon, and write candidates remain preserved for an explicit authorized integration decision.
+There is no generic `claude/channel` fallback and no process-local queue or ledger. Host-specific channel adaptation belongs in the host integration layer.
 
-For example, pass this object as the JSON-encoded `definition` string:
+## Containment and results
 
-```json
-{
-  "requirements": {
-    "policy": true,
-    "tests": false,
-    "review": true,
-    "vote": false,
-    "budget": true
-  },
-  "steps": [
-    {
-      "id": "draft",
-      "backend": "codex",
-      "prompt": "Produce the candidate",
-      "mode": "write"
-    },
-    {
-      "id": "review",
-      "kind": "review",
-      "backend": "claude-code",
-      "prompt": "Review the actual candidate result and diff",
-      "dependsOn": ["draft"]
-    }
-  ]
-}
-```
+Required containment is the default. Broker authentication and `ask` approval remain the default policy. Native login additionally requires project trust and explicit unrestricted-egress acknowledgement. Grok is advertised only for read-only contained work until lifetime write-containment can prove that late-created project control files are denied.
 
-Ledger and finality:
+`headless_run` returns the complete structured result, including output, diagnostics, usage, cost, containment evidence, diff/commit data, and truncation fields. Its timeout covers queueing, preparation, provider access, and execution. Expected failures remain structured and redacted.
 
-- `headless_append_note`
-- `headless_record_artifact`
-- `headless_read_context`
-- `headless_task_state`
-- `headless_propose_final`
-- `headless_record_task_claim`
-- `headless_record_consensus_vote`
-- `headless_record_idle_action`
-- `headless_record_release_gate`
-
-Fleet messaging:
-
-- `headless_ask_for_work`, `ask_for_work`, `ask_for_more_work`, and `ask_for_backup`
-- `send_message`, `wait_for_handoff`, and session-scoped `get_messages`
-- `headless_get_cooperation_instructions`
-
-Daemon-backed fleet automation also mirrors the project-trust, fleet-profile/health, goal lifecycle, collaboration turns/messages/leader transfer, approval inbox/resolution, and candidate inspect/integrate/reject protocol families. `headless_goal` starts in `read-only` mode unless its strict `start` action explicitly supplies `mode: "write"`; the selected mode is durable and still passes through ordinary worktree, approval, finality, and integration gates. Authentication derives from the MCP credential: these operations cannot self-declare ownership, coordinator authority, grants, merge authority, or a different project root. Directed messages include sender/recipient sequences, acknowledgement state, bounded redacted content, and artifact references rather than a competing-consumer queue.
-
-The automatically provisioned `integration:mcp` credential is deliberately non-admin. It can inspect trust, fleets, health, owned goals/collaboration, approvals, and candidates and can operate its own goal lifecycle, but direct trust/profile mutations, leader transfer, approval resolution, and candidate integration/rejection return `POLICY_DENIED`. Use the owner-authenticated CLI or TUI for those actions; v0.2 does not let an MCP request promote its own credential.
-
-The server advertises the experimental `claude/channel` capability. It attempts push notifications when supported and always records a redacted session-scoped queue entry for pull fallback.
-
-## Results and errors
-
-`headless_run` returns JSON text containing `jobId`, `sessionId`, and the full v0.2 result. It does not replace long results with a fixed-length summary. Output, stderr, diagnostics, usage dimensions, cost attribution, containment evidence, diff/commit data, and explicit truncation fields are preserved within their schema bounds. Its timeout is a total durable lifecycle deadline covering queueing, preparation, native-session recovery or broker access, and execution. A durable FIFO scheduler reports queue positions and rejects overflow explicitly rather than dropping work.
-
-Expected execution failures are represented by the result’s terminal status and structured error. MCP admission/validation failures set the MCP tool result’s error flag with a bounded redacted message.
-
-## OpenCode plugin versus MCP
-
-Use `@proofofwork-agency/headless-plugin` when OpenCode should load Headless as a native plugin. Use `headless-mcp` when a general MCP host should access the daemon. Both are daemon clients and share project policy/state; neither has process-local coordinator authority.
-
-The plugin declares `@proofofwork-agency/headless@^0.2.0` as a required peer. Install both packages. The repository’s source-file plugin entry is only a development configuration.
+The MCP server and OpenCode plugin share the same attach/heartbeat client implementation and daemon state. Neither owns provider processes or foreground authority outside the configured generation.
