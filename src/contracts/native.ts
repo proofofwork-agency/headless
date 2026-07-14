@@ -27,6 +27,7 @@ export const ProjectTrustSchema = z.object({
   projectId: ProjectIdSchema,
   trusted: z.boolean(),
   nativeLoginAllowed: z.boolean(),
+  nativeDirectUnrestrictedAcknowledged: z.boolean().default(false),
   bypassAllowed: z.boolean(),
   trustedBy: PrincipalIdSchema.nullable(),
   trustedAt: TimestampSchema.nullable(),
@@ -37,6 +38,9 @@ export const ProjectTrustSchema = z.object({
   }
   if (!value.trusted && value.nativeLoginAllowed) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Native login cannot be allowed for an untrusted project." });
+  }
+  if (!value.trusted && value.nativeDirectUnrestrictedAcknowledged) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Native direct-egress acknowledgement requires project trust." });
   }
 });
 

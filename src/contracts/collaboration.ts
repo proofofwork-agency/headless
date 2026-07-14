@@ -31,7 +31,7 @@ export const AgentProfileSchema = z.object({
   backend: BackendIdSchema,
   name: LabelSchema,
   model: ModelSchema.optional(),
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
   enabled: z.boolean().default(true),
   priority: z.number().int().min(-100).max(100).default(0),
@@ -46,8 +46,7 @@ export const AgentProfileSchema = z.object({
   requireUnique(profile.capabilities, context, ["capabilities"], "agent capability");
 });
 
-export const CoordinatorSelectionSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("human") }).strict(),
+export const SynthesizerSelectionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("agent"), agentId: IdentifierSchema }).strict(),
   z.object({ kind: z.literal("automatic") }).strict(),
   z.object({ kind: z.literal("election") }).strict(),
@@ -57,9 +56,8 @@ export const FleetProfileSchema = z.object({
   id: IdentifierSchema,
   projectId: ProjectIdSchema,
   name: LabelSchema,
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
-  coordinator: CoordinatorSelectionSchema.default({ kind: "automatic" }),
   agents: z.array(AgentProfileSchema).min(1).max(64),
   maxActiveWorkers: z.number().int().positive().max(64).default(4),
   maxQueuedDelegations: z.number().int().positive().max(1_024).default(64),
@@ -74,10 +72,6 @@ export const FleetProfileSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Fleet profile updatedAt cannot precede createdAt.", path: ["updatedAt"] });
   }
   requireUnique(profile.agents.map((agent) => agent.id), context, ["agents"], "agent id");
-  const coordinatorAgentId = profile.coordinator.kind === "agent" ? profile.coordinator.agentId : null;
-  if (coordinatorAgentId !== null && !profile.agents.some((agent) => agent.id === coordinatorAgentId)) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "Explicit coordinator must reference a fleet agent.", path: ["coordinator", "agentId"] });
-  }
 });
 
 export const GoalStateSchema = z.enum([
@@ -103,10 +97,10 @@ export const GoalSchema = z.object({
   objective: CollaborationTextSchema,
   mode: RunModeSchema.default("read-only"),
   state: GoalStateSchema,
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
-  coordinator: CoordinatorSelectionSchema,
-  leaderAgentId: IdentifierSchema.nullable().default(null),
+  synthesizer: SynthesizerSelectionSchema,
+  synthesizerAgentId: IdentifierSchema.nullable().default(null),
   autonomous: z.boolean().default(false),
   deadlineAt: TimestampSchema,
   createdAt: TimestampSchema,
@@ -118,8 +112,8 @@ export const GoalSchema = z.object({
   if (goal.updatedAt < goal.createdAt) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Goal updatedAt cannot precede createdAt.", path: ["updatedAt"] });
   }
-  if (goal.coordinator.kind === "agent" && goal.leaderAgentId !== null && goal.coordinator.agentId !== goal.leaderAgentId) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "Explicit coordinator and sticky leader must identify the same agent.", path: ["leaderAgentId"] });
+  if (goal.synthesizer.kind === "agent" && goal.synthesizerAgentId !== null && goal.synthesizer.agentId !== goal.synthesizerAgentId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Explicit synthesizer and sticky synthesis agent must identify the same agent.", path: ["synthesizerAgentId"] });
   }
 });
 
@@ -129,7 +123,7 @@ export const TurnSchema = z.object({
   delegationId: IdentifierSchema.nullable().default(null),
   agentId: IdentifierSchema,
   nativeSessionId: z.string().trim().min(1).max(512).nullable(),
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   sequence: z.number().int().positive(),
   state: z.enum(["queued", "running", "waiting", "succeeded", "failed", "cancelled", "timed_out"]),
   input: CollaborationTextSchema,
@@ -275,7 +269,7 @@ export const ApprovalRequestSchema = z.object({
   collaborationId: IdentifierSchema,
   requestedBy: IdentifierSchema,
   assignedTo: PrincipalIdSchema,
-  kind: z.enum(["coder_tool", "merge"]),
+  kind: z.enum(["coder_tool", "merge", "unpriced_broker_run"]),
   status: z.enum(["pending", "approved", "rejected", "cancelled", "expired"]),
   summary: SummarySchema,
   details: BoundedDetailsSchema.default({}),
@@ -335,7 +329,7 @@ export const CandidateDecisionSchema = z.object({
 });
 
 export type AgentProfile = z.infer<typeof AgentProfileSchema>;
-export type CoordinatorSelection = z.infer<typeof CoordinatorSelectionSchema>;
+export type SynthesizerSelection = z.infer<typeof SynthesizerSelectionSchema>;
 export type FleetProfile = z.infer<typeof FleetProfileSchema>;
 export type Goal = z.infer<typeof GoalSchema>;
 export type Turn = z.infer<typeof TurnSchema>;

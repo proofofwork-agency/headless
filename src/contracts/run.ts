@@ -21,7 +21,7 @@ export const RunRequestObjectSchema = z.object({
   timeoutMs: PositiveTimeoutSchema.default(180_000),
   sessionId: IdentifierSchema.optional(),
   containment: ContainmentRequirementSchema.default("required"),
-  authMode: AuthModeSchema.default("native-login"),
+  authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
 }).strict();
 
@@ -60,7 +60,7 @@ export const ContainmentEvidenceSchema = z.object({
   probe: z.string().max(2_048).nullable(),
   isolatedHome: z.boolean(),
   credentialsIsolated: z.boolean(),
-  network: z.enum(["broker-only", "provider-direct", "denied", "unrestricted"]),
+  network: z.enum(["broker-only", "native-direct-unrestricted", "denied", "unrestricted"]),
   credentialAccess: CredentialAccessSchema.default("none"),
   unsafe: z.boolean(),
 }).strict();
