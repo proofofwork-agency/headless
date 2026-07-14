@@ -57,7 +57,7 @@ console.log(JSON.stringify({ type: "text", text: JSON.stringify({ directDenied, 
       stdinPrompt: false,
       credentialPrefixes: [],
       prepareCommand: () => ["relay-fixture"],
-      parse(stdout) {
+      decodeOutput(stdout) {
         const event = JSON.parse(stdout.trim()) as { text: string };
         return { output: event.text, cost: null, tokens: null, error: null };
       },
