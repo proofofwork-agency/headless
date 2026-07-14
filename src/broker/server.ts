@@ -23,6 +23,8 @@ export const BrokerBudgetQuotaSchema = z.object({
   usedInputTokens: z.number().int().nonnegative(),
   maxOutputTokens: z.number().int().positive().nullable(),
   usedOutputTokens: z.number().int().nonnegative(),
+  maxCostUsd: z.number().nonnegative().nullable().default(null),
+  usedCostUsd: z.number().nonnegative().default(0),
 }).strict();
 
 export type BrokerBudgetQuota = z.infer<typeof BrokerBudgetQuotaSchema>;
@@ -93,6 +95,8 @@ export type ProviderBrokerOptions = {
   unixSocketPath?: string;
   maxConcurrentRequests?: number;
   maxInFlightBodyBytes?: number;
+  initialBudgetQuotas?: BrokerBudgetQuota[];
+  persistBudgetQuota?: (quota: BrokerBudgetQuota, expiresAt?: number) => void;
 };
 
 export class ProviderBroker {
@@ -104,6 +108,7 @@ export class ProviderBroker {
   private readonly maxLogEntries: number;
   private readonly maxConcurrentRequests: number;
   private readonly maxInFlightBodyBytes: number;
+  private readonly persistBudgetQuota?: ProviderBrokerOptions["persistBudgetQuota"];
   private readonly logs: BrokerRequestLog[] = [];
   private activeRequests = 0;
   private inFlightBodyBytes = 0;
@@ -118,6 +123,11 @@ export class ProviderBroker {
     this.maxLogEntries = options.maxLogEntries ?? 1_000;
     this.maxConcurrentRequests = boundedPositive(options.maxConcurrentRequests ?? DEFAULT_BROKER_CONCURRENCY, 1_024, "Broker concurrency limit");
     this.maxInFlightBodyBytes = boundedPositive(options.maxInFlightBodyBytes ?? DEFAULT_BROKER_BODY_MEMORY_LIMIT, 1_024_000_000, "Broker body memory limit");
+    this.persistBudgetQuota = options.persistBudgetQuota;
+    for (const quota of options.initialBudgetQuotas ?? []) {
+      const parsed = BrokerBudgetQuotaSchema.parse(quota);
+      this.budgetQuotas.set(parsed.id, parsed);
+    }
     this.unixSocketPath = options.unixSocketPath ?? null;
   }
 
@@ -164,7 +174,7 @@ export class ProviderBroker {
     if (this.leases.size >= MAX_RETAINED_LEASES) throw new Error("Provider broker lease retention limit is exhausted.");
     const scope = BrokerLeaseScopeSchema.parse(input);
     if (scope.expiresAt <= Date.now()) throw new Error("Broker lease expiry must be in the future.");
-    this.registerBudgetQuotas(scope.budgetQuotas);
+    this.registerBudgetQuotas(scope.budgetQuotas, scope.expiresAt);
     const token = `hls_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
     this.leases.set(id, {
@@ -384,10 +394,16 @@ export class ProviderBroker {
         releaseActive();
         return this.failure(lease, providerId, request, route, 429, "Broker cost budget would be exceeded by this request.", started, requestBytes);
       }
+      const aggregateCostFailure = this.aggregateCostFailure(lease, estimatedCostUsd);
+      if (aggregateCostFailure) {
+        releaseActive();
+        return this.failure(lease, providerId, request, route, 429, aggregateCostFailure, started, requestBytes);
+      }
       // Charge the conservative request maximum before provider egress. This
       // remains separate from observed cost so final run reconciliation does
       // not count both the reservation and provider-reported usage.
       lease.accountedCostUsd += estimatedCostUsd;
+      this.accountAggregateCost(lease, estimatedCostUsd);
     }
 
     const credential = this.credentials[provider.credentialEnv];
@@ -509,7 +525,7 @@ export class ProviderBroker {
     return null;
   }
 
-  private registerBudgetQuotas(quotas: BrokerBudgetQuota[]) {
+  private registerBudgetQuotas(quotas: BrokerBudgetQuota[], expiresAt: number) {
     const newIds = new Set(quotas.filter((quota) => !this.budgetQuotas.has(quota.id)).map((quota) => quota.id));
     if (this.budgetQuotas.size + newIds.size > MAX_RETAINED_BUDGET_QUOTAS) {
       throw new Error("Provider broker budget quota retention limit is exhausted.");
@@ -518,16 +534,20 @@ export class ProviderBroker {
       const existing = this.budgetQuotas.get(quota.id);
       if (!existing) {
         this.budgetQuotas.set(quota.id, { ...quota });
+        this.persistBudgetQuota?.(quota, expiresAt);
         continue;
       }
       existing.maxRequests = quota.maxRequests;
       existing.maxInputTokens = quota.maxInputTokens;
       existing.maxOutputTokens = quota.maxOutputTokens;
+      existing.maxCostUsd = quota.maxCostUsd;
       // Durable commits can advance while other leases remain active. Never
       // move a broker-observed counter backwards when synchronizing them.
       existing.usedRequests = Math.max(existing.usedRequests, quota.usedRequests);
       existing.usedInputTokens = Math.max(existing.usedInputTokens, quota.usedInputTokens);
       existing.usedOutputTokens = Math.max(existing.usedOutputTokens, quota.usedOutputTokens);
+      existing.usedCostUsd = Math.max(existing.usedCostUsd, quota.usedCostUsd);
+      this.persistBudgetQuota?.(existing, expiresAt);
     }
   }
 
@@ -543,7 +563,11 @@ export class ProviderBroker {
   }
 
   private accountAggregateRequest(lease: Lease) {
-    for (const scoped of lease.budgetQuotas) this.budgetQuotas.get(scoped.id)!.usedRequests += 1;
+    for (const scoped of lease.budgetQuotas) {
+      const quota = this.budgetQuotas.get(scoped.id)!;
+      quota.usedRequests += 1;
+      this.persistBudgetQuota?.(quota);
+    }
   }
 
   private aggregateTokenFailure(lease: Lease, bounds: ProviderTokenBounds) {
@@ -574,6 +598,26 @@ export class ProviderBroker {
       const quota = this.budgetQuotas.get(scoped.id)!;
       if (quota.maxInputTokens !== null) quota.usedInputTokens += bounds.inputTokens;
       if (quota.maxOutputTokens !== null) quota.usedOutputTokens += bounds.outputTokens ?? 0;
+      this.persistBudgetQuota?.(quota);
+    }
+  }
+
+  private aggregateCostFailure(lease: Lease, amountUsd: number) {
+    for (const scoped of lease.budgetQuotas) {
+      const quota = this.budgetQuotas.get(scoped.id);
+      if (!quota) return `Broker budget quota ${scoped.id} is unavailable.`;
+      if (quota.maxCostUsd !== null && quota.usedCostUsd + amountUsd > quota.maxCostUsd) {
+        return `Broker aggregate cost budget ${quota.id} would be exceeded by this request.`;
+      }
+    }
+    return null;
+  }
+
+  private accountAggregateCost(lease: Lease, amountUsd: number) {
+    for (const scoped of lease.budgetQuotas) {
+      const quota = this.budgetQuotas.get(scoped.id)!;
+      if (quota.maxCostUsd !== null) quota.usedCostUsd += amountUsd;
+      this.persistBudgetQuota?.(quota);
     }
   }
 

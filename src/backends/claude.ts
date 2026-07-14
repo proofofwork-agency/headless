@@ -54,7 +54,7 @@ export function buildClaudeCommand(opts: ExecOptions) {
     "--disallowedTools",
     denied.join(","),
   ];
-  if ((opts.authMode ?? "native-login") === "broker") cmd.splice(5, 0, "--bare");
+  if ((opts.authMode ?? "broker") === "broker") cmd.splice(5, 0, "--bare");
   if (opts.model) cmd.push("--model", safeOption(opts.model, "model", { namespace: "Claude" }));
   return cmd;
 }

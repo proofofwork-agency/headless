@@ -1,8 +1,8 @@
-import type { AdapterProbe } from "../contracts/adapter";
+import type { BackendProbe } from "../contracts/backend";
 import { terminateProcessTree } from "../runtime/process-tree";
 import { positiveTimeout } from "../runtime/validation";
 import { recordRuntimeDiagnostic } from "../runtime/diagnostics";
-import { getAdapter, resolveAdapterId, type BackendAdapterProbeSpec } from "./registry";
+import { getBackendDefinition, resolveBackendId, type BackendDefinitionProbeSpec } from "./registry";
 
 export type ProbeExecution = {
   exitCode: number | null;
@@ -19,12 +19,12 @@ export type BoundedProbeExecutionOptions = {
   signal?: AbortSignal;
 };
 
-export type ProbeExecutor = (argv: readonly string[], limits: Pick<BackendAdapterProbeSpec, "timeoutMs" | "maxOutputBytes">) => Promise<ProbeExecution>;
+export type ProbeExecutor = (argv: readonly string[], limits: Pick<BackendDefinitionProbeSpec, "timeoutMs" | "maxOutputBytes">) => Promise<ProbeExecution>;
 
 /** Probe the exact CLI flags Headless relies on, with bounded time and output. */
-export async function probeBackendAdapter(id: string, execute?: ProbeExecutor): Promise<AdapterProbe> {
-  const resolved = resolveAdapterId(id);
-  const adapter = getAdapter(resolved);
+export async function probeBackendDefinition(id: string, execute?: ProbeExecutor): Promise<BackendProbe> {
+  const resolved = resolveBackendId(id);
+  const adapter = getBackendDefinition(resolved);
   if (!adapter) return failedProbe("Adapter is not registered.");
   if (!execute) return { ok: false, version: null, capabilities: adapter.capabilities, reason: "A contained probe executor is required." };
   const limits = { timeoutMs: adapter.probe.timeoutMs, maxOutputBytes: adapter.probe.maxOutputBytes };
@@ -59,7 +59,7 @@ export async function probeBackendAdapter(id: string, execute?: ProbeExecutor): 
 
 export async function executeBoundedProbe(
   argv: readonly string[],
-  { timeoutMs, maxOutputBytes }: Pick<BackendAdapterProbeSpec, "timeoutMs" | "maxOutputBytes">,
+  { timeoutMs, maxOutputBytes }: Pick<BackendDefinitionProbeSpec, "timeoutMs" | "maxOutputBytes">,
   options: BoundedProbeExecutionOptions,
 ): Promise<ProbeExecution> {
   const boundedTimeoutMs = positiveTimeout(timeoutMs, { max: 30_000, name: "probe timeoutMs" });
@@ -164,7 +164,7 @@ function compareVersions(left: string, right: string) {
   return 0;
 }
 
-function failedProbe(reason: string): AdapterProbe {
+function failedProbe(reason: string): BackendProbe {
   return {
     ok: false,
     version: null,

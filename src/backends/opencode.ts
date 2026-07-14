@@ -26,26 +26,6 @@ export type OpenCodeJsonlParseResult = {
 };
 
 export const OPENCODE_READ_ONLY_CONFIG = {
-  tools: {
-    read: true,
-    glob: true,
-    grep: true,
-    list: true,
-    // Shell access is safe only because the outer sandbox is authoritative.
-    // It also makes the daemon-owned `headless-run-tool` helper callable in
-    // read mode without enabling project MCP/configuration surfaces.
-    bash: true,
-    edit: false,
-    write: false,
-    patch: false,
-    todowrite: false,
-    task: false,
-    webfetch: false,
-    websearch: false,
-    skill: false,
-    lsp: false,
-    external_directory: false,
-  },
   permission: {
     "*": "deny",
     read: "allow",
@@ -67,23 +47,6 @@ export const OPENCODE_READ_ONLY_CONFIG = {
 } as const;
 
 export const OPENCODE_WRITE_CONFIG = {
-  tools: {
-    read: true,
-    glob: true,
-    grep: true,
-    list: true,
-    bash: true,
-    edit: true,
-    write: true,
-    patch: true,
-    todowrite: false,
-    task: false,
-    webfetch: false,
-    websearch: false,
-    skill: false,
-    lsp: false,
-    external_directory: false,
-  },
   permission: {
     "*": "deny",
     read: "allow",
@@ -110,8 +73,11 @@ export function openCodeConfigContent(mode: ExecOptions["mode"] = "read-only") {
   return JSON.stringify(mode === "write" ? OPENCODE_WRITE_CONFIG : OPENCODE_READ_ONLY_CONFIG);
 }
 
-export function buildOpenCodeCommand(opts: ExecOptions, cwd: string) {
+export function buildOpenCodeCommand(opts: ExecOptions, cwd: string, nativeSessionId?: string) {
   const cmd = ["opencode", "run", "--pure", "--format", "json", "--dir", cwd];
+  if (nativeSessionId) {
+    cmd.push("--session", safeOption(nativeSessionId, "native session id", { namespace: "OpenCode" }));
+  }
   if (opts.model) {
     cmd.push("--model", safeOption(opts.model, "model", { namespace: "OpenCode" }));
   }
@@ -119,13 +85,17 @@ export function buildOpenCodeCommand(opts: ExecOptions, cwd: string) {
     cmd.push("--agent", safeAgentName(opts.agent, "OpenCode"));
   }
   if (opts.approvalPolicy === "auto" || opts.approvalPolicy === "bypass") {
-    cmd.push("--dangerously-skip-permissions");
+    cmd.push("--auto");
   }
   // `--` ends flag parsing: without it, a prompt that begins with a flag (e.g.
-  // "--dangerously-skip-permissions") would be parsed by opencode as an argument
+  // "--auto") would be parsed by opencode as an argument
   // rather than the message. Everything after `--` is the positional prompt.
   cmd.push("--", opts.prompt);
   return cmd;
+}
+
+export function buildOpenCodeResumeCommand(opts: ExecOptions, cwd: string, nativeSessionId: string) {
+  return buildOpenCodeCommand(opts, cwd, nativeSessionId);
 }
 
 // opencode is multi-provider and auto-detects <PROVIDER>_API_KEY env vars.

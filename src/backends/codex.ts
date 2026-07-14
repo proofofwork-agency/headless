@@ -31,7 +31,14 @@ const DISABLED_CODEX_FEATURES = [
  * in depth beneath Headless' outer containment.
  */
 export function buildCodexCommand(opts: ExecOptions, cwd: string) {
-  const sandbox = opts.mode === "write" ? "workspace-write" : "read-only";
+  // Headless's outer OS sandbox is the filesystem/network authority. Nested
+  // macOS Seatbelt profiles cannot be applied from inside that sandbox, so a
+  // required-contained Codex process delegates to the outer profile on Darwin.
+  // Linux and explicit unsafe runs retain Codex's mode-specific sandbox.
+  const nativeSandbox = opts.mode === "write" ? "workspace-write" : "read-only";
+  const sandbox = opts.containment !== "unsafe" && process.platform === "darwin"
+    ? "danger-full-access"
+    : nativeSandbox;
   const cmd = [
     "codex",
     "exec",

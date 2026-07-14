@@ -9,6 +9,14 @@ export type BackendMetadata = {
   maxDepth: number | null;
   canRead: boolean;
   canWrite: boolean;
+  nativeResume: boolean;
+  login?: {
+    displayName: string;
+    argv?: [string, ...string[]];
+    instructions: string;
+    interactive: boolean;
+    brokerMode: boolean;
+  };
 };
 
 export const backendMetadata: Record<Backend, BackendMetadata> = {
@@ -20,6 +28,8 @@ export const backendMetadata: Record<Backend, BackendMetadata> = {
     maxDepth: 2,
     canRead: true,
     canWrite: true,
+    nativeResume: true,
+    login: { displayName: "OpenCode", argv: ["opencode", "auth", "login"], instructions: "Run `opencode auth login`, then refresh Fleet health.", interactive: true, brokerMode: true },
   },
   "claude-code": {
     id: "claude-code",
@@ -29,6 +39,8 @@ export const backendMetadata: Record<Backend, BackendMetadata> = {
     maxDepth: null,
     canRead: true,
     canWrite: true,
+    nativeResume: false,
+    login: { displayName: "Claude Code", argv: ["claude", "auth", "login"], instructions: "Run `claude auth login`. Headless requires supported regular-file login state; broker mode is also available.", interactive: true, brokerMode: true },
   },
   codex: {
     id: "codex",
@@ -38,6 +50,8 @@ export const backendMetadata: Record<Backend, BackendMetadata> = {
     maxDepth: null,
     canRead: true,
     canWrite: true,
+    nativeResume: true,
+    login: { displayName: "Codex", argv: ["codex", "login"], instructions: "Run `codex login`, then refresh Fleet health.", interactive: true, brokerMode: true },
   },
   "grok-build": {
     id: "grok-build",
@@ -46,7 +60,9 @@ export const backendMetadata: Record<Backend, BackendMetadata> = {
     timeoutMs: 180_000,
     maxDepth: null,
     canRead: true,
-    canWrite: true,
+    canWrite: false,
+    nativeResume: true,
+    login: { displayName: "Grok Build", instructions: "Use the Grok CLI's documented authentication flow, then refresh Fleet health.", interactive: false, brokerMode: true },
   },
 };
 

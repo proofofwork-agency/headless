@@ -2,23 +2,36 @@ import type { ExecOptions } from "../index";
 import { buildAdapterEnv } from "./env";
 import { buildClaudeCommand } from "./claude";
 import { buildCodexCommand } from "./codex";
-import { buildGrokCommand, parseGrokJsonl } from "./grok";
+import { buildGrokCommand, buildGrokResumeCommand, parseGrokJsonl } from "./grok";
 import { parseClaudeStreamJson, parseCodexJson, type JsonParseResult } from "./json";
-import { buildOpenCodeCommand, nextOpenCodeEnv, OPENCODE_CREDENTIAL_PREFIXES, parseOpenCodeJsonl } from "./opencode";
+import { buildOpenCodeCommand, buildOpenCodeResumeCommand, nextOpenCodeEnv, OPENCODE_CREDENTIAL_PREFIXES, parseOpenCodeJsonl } from "./opencode";
 import { backendMetadata, type BackendMetadata } from "./metadata";
 import { normalizeBackend, type Backend } from "./ids";
-import type { AdapterCapabilities } from "../contracts/adapter";
+import type { BackendCapabilities } from "../contracts/backend";
+import type { WorkerEnvironment } from "../runtime/worker-environment";
+import {
+  grokProjectControlPaths,
+  installGrokIsolation,
+  managedGrokExecutable,
+  validateGrokIsolationInspection,
+} from "../runtime/grok-isolation";
 
-export type BackendAdapterMetadata = Omit<BackendMetadata, "id"> & { id: string };
-export type BackendAdapterSecurity = {
+export type BackendDefinitionMetadata = Omit<BackendMetadata, "id"> & { id: string };
+export type BackendDefinitionSecurity = {
   outerContainmentRequired: boolean;
   strictAuth: "broker-api-key" | "credential-free";
   disablesProjectConfig: boolean;
   disablesHooks: boolean;
   disablesMcp: boolean;
   disablesSkills: boolean;
+  /**
+   * The outer read-only project mount plus adapter-specific startup masking
+   * prevents project control surfaces from being loaded or created. This does
+   * not authorize writable execution.
+   */
+  isolatesReadOnlyProjectControls?: boolean;
 };
-export type BackendAdapterProbeSpec = {
+export type BackendDefinitionProbeSpec = {
   versionCommand: readonly string[];
   helpCommand: readonly string[];
   requiredHelpFragments: readonly string[];
@@ -26,41 +39,62 @@ export type BackendAdapterProbeSpec = {
   maxOutputBytes: number;
   minimumVersion?: string;
 };
-export type BackendAdapter = {
+export type BackendDefinition = {
   id: string;
-  metadata: BackendAdapterMetadata;
-  capabilities: AdapterCapabilities;
-  security: BackendAdapterSecurity;
-  probe: BackendAdapterProbeSpec;
+  metadata: BackendDefinitionMetadata;
+  capabilities: BackendCapabilities;
+  security: BackendDefinitionSecurity;
+  probe: BackendDefinitionProbeSpec;
   stdinPrompt: boolean;
   supportsNamedAgent?: boolean;
   credentialPrefixes: string[];
+  provider?: "openai" | "anthropic" | "gemini" | "xai" | null;
+  fleetPriority?: number;
   selfSandboxed?: boolean;
+  nativeAuth?: { resolveModel: boolean };
+  configureWorker?: (worker: WorkerEnvironment, options: { authHomeDir?: string }) => void;
+  projectControlPaths?: (projectRoot: string) => string[];
+  isolationAttestation?: {
+    command: readonly string[];
+    timeoutMs: number;
+    maxOutputBytes: number;
+    validate: (value: unknown) => string | null;
+  };
+  managedExecutable?: (homeDir?: string) => unknown | null;
+  prepareEnvironment?: (
+    env: NodeJS.ProcessEnv,
+    context: { worker: WorkerEnvironment; platform: NodeJS.Platform },
+  ) => void;
   buildEnv?: (env: NodeJS.ProcessEnv, opts?: ExecOptions) => NodeJS.ProcessEnv;
-  buildCommand: (opts: ExecOptions, cwd: string) => string[];
+  prepareCommand: (opts: ExecOptions, cwd: string) => string[];
   buildResumeCommand?: (opts: ExecOptions, cwd: string, nativeSessionId: string) => string[];
-  parse: (stdout: string) => JsonParseResult;
+  decodeOutput: (stdout: string) => JsonParseResult;
 };
 
-const builtInBackendAdapters = {
+const builtInBackendDefinitions = {
   opencode: {
     id: "opencode",
     metadata: backendMetadata.opencode,
-    capabilities: capabilities({ write: true, tools: true }),
+    capabilities: capabilities({ write: true, tools: true, nativeResume: true }),
     security: hardenedSecurity(),
     probe: probeSpec(
       ["opencode", "--version"],
       ["opencode", "run", "--help"],
-      ["--pure", "--format", "--dir", "--model", "--agent"],
+      ["--pure", "--format", "--dir", "--model", "--agent", "--session", "--auto"],
       "1.15.3",
     ),
     stdinPrompt: false,
     supportsNamedAgent: true,
     // Single source of truth in opencode.ts (nextOpenCodeEnv uses the same list).
     credentialPrefixes: OPENCODE_CREDENTIAL_PREFIXES,
+    provider: null,
+    fleetPriority: 5,
+    nativeAuth: { resolveModel: true },
+    prepareEnvironment: prepareOpenCodeEnvironment,
     buildEnv: nextOpenCodeEnv,
-    buildCommand: buildOpenCodeCommand,
-    parse: parseOpenCodeJsonl,
+    prepareCommand: buildOpenCodeCommand,
+    buildResumeCommand: buildOpenCodeResumeCommand,
+    decodeOutput: parseOpenCodeJsonl,
   },
   "claude-code": {
     id: "claude-code",
@@ -86,13 +120,17 @@ const builtInBackendAdapters = {
     ),
     stdinPrompt: true,
     credentialPrefixes: ["ANTHROPIC_API_KEY"],
-    buildCommand: buildClaudeCommand,
-    parse: parseClaudeStreamJson,
+    provider: "anthropic",
+    fleetPriority: 10,
+    nativeAuth: { resolveModel: false },
+    prepareEnvironment: prepareClaudeEnvironment,
+    prepareCommand: buildClaudeCommand,
+    decodeOutput: parseClaudeStreamJson,
   },
   codex: {
     id: "codex",
     metadata: backendMetadata.codex,
-    capabilities: capabilities({ write: true, tools: true }),
+    capabilities: capabilities({ write: true, tools: true, nativeResume: true }),
     security: hardenedSecurity(),
     probe: probeSpec(
       ["codex", "--version"],
@@ -102,87 +140,105 @@ const builtInBackendAdapters = {
     ),
     stdinPrompt: true,
     credentialPrefixes: ["OPENAI_API_KEY"],
+    provider: "openai",
+    fleetPriority: 20,
+    nativeAuth: { resolveModel: false },
+    prepareEnvironment: prepareCodexEnvironment,
     selfSandboxed: true,
-    buildCommand: buildCodexCommand,
-    parse: parseCodexJson,
+    prepareCommand: buildCodexCommand,
+    decodeOutput: parseCodexJson,
   },
   "grok-build": {
     id: "grok-build",
     metadata: backendMetadata["grok-build"],
-    capabilities: capabilities({ write: true, tools: true }),
+    capabilities: capabilities({ tools: true, nativeResume: true }),
     security: {
       outerContainmentRequired: true,
       strictAuth: "broker-api-key",
       // The isolated config and startup snapshot masks remove every surface
-      // present at launch. Grok 0.2.93 still watches native skill paths, and
-      // Linux cannot kernel-mask future glob matches, so required runs remain
-      // fail-closed until that dynamic boundary is available.
+      // present at launch. Grok 0.2.99 additionally requires a contained
+      // inspection attestation before provider access; write mode remains
+      // fail-closed because Linux cannot mask future glob matches.
       disablesProjectConfig: false,
       disablesHooks: false,
       disablesMcp: false,
       disablesSkills: false,
+      isolatesReadOnlyProjectControls: true,
     },
     probe: probeSpec(
       ["grok", "--version"],
       ["grok", "--help"],
       ["--single", "--cwd", "--output-format", "--permission-mode", "--agent", "--no-subagents", "--no-memory", "--disable-web-search", "--verbatim", "--system-prompt-override", "--tools", "inspect"],
-      "0.2.93",
+      "0.2.99",
     ),
     stdinPrompt: false,
     supportsNamedAgent: true,
     credentialPrefixes: ["XAI_API_KEY"],
-    buildCommand: buildGrokCommand,
-    parse: parseGrokJsonl,
+    provider: "xai",
+    fleetPriority: 0,
+    nativeAuth: { resolveModel: false },
+    configureWorker: (worker, options) => installGrokIsolation(worker, { homeDir: options.authHomeDir }),
+    projectControlPaths: grokProjectControlPaths,
+    isolationAttestation: {
+      command: ["grok", "inspect", "--json"],
+      timeoutMs: 30_000,
+      maxOutputBytes: 1_000_000,
+      validate: validateGrokIsolationInspection,
+    },
+    managedExecutable: managedGrokExecutable,
+    prepareCommand: buildGrokCommand,
+    buildResumeCommand: buildGrokResumeCommand,
+    decodeOutput: parseGrokJsonl,
   },
-} satisfies Record<Backend, BackendAdapter>;
+} satisfies Record<Backend, BackendDefinition>;
 
 /** Stable built-in view retained for existing runner consumers. */
-export const backendAdapters: Readonly<Record<Backend, BackendAdapter>> = builtInBackendAdapters;
+export const backendDefinitions: Readonly<Record<Backend, BackendDefinition>> = builtInBackendDefinitions;
 
-const builtInIds = new Set<string>(Object.keys(builtInBackendAdapters));
-const registeredAdapters = new Map<string, BackendAdapter>(
-  Object.values(builtInBackendAdapters).map((adapter) => [adapter.id, adapter]),
+const builtInIds = new Set<string>(Object.keys(builtInBackendDefinitions));
+const registeredDefinitions = new Map<string, BackendDefinition>(
+  Object.values(builtInBackendDefinitions).map((adapter) => [adapter.id, adapter]),
 );
 
-export function registerAdapter(adapter: BackendAdapter, opts: { replace?: boolean } = {}) {
-  validateAdapterDefinition(adapter);
-  const existing = registeredAdapters.get(adapter.id);
+export function registerBackendDefinition(adapter: BackendDefinition, opts: { replace?: boolean } = {}) {
+  validateBackendDefinition(adapter);
+  const existing = registeredDefinitions.get(adapter.id);
   if (builtInIds.has(adapter.id)) {
-    throw new Error(`Cannot replace built-in backend adapter: ${adapter.id}`);
+    throw new Error(`Cannot replace built-in backend definition: ${adapter.id}`);
   }
   if (existing && !opts.replace) {
-    throw new Error(`Backend adapter already registered: ${adapter.id}`);
+    throw new Error(`Backend definition already registered: ${adapter.id}`);
   }
-  registeredAdapters.set(adapter.id, adapter);
+  registeredDefinitions.set(adapter.id, adapter);
   return adapter;
 }
 
-export function unregisterAdapter(id: string) {
+export function unregisterBackendDefinition(id: string) {
   if (builtInIds.has(id)) return false;
-  return registeredAdapters.delete(id);
+  return registeredDefinitions.delete(id);
 }
 
-export function getAdapter(id: string) {
-  return registeredAdapters.get(id);
+export function getBackendDefinition(id: string) {
+  return registeredDefinitions.get(id);
 }
 
 /** Resolve aliases for built-ins and preserve exact registered extension IDs. */
-export function resolveAdapterId(input: string) {
+export function resolveBackendId(input: string) {
   try {
     return normalizeBackend(input);
   } catch {
-    if (registeredAdapters.has(input)) return input;
+    if (registeredDefinitions.has(input)) return input;
     throw new Error(`Unsupported backend: ${input}`);
   }
 }
 
-export function listAdapters() {
-  return [...registeredAdapters.values()];
+export function listBackendDefinitions() {
+  return [...registeredDefinitions.values()];
 }
 
 export function assertModeAllowed(backend: Backend | string, mode: ExecOptions["mode"] = "read-only") {
-  const id = resolveAdapterId(backend);
-  const adapter = getAdapter(id);
+  const id = resolveBackendId(backend);
+  const adapter = getBackendDefinition(id);
   if (!adapter) throw new Error(`Backend ${backend} is not registered.`);
   if (mode === "write" && !adapter.metadata.canWrite) {
     throw new Error(`Backend ${backend} does not support write mode in Headless yet.`);
@@ -190,9 +246,10 @@ export function assertModeAllowed(backend: Backend | string, mode: ExecOptions["
 }
 
 /** Security capabilities that required outer containment cannot replace. */
-export function requiredContainmentSecurityGaps(adapter: BackendAdapter) {
+export function requiredContainmentSecurityGaps(adapter: BackendDefinition, mode?: ExecOptions["mode"]) {
   const gaps: string[] = [];
   if (!adapter.security.outerContainmentRequired) gaps.push("outer containment authority");
+  if (mode === "read-only" && adapter.security.isolatesReadOnlyProjectControls) return gaps;
   if (!adapter.security.disablesProjectConfig) gaps.push("project configuration");
   if (!adapter.security.disablesHooks) gaps.push("startup hooks");
   if (!adapter.security.disablesMcp) gaps.push("project MCP servers");
@@ -200,11 +257,11 @@ export function requiredContainmentSecurityGaps(adapter: BackendAdapter) {
   return gaps;
 }
 
-export function buildBackendEnv(adapter: BackendAdapter, env: NodeJS.ProcessEnv = process.env) {
+export function buildBackendEnv(adapter: BackendDefinition, env: NodeJS.ProcessEnv = process.env) {
   return adapter.buildEnv ? adapter.buildEnv(env) : buildAdapterEnv(env, adapter.credentialPrefixes);
 }
 
-function capabilities(overrides: Partial<AdapterCapabilities> = {}): AdapterCapabilities {
+function capabilities(overrides: Partial<BackendCapabilities> = {}): BackendCapabilities {
   return {
     write: false,
     streaming: true,
@@ -218,7 +275,7 @@ function capabilities(overrides: Partial<AdapterCapabilities> = {}): AdapterCapa
   };
 }
 
-function hardenedSecurity(): BackendAdapterSecurity {
+function hardenedSecurity(): BackendDefinitionSecurity {
   return {
     outerContainmentRequired: true,
     strictAuth: "broker-api-key",
@@ -234,22 +291,22 @@ function probeSpec(
   helpCommand: readonly string[],
   requiredHelpFragments: readonly string[],
   minimumVersion: string,
-): BackendAdapterProbeSpec {
+): BackendDefinitionProbeSpec {
   return { versionCommand, helpCommand, requiredHelpFragments, timeoutMs: 5_000, maxOutputBytes: 262_144, minimumVersion };
 }
 
-export function validateAdapterDefinition(adapter: BackendAdapter) {
+export function validateBackendDefinition(adapter: BackendDefinition) {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(adapter.id)) {
-    throw new Error(`Invalid backend adapter id: ${adapter.id}`);
+    throw new Error(`Invalid backend definition id: ${adapter.id}`);
   }
   if (adapter.metadata.id !== adapter.id) {
-    throw new Error(`Backend adapter metadata id mismatch: ${adapter.metadata.id} !== ${adapter.id}`);
+    throw new Error(`Backend definition metadata id mismatch: ${adapter.metadata.id} !== ${adapter.id}`);
   }
   if (adapter.capabilities.write !== adapter.metadata.canWrite) {
-    throw new Error(`Backend adapter write capability mismatch for ${adapter.id}`);
+    throw new Error(`Backend definition write capability mismatch for ${adapter.id}`);
   }
   if (!adapter.security || !adapter.probe) {
-    throw new Error(`Backend adapter ${adapter.id} must declare security and probe metadata.`);
+    throw new Error(`Backend definition ${adapter.id} must declare security and probe metadata.`);
   }
   if (
     !Number.isSafeInteger(adapter.probe.timeoutMs)
@@ -260,12 +317,29 @@ export function validateAdapterDefinition(adapter: BackendAdapter) {
     || adapter.probe.maxOutputBytes > 1_000_000
     || (adapter.probe.minimumVersion !== undefined && !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(adapter.probe.minimumVersion))
   ) {
-    throw new Error(`Backend adapter ${adapter.id} has invalid probe limits.`);
+    throw new Error(`Backend definition ${adapter.id} has invalid probe limits.`);
   }
-  if (typeof adapter.buildCommand !== "function" || typeof adapter.parse !== "function") {
-    throw new Error(`Backend adapter ${adapter.id} must provide buildCommand and parse functions.`);
+  if (typeof adapter.prepareCommand !== "function" || typeof adapter.decodeOutput !== "function") {
+    throw new Error(`Backend definition ${adapter.id} must provide prepareCommand and decodeOutput functions.`);
   }
   if (adapter.capabilities.nativeResume && typeof adapter.buildResumeCommand !== "function") {
-    throw new Error(`Backend adapter ${adapter.id} declares native resume without a tested resume command implementation.`);
+    throw new Error(`Backend definition ${adapter.id} declares native resume without a tested resume command implementation.`);
   }
+}
+
+function prepareOpenCodeEnvironment(env: NodeJS.ProcessEnv) {
+  env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
+  env.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1";
+  env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
+  env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "1";
+}
+
+function prepareClaudeEnvironment(env: NodeJS.ProcessEnv, context: { worker: WorkerEnvironment }) {
+  env.CLAUDE_CODE_TMPDIR = context.worker.temp;
+}
+
+function prepareCodexEnvironment(env: NodeJS.ProcessEnv, context: { platform: NodeJS.Platform }) {
+  if (context.platform !== "darwin") return;
+  env.SSL_CERT_FILE = "/etc/ssl/cert.pem";
+  env.SSL_CERT_DIR = "/etc/ssl/certs";
 }

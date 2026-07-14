@@ -1,10 +1,11 @@
 import { spawn, type Subprocess } from "bun";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { ExecOptions, ExecResult } from "../index";
-import { assertModeAllowed, getAdapter, requiredContainmentSecurityGaps, type BackendAdapter } from "../backends/registry";
+import type { ExecOptions } from "../index";
+import type { ExperimentalExecResult as ExecResult } from "../experimental/exec-result";
+import { assertModeAllowed, getBackendDefinition, requiredContainmentSecurityGaps, type BackendDefinition } from "../backends/registry";
 import { appendAdapterDiagnostic, classifyAdapterFailure, normalizeAdapterResult } from "../backends/result-normalization";
-import { executeBoundedProbe, probeBackendAdapter, type ProbeExecutor } from "../backends/probe";
+import { executeBoundedProbe, probeBackendDefinition, type ProbeExecutor } from "../backends/probe";
 import {
   buildLinuxReadOnlyArgs,
   buildLinuxWriteSandboxArgs,
@@ -29,7 +30,6 @@ import {
 import { redactAndTruncate, StreamingRedactor } from "../runtime/redaction";
 import { createWorkerEnvironment, type WorkerEnvironment } from "../runtime/worker-environment";
 import { installNativeAuthCapsule, supportsNativeAuthCapsule } from "../runtime/native-auth-capsule";
-import { grokProjectControlPaths, installGrokIsolation } from "../runtime/grok-isolation";
 import { terminateProcessTree as terminateChildProcessTree } from "../runtime/process-tree";
 import { positiveTimeout } from "../runtime/validation";
 import { cleanupWithDiagnostic, recordRuntimeDiagnostic } from "../runtime/diagnostics";
@@ -47,27 +47,23 @@ import {
 const DEFAULT_TIMEOUT = 180_000;
 const STREAM_CAP_BYTES = 262_144;
 const TERMINATION_GRACE_MS = 1_500;
-let darwinProbe: ReturnType<typeof probeDarwinSandboxWriteDenial> | null = null;
-let linuxProbe: ReturnType<typeof probeLinuxBwrap> | null = null;
 
-const activeProcs = new Set<Subprocess>();
+type ExecutionSupervisorState = {
+  activeProcesses: Set<Subprocess>;
+  darwinProbe: ReturnType<typeof probeDarwinSandboxWriteDenial> | null;
+  linuxProbe: ReturnType<typeof probeLinuxBwrap> | null;
+};
 
 type SandboxWrap = {
   cmd: string[];
   cleanup: () => void;
   sandboxed: boolean;
   reason: string;
-  network: "broker-only" | "provider-direct" | "denied" | "unrestricted";
+  network: "broker-only" | "native-direct-unrestricted" | "denied" | "unrestricted";
   credentialAccess: "backend-native" | "broker-lease" | "none";
 };
 
-export async function killAllActiveRunners(signal: "SIGTERM" | "SIGKILL" = "SIGTERM") {
-  return await Promise.all(
-    [...activeProcs].map((process) => terminateProcessTree(process, signal === "SIGKILL" ? 0 : TERMINATION_GRACE_MS)),
-  );
-}
-
-type InternalRunOptions = ExecOptions & {
+export type InternalRunOptions = ExecOptions & {
   backend: string;
   jobId?: string;
   /** Test/daemon-owned host home used only to derive an audited native capsule. */
@@ -83,11 +79,73 @@ type InternalRunOptions = ExecOptions & {
   runTool?: RunToolWorkerAccess;
 };
 
-export async function runHeadless(options: InternalRunOptions): Promise<ExecResult> {
+/** Owns containment probes, active descendants, deadlines, cleanup, and output bounds. */
+export class ExecutionSupervisor {
+  private readonly state: ExecutionSupervisorState = {
+    activeProcesses: new Set(),
+    darwinProbe: null,
+    linuxProbe: null,
+  };
+
+  execute(options: InternalRunOptions): Promise<ExecResult> {
+    return executeSupervisedRun(options, this.state);
+  }
+
+  async terminateAll(signal: "SIGTERM" | "SIGKILL" = "SIGTERM") {
+    return await Promise.all(
+      [...this.state.activeProcesses].map((process) => terminateProcessTree(
+        process,
+        signal === "SIGKILL" ? 0 : TERMINATION_GRACE_MS,
+      )),
+    );
+  }
+
+  wrapWithSandbox(
+    command: string[],
+    options: ExecOptions & {
+      backend: string;
+      broker?: InternalRunOptions["broker"];
+      runTool?: RunToolWorkerAccess;
+      sandboxNetwork?: "denied" | "native-auth-local" | "provider-direct";
+    },
+    adapter: BackendDefinition,
+    cwd: string,
+    primaryRootForWrite?: string,
+    worker?: WorkerEnvironment,
+    runtimeReadRoots: string[] = [],
+  ) {
+    return wrapWithSandboxWithoutState(
+      command,
+      options,
+      adapter,
+      cwd,
+      primaryRootForWrite,
+      worker,
+      runtimeReadRoots,
+      this.state,
+    );
+  }
+}
+
+export const defaultExecutionSupervisor = new ExecutionSupervisor();
+
+/** Experimental compatibility entry; stable callers submit through exec(). */
+export function runHeadless(options: InternalRunOptions) {
+  return defaultExecutionSupervisor.execute(options);
+}
+
+export function killAllActiveRunners(signal: "SIGTERM" | "SIGKILL" = "SIGTERM") {
+  return defaultExecutionSupervisor.terminateAll(signal);
+}
+
+async function executeSupervisedRun(
+  options: InternalRunOptions,
+  supervisor: ExecutionSupervisorState,
+): Promise<ExecResult> {
   const started = Date.now();
   const cwd = options.cwd ?? process.cwd();
   const containment = containmentRequirement(options);
-  const authMode = options.authMode ?? "native-login";
+  const authMode = options.authMode ?? "broker";
   const timeoutMs = timeout(options.timeoutMs);
 
   if (process.platform === "win32") {
@@ -97,14 +155,14 @@ export async function runHeadless(options: InternalRunOptions): Promise<ExecResu
     return failedResult(options.backend, "CANCELLED", "Run was cancelled before preparation.", Date.now() - started, containment, "cancelled");
   }
 
-  const adapter = getAdapter(options.backend);
+  const adapter = getBackendDefinition(options.backend);
   if (!adapter) return failedResult(options.backend, "BACKEND_UNAVAILABLE", `Backend adapter ${options.backend} is not registered.`, Date.now() - started, containment);
 
   if (containment === "required") {
     if (authMode === "broker" && adapter.security.strictAuth === "broker-api-key" && !options.broker) {
       return failedResult(options.backend, "AUTH_UNAVAILABLE", `Backend ${options.backend} requires a daemon-issued provider broker lease in required containment. OAuth, keychain, and host credential fallback are disabled.`, Date.now() - started, containment);
     }
-    const unsupported = requiredContainmentSecurityGaps(adapter);
+    const unsupported = requiredContainmentSecurityGaps(adapter, options.mode);
     if (unsupported.length) {
       return failedResult(options.backend, "BACKEND_UNSUPPORTED", `Backend ${options.backend} cannot run in required containment because it does not disable: ${unsupported.join(", ")}.`, Date.now() - started, containment);
     }
@@ -125,7 +183,7 @@ export async function runHeadless(options: InternalRunOptions): Promise<ExecResu
         capsule = installNativeAuthCapsule(worker, adapter.id, {
           homeDir: options.authHomeDir,
           requestedModel: options.model,
-          resolveOpenCodeModel: adapter.id === "opencode",
+          resolveOpenCodeModel: adapter.nativeAuth?.resolveModel ?? false,
         });
       } catch (error) {
         if (isHeadlessError(error)) {
@@ -145,14 +203,32 @@ export async function runHeadless(options: InternalRunOptions): Promise<ExecResu
       }
       if (capsule.model) nativeOptions = { ...options, model: capsule.model };
     }
-    if (adapter.id === "grok-build") installGrokIsolation(worker);
+    adapter.configureWorker?.(worker, { authHomeDir: options.authHomeDir });
     if (containment === "required") {
-      const probe = await probeBackendAdapter(options.backend, containedProbeExecutor(options, adapter, cwd, worker));
+      const probe = await probeBackendDefinition(options.backend, containedProbeExecutor(options, adapter, cwd, worker, supervisor));
       if (!probe.ok) {
         if (options.signal?.aborted) {
           return failedResult(options.backend, "CANCELLED", "Run was cancelled during the backend capability probe.", Date.now() - started, containment, "cancelled");
         }
         return failedResult(options.backend, "BACKEND_UNAVAILABLE", `Backend ${options.backend} capability probe failed: ${probe.reason ?? "unknown failure"}`, Date.now() - started, containment);
+      }
+    }
+    if (adapter.isolationAttestation) {
+      const inspection = adapter.isolationAttestation;
+      const attestation = await containedProbeExecutor(options, adapter, cwd, worker, supervisor)(
+        inspection.command,
+        { timeoutMs: inspection.timeoutMs, maxOutputBytes: inspection.maxOutputBytes },
+      );
+      const failure = isolationAttestationFailure(attestation, inspection.validate);
+      if (failure) {
+        return failedResult(
+          options.backend,
+          "BACKEND_UNSUPPORTED",
+          `Grok isolation attestation failed before provider access: ${failure}`,
+          Date.now() - started,
+          containment,
+          "blocked",
+        );
       }
     }
     if (options.runTool) {
@@ -163,22 +239,38 @@ export async function runHeadless(options: InternalRunOptions): Promise<ExecResu
       ? { ...nativeOptions, prompt: withRunToolInstructions(nativeOptions.prompt) }
       : nativeOptions;
     const env = adapterEnvironment(adapter, worker, prepared);
-    if (prepared.mode === "write") return await runContainedWrite(prepared, adapter, cwd, env, worker, started, timeoutMs, containment);
-    return await runBackendProcess(prepared, adapter, cwd, env, worker, started, timeoutMs, containment);
+    if (prepared.mode === "write") return await runContainedWrite(prepared, adapter, cwd, env, worker, started, timeoutMs, containment, supervisor);
+    return await runBackendProcess(prepared, adapter, cwd, env, worker, started, timeoutMs, containment, undefined, supervisor);
   } finally {
     await cleanupWithDiagnostic("runner.worker-environment", worker.cleanup);
   }
 }
 
+function isolationAttestationFailure(
+  attestation: Awaited<ReturnType<ProbeExecutor>>,
+  validate: (value: unknown) => string | null,
+) {
+  if (attestation.error) return attestation.error;
+  if (attestation.timedOut) return "inspect timed out";
+  if (attestation.overflowed) return "inspect output exceeded its bound";
+  if (attestation.exitCode !== 0) return attestation.stderr || `inspect exited ${attestation.exitCode}`;
+  try {
+    return validate(JSON.parse(attestation.stdout));
+  } catch {
+    return "inspect returned malformed JSON";
+  }
+}
+
 async function runContainedWrite(
   options: InternalRunOptions,
-  adapter: BackendAdapter,
+  adapter: BackendDefinition,
   cwd: string,
   env: NodeJS.ProcessEnv,
   worker: WorkerEnvironment,
   started: number,
   timeoutMs: number,
   containment: "required" | "unsafe",
+  supervisor: ExecutionSupervisorState,
 ) {
   let plan;
   let leasePrepared = false;
@@ -222,7 +314,7 @@ async function runContainedWrite(
   let integration: WriteIntegrationResult | null = null;
   let integrationOwnsCleanup = false;
   try {
-    result = await runBackendProcess(options, adapter, plan.worktreePath, env, worker, started, timeoutMs, containment, cwd);
+    result = await runBackendProcess(options, adapter, plan.worktreePath, env, worker, started, timeoutMs, containment, cwd, supervisor);
     try {
       captured = captureWriteDiff(plan);
     } catch (error) {
@@ -291,7 +383,7 @@ async function runContainedWrite(
 
 async function runBackendProcess(
   options: InternalRunOptions,
-  adapter: BackendAdapter,
+  adapter: BackendDefinition,
   cwd: string,
   env: NodeJS.ProcessEnv,
   worker: WorkerEnvironment,
@@ -299,18 +391,28 @@ async function runBackendProcess(
   timeoutMs: number,
   containment: "required" | "unsafe",
   primaryRootForWrite?: string,
+  supervisor?: ExecutionSupervisorState,
 ): Promise<ExecResult> {
   let command: string[];
   try {
     command = options.resumeNativeSessionId
       ? adapter.buildResumeCommand?.(options, cwd, options.resumeNativeSessionId)
         ?? (() => { throw new Error(`Backend ${adapter.id} does not implement native resume.`); })()
-      : adapter.buildCommand(options, cwd);
+      : adapter.prepareCommand(options, cwd);
   } catch (error) {
     return failedResult(options.backend, "BACKEND_UNAVAILABLE", `Backend command preparation failed: ${messageOf(error)}`, Date.now() - started, containment);
   }
   const runtimeReadRoots = executableReadRoots(command, env);
-  const wrapped = maybeWrapWithSandbox(command, options, adapter, cwd, primaryRootForWrite, worker, runtimeReadRoots);
+  const wrapped = wrapWithSandboxWithoutState(
+    command,
+    options,
+    adapter,
+    cwd,
+    primaryRootForWrite,
+    worker,
+    runtimeReadRoots,
+    supervisor,
+  );
 
   if (containment === "required" && !wrapped.sandboxed) {
     await cleanupWithDiagnostic("runner.unavailable-sandbox", wrapped.cleanup);
@@ -349,7 +451,7 @@ async function runBackendProcess(
       stdin: adapter.stdinPrompt ? "pipe" : undefined,
       detached: true,
     });
-    activeProcs.add(process);
+    supervisor?.activeProcesses.add(process);
     timeoutHandle = setTimeout(() => {
       timedOut = true;
       stop();
@@ -375,7 +477,7 @@ async function runBackendProcess(
       readStreamCapped(process.stderr as ReadableStream<Uint8Array>, STREAM_CAP_BYTES, onOverflow),
     ]);
     const durationMs = Date.now() - started;
-    const parsed = normalizeAdapterResult(adapter.parse(stdoutRead.text), adapter.id);
+    const parsed = normalizeAdapterResult(adapter.decodeOutput(stdoutRead.text), adapter.id);
     const callbackFailures = stream?.failureCount() ?? 0;
     if (callbackFailures > 0) {
       appendAdapterDiagnostic(
@@ -390,7 +492,7 @@ async function runBackendProcess(
     const noAssistantOutput = !parsed.output && !parsed.error;
     const ok = isSuccessfulRun({ timedOut, cancelled, overflowed, parseError: parsed.error, noAssistantOutput, exitCode });
     const classified = ok || cancelled || timedOut || overflowed ? null : classifyAdapterFailure({
-      authMode: options.authMode ?? "native-login",
+      authMode: options.authMode ?? "broker",
       error: parsed.error,
       output: parsed.output,
       stderr: stderrRead.text,
@@ -445,7 +547,7 @@ async function runBackendProcess(
         recordRuntimeDiagnostic("cleanup", "runner.process-tree", new Error("Backend process tree did not exit after bounded TERM to KILL escalation."));
       }
     }
-    if (process) activeProcs.delete(process);
+    if (process) supervisor?.activeProcesses.delete(process);
     await cleanupWithDiagnostic("runner.sandbox-wrapper", wrapped.cleanup);
   }
 }
@@ -470,14 +572,40 @@ export function maybeWrapWithSandbox(
     /** Daemon-only probe restriction; never accepted at a public boundary. */
     sandboxNetwork?: "denied" | "native-auth-local" | "provider-direct";
   },
-  adapter: BackendAdapter,
+  adapter: BackendDefinition,
   cwd: string,
   primaryRootForWrite?: string,
   worker?: WorkerEnvironment,
   runtimeReadRoots: string[] = [],
 ): SandboxWrap {
+  return defaultExecutionSupervisor.wrapWithSandbox(
+    command,
+    options,
+    adapter,
+    cwd,
+    primaryRootForWrite,
+    worker,
+    runtimeReadRoots,
+  );
+}
+
+function wrapWithSandboxWithoutState(
+  command: string[],
+  options: ExecOptions & {
+    backend: string;
+    broker?: InternalRunOptions["broker"];
+    runTool?: RunToolWorkerAccess;
+    sandboxNetwork?: "denied" | "native-auth-local" | "provider-direct";
+  },
+  adapter: BackendDefinition,
+  cwd: string,
+  primaryRootForWrite?: string,
+  worker?: WorkerEnvironment,
+  runtimeReadRoots: string[] = [],
+  supervisor?: ExecutionSupervisorState,
+): SandboxWrap {
   const containment = containmentRequirement(options);
-  const authMode = options.authMode ?? "native-login";
+  const authMode = options.authMode ?? "broker";
   // Provider-direct is granted only to an audited backend with a concrete
   // regular-file capsule path. Legacy strictAuth describes broker compatibility;
   // it is not a native-login capability flag.
@@ -485,18 +613,21 @@ export function maybeWrapWithSandbox(
   const sandboxNetwork = options.sandboxNetwork === "native-auth-local"
     ? "denied"
     : options.sandboxNetwork ?? (usesNativeCredentials ? "provider-direct" : "denied");
-  const network = sandboxNetwork === "provider-direct" ? "provider-direct" : options.broker ? "broker-only" : "denied";
+  const network = sandboxNetwork === "provider-direct" ? "native-direct-unrestricted" : options.broker ? "broker-only" : "denied";
   const credentialAccess = usesNativeCredentials ? "backend-native" : options.broker ? "broker-lease" : "none";
   if (containment === "unsafe") return { cmd: command, cleanup: noop, sandboxed: false, reason: "explicit unsafe execution", network: "unrestricted", credentialAccess };
   if (!worker) return { cmd: command, cleanup: noop, sandboxed: false, reason: "isolated worker environment was not prepared", network: "denied", credentialAccess: "none" };
-  const grokControls = adapter.id === "grok-build"
-    ? [...grokProjectControlPaths(cwd), ...(primaryRootForWrite ? grokProjectControlPaths(primaryRootForWrite) : [])]
+  const backendControls = adapter.projectControlPaths
+    ? [...adapter.projectControlPaths(cwd), ...(primaryRootForWrite ? adapter.projectControlPaths(primaryRootForWrite) : [])]
     : [];
   const credentialRoots = sandboxCredentialRoots();
-  const denyReadRoots = [...credentialRoots, ...grokControls];
+  const denyReadRoots = [...credentialRoots, ...backendControls];
 
   if (process.platform === "darwin") {
-    if (!darwinProbe?.ok) darwinProbe = probeDarwinSandboxWriteDenial();
+    const darwinProbe = supervisor?.darwinProbe?.ok
+      ? supervisor.darwinProbe
+      : probeDarwinSandboxWriteDenial();
+    if (supervisor) supervisor.darwinProbe = darwinProbe;
     if (!darwinProbe.ok) return { cmd: command, cleanup: noop, sandboxed: false, reason: darwinProbe.reason, network: "denied", credentialAccess };
     const staged = stageDarwinBunScript(command, worker.env.PATH, worker, cwd);
     if (staged.kind === "rejected") {
@@ -548,7 +679,8 @@ export function maybeWrapWithSandbox(
   }
 
   if (process.platform === "linux") {
-    if (!linuxProbe?.ok) linuxProbe = probeLinuxBwrap();
+    const linuxProbe = supervisor?.linuxProbe?.ok ? supervisor.linuxProbe : probeLinuxBwrap();
+    if (supervisor) supervisor.linuxProbe = linuxProbe;
     if (!linuxProbe.ok) return { cmd: command, cleanup: noop, sandboxed: false, reason: linuxProbe.reason, network: "denied", credentialAccess };
     const relay = resolveLinuxRelayEntry();
     const bun = resolveExecutable("bun", worker.env.PATH);
@@ -632,24 +764,20 @@ export async function terminateProcessTree(process: Subprocess, graceMs = TERMIN
   return await terminateChildProcessTree(process, { graceMs });
 }
 
-function adapterEnvironment(adapter: BackendAdapter, worker: WorkerEnvironment, options: InternalRunOptions) {
+function adapterEnvironment(adapter: BackendDefinition, worker: WorkerEnvironment, options: InternalRunOptions) {
   const base = { ...worker.env, HEADLESS_DEPTH: process.env.HEADLESS_DEPTH ?? "0" };
   const env: NodeJS.ProcessEnv = adapter.buildEnv ? adapter.buildEnv(base, options) : base;
-  if (adapter.id === "opencode") {
-    env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
-    env.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1";
-    env.OPENCODE_DISABLE_EXTERNAL_SKILLS = "1";
-    env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "1";
-  }
+  adapter.prepareEnvironment?.(env, { worker, platform: process.platform });
   if (options.broker) applyBrokerEnvironment(env, options.broker);
   return env;
 }
 
 function containedProbeExecutor(
   options: InternalRunOptions,
-  adapter: BackendAdapter,
+  adapter: BackendDefinition,
   cwd: string,
   worker: WorkerEnvironment,
+  supervisor: ExecutionSupervisorState,
 ): ProbeExecutor {
   return async (argv, limits) => {
     const probeOptions: InternalRunOptions = {
@@ -665,7 +793,7 @@ function containedProbeExecutor(
       signal: undefined,
     };
     const command = [...argv];
-    const wrapped = maybeWrapWithSandbox(
+    const wrapped = wrapWithSandboxWithoutState(
       command,
       probeOptions,
       adapter,
@@ -673,6 +801,7 @@ function containedProbeExecutor(
       undefined,
       worker,
       executableReadRoots(command, worker.env),
+      supervisor,
     );
     if (!wrapped.sandboxed) {
       wrapped.cleanup();
@@ -892,6 +1021,7 @@ function executionSummary(result: ExecResult): WriteExecutionSummary {
   return {
     succeeded: result.ok && status === "succeeded",
     status,
+    failureCode: result.error?.code ?? null,
     usage: result.usage ?? {
       input: null,
       output: result.tokens,

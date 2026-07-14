@@ -2,6 +2,7 @@ import type { ExecOptions } from "../index";
 import { GROK_HEADLESS_SYSTEM_PROMPT, GROK_READ_TOOLS, GROK_WRITE_TOOLS } from "../runtime/grok-isolation";
 import { GROK_BUILTIN_AGENT_NAMES, safeAgentName, safeOption } from "../runtime/validation";
 import {
+  appendText,
   collectText,
   emptyTokenUsage,
   formatError,
@@ -11,6 +12,7 @@ import {
   numberValue,
   objectValue,
   parseJsonValuesDetailed,
+  stringValue,
   textCollector,
   type NormalizedTokenUsage,
   type ParserDiagnostics,
@@ -59,8 +61,11 @@ export function getGrokAgents(): GrokAgentInfo[] {
   return Object.values(AGENTS);
 }
 
-export function buildGrokCommand(opts: ExecOptions, cwd: string) {
+export function buildGrokCommand(opts: ExecOptions, cwd: string, nativeSessionId?: string) {
   const cmd = ["grok", "--single", opts.prompt, "--cwd", cwd, "--output-format", "streaming-json"];
+  if (nativeSessionId) {
+    cmd.push("--resume", safeOption(nativeSessionId, "native session id", { namespace: "Grok" }));
+  }
   if (opts.model) {
     cmd.push("--model", safeOption(opts.model, "model", { namespace: "Grok" }));
   }
@@ -89,6 +94,10 @@ export function buildGrokCommand(opts: ExecOptions, cwd: string) {
   return cmd;
 }
 
+export function buildGrokResumeCommand(opts: ExecOptions, cwd: string, nativeSessionId: string) {
+  return buildGrokCommand(opts, cwd, nativeSessionId);
+}
+
 export function parseGrokJsonl(stdout: string): GrokJsonParseResult {
   const text = textCollector();
   const errors: string[] = [];
@@ -100,7 +109,12 @@ export function parseGrokJsonl(stdout: string): GrokJsonParseResult {
   for (const event of parsed.values) {
     const outputCount = text.length;
     const errorCount = errors.length;
-    if (event.type !== "error") collectText(event, text);
+    if (event.type === "text") {
+      const delta = stringValue(event.data);
+      if (delta) appendText(text, delta);
+    } else if (event.type !== "error" && event.type !== "thought") {
+      collectText(event, text);
+    }
 
     const message = formatError(event.error) ?? (event.type === "error" ? String(event.message || "") : null);
     if (event.type === "error" && message) errors.push(message);
