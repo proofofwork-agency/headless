@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Delegation, Goal } from "../contracts/collaboration";
+import type { RunErrorCode } from "../contracts/common";
 import { DelegationScheduler, DelegationSchedulerError } from "./delegation-scheduler";
 import type { GoalStore } from "./goal-store";
 import { HeadlessError } from "./headless-error";
 
 export type GoalDelegationAttempt<T> =
   | { kind: "succeeded"; value: T; resultTurnId: string; artifactIds?: string[] }
-  | { kind: "failed"; error: string }
+  | { kind: "failed"; error: string; code?: RunErrorCode; retryable?: boolean }
   | { kind: "rate_limited"; error: string; retryAfterMs: number; evidence: string };
 
 export type GoalDelegationEvent = {
@@ -241,9 +242,9 @@ export class GoalDelegationRuntime {
         return;
       }
       this.finishFailure(recovery.delegation, new HeadlessError(
-        "PROCESS_ERROR",
+        attempt.code ?? "PROCESS_ERROR",
         recovery.delegation.lastError ?? "Delegation failed.",
-        { details: { retryReason: recovery.reason } },
+        { retryable: attempt.retryable, details: { retryReason: recovery.reason } },
       ), recovery.delegation.state === "expired" ? "expired" : "failed");
       this.pump();
       return;

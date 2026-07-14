@@ -126,6 +126,7 @@ export function buildDarwinWriteProfile(options: DarwinWriteSandboxProfileOption
   const primary = canonicalizeExistingPath(options.primaryRoot);
   return buildDarwinProfile({
     readableRoots: [primary, worktree, ...darwinRuntimeReadRoots(options.runtimeReadRoots)],
+    readableDirectories: ancestorDirectories(worktree),
     writableRoots: [worktree, ...workerWritableRoots(options.worker)],
     linkRoots: [worktree],
     // A linked worktree's .git file points into the primary repository. It is
@@ -145,6 +146,7 @@ export function buildDarwinWriteProfile(options: DarwinWriteSandboxProfileOption
 
 function buildDarwinProfile(options: {
   readableRoots: string[];
+  readableDirectories?: string[];
   writableRoots: string[];
   linkRoots?: string[];
   denyWriteRoots?: string[];
@@ -155,6 +157,7 @@ function buildDarwinProfile(options: {
   unixSockets: string[];
 }): string {
   const readable = uniquePaths(resolveOptionalPaths(options.readableRoots));
+  const readableDirectories = uniquePaths(resolveOptionalPaths(options.readableDirectories ?? []));
   const writable = uniquePaths(resolveOptionalPaths(options.writableRoots));
   const linkable = uniquePaths(resolveOptionalPaths(options.linkRoots ?? []));
   const denyWrite = uniquePaths(resolveOptionalPaths(options.denyWriteRoots ?? []));
@@ -169,6 +172,11 @@ function buildDarwinProfile(options: {
     "(allow sysctl-read)",
     "(allow file-read-metadata)",
     "(allow file-read-data (literal \"/\"))",
+    // Git and ordinary shells open /dev/null read-write while sanitizing
+    // standard descriptors. This exact character device carries no data and
+    // granting it does not expose the rest of /dev.
+    "(allow file-read* (literal \"/dev/null\"))",
+    "(allow file-write* (literal \"/dev/null\"))",
     "(deny network*)",
     "(deny network-bind)",
     // Native providers need ordinary IP egress, not ambient host Unix-socket
@@ -184,6 +192,10 @@ function buildDarwinProfile(options: {
       "(allow mach-lookup (global-name \"com.apple.ocspd\"))",
       "(allow mach-lookup (global-name \"com.apple.cfprefsd.agent\"))",
     ] : []),
+    // Bun's package-script resolver walks checkout ancestors looking for a
+    // workspace boundary. Permit listing only those exact directories; their
+    // children remain unreadable unless separately allowlisted below.
+    ...readableDirectories.map((path) => `(allow file-read-data (literal ${sbplString(path)}))`),
     ...options.brokerPorts.map((port) => `(allow network-outbound (remote ip ${sbplString(`localhost:${port}`)}))`),
     ...unixSockets.map((path) => `(allow network-outbound (remote unix-socket (path-literal ${sbplString(path)})))`),
     ...readable.map((path) => `(allow file-read* ${sbplPathFilter(path)})`),
@@ -216,6 +228,18 @@ function darwinRuntimeReadRoots(extra: string[] = []): string[] {
 function workerWritableRoots(worker?: WorkerEnvironmentPaths): string[] {
   if (!worker) return [];
   return [worker.root, worker.home, worker.config, worker.data, worker.cache, worker.runtime, worker.temp];
+}
+
+function ancestorDirectories(path: string): string[] {
+  const ancestors: string[] = [];
+  let current = dirname(path);
+  while (true) {
+    ancestors.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return ancestors;
 }
 
 export function cleanupSandboxProfile(profilePath: string): void {

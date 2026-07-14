@@ -100,10 +100,11 @@ export type GoalTransition = z.infer<typeof GoalTransitionSchema>;
 export type GoalRecord = z.infer<typeof GoalRecordSchema>;
 export type GoalCreateInput = Omit<
   z.input<typeof GoalSchema>,
-  "id" | "projectId" | "state" | "leaderAgentId" | "createdAt" | "updatedAt"
+  "id" | "projectId" | "state" | "synthesizer" | "synthesizerAgentId" | "createdAt" | "updatedAt"
 > & {
   id?: string;
-  leaderAgentId?: string | null;
+  synthesizer?: z.input<typeof GoalSchema>["synthesizer"];
+  synthesizerAgentId?: string | null;
 };
 
 export class GoalStore {
@@ -125,13 +126,15 @@ export class GoalStore {
 
   create(input: GoalCreateInput): GoalRecord {
     const at = this.now();
+    const synthesizer = input.synthesizer ?? { kind: "automatic" as const };
     const goal = GoalSchema.parse({
       ...input,
       id: input.id ?? this.id(),
       projectId: this.projectId,
       state: "queued",
-      leaderAgentId: input.leaderAgentId
-        ?? (input.coordinator.kind === "agent" ? input.coordinator.agentId : null),
+      synthesizerAgentId: input.synthesizerAgentId
+        ?? (synthesizer.kind === "agent" ? synthesizer.agentId : null),
+      synthesizer,
       createdAt: at,
       updatedAt: at,
     });
@@ -250,17 +253,17 @@ export class GoalStore {
     return this.status(id);
   }
 
-  transferLeader(id: string, agentId: string, actor: string, reason = "Leadership transferred.") {
+  transferSynthesizer(id: string, agentId: string, actor: string, reason = "Task synthesis transferred.") {
     const record = this.require(id);
     if (TerminalGoalStateSchema.safeParse(record.goal.state).success) {
-      throw new Error(`Cannot transfer leadership for terminal goal ${id}.`);
+      throw new Error(`Cannot transfer task synthesis for terminal goal ${id}.`);
     }
     const nextLeader = IdentifierSchema.parse(agentId);
     const principal = PrincipalIdSchema.parse(actor);
-    if (record.goal.leaderAgentId === nextLeader) return cloneGoal(record.goal);
-    record.goal.leaderAgentId = nextLeader;
-    if (record.goal.coordinator.kind === "agent") {
-      record.goal.coordinator = { kind: "agent", agentId: nextLeader };
+    if (record.goal.synthesizerAgentId === nextLeader) return cloneGoal(record.goal);
+    record.goal.synthesizerAgentId = nextLeader;
+    if (record.goal.synthesizer.kind === "agent") {
+      record.goal.synthesizer = { kind: "agent", agentId: nextLeader };
     }
     record.goal.updatedAt = this.now();
     record.transitions.push(GoalTransitionSchema.parse({

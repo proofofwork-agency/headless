@@ -238,7 +238,7 @@ function appServerOpenRequest(
 }
 
 function initializeParams() {
-  return { clientInfo: { name: "headless", title: "Headless", version: "0.2.0" } };
+  return { clientInfo: { name: "headless", title: "Headless", version: "0.2.0-alpha.0" } };
 }
 
 function requireTransport(runtime: SessionDriverRuntime) {

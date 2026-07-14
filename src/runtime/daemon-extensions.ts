@@ -4,12 +4,12 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import {
-  getAdapter,
-  listAdapters,
-  registerAdapter,
-  unregisterAdapter,
-  validateAdapterDefinition,
-  type BackendAdapter,
+  getBackendDefinition,
+  listBackendDefinitions,
+  registerBackendDefinition,
+  unregisterBackendDefinition,
+  validateBackendDefinition,
+  type BackendDefinition,
 } from "../backends/registry";
 import {
   getProvider,
@@ -50,7 +50,7 @@ const ExtensionManifestSchema = z.object({
 
 export type HeadlessExtensionApi = Readonly<{
   version: 1;
-  registerAdapter(adapter: BackendAdapter): BackendAdapter;
+  registerBackendDefinition(adapter: BackendDefinition): BackendDefinition;
   registerProvider(provider: ProviderDefinition): ProviderDefinition;
   registerPricing(entry: Parameters<typeof registerPricing>[0]): PricingEntry;
 }>;
@@ -193,7 +193,7 @@ export async function loadDaemonExtensions(
     }
     const loaded = await pending;
     for (const id of loaded.adapters) {
-      if (!getAdapter(id)) throw new Error(`Daemon extension adapter ${id} was removed after startup registration.`);
+      if (!getBackendDefinition(id)) throw new Error(`Daemon extension adapter ${id} was removed after startup registration.`);
       adapters.add(id);
     }
     for (const id of loaded.providers) {
@@ -218,7 +218,7 @@ export async function loadDaemonExtensions(
 async function loadExtensionModule(
   module: ResolvedDaemonExtensionModule,
 ): Promise<LoadedDaemonExtensions> {
-  const adaptersBefore = new Map(listAdapters().map((adapter) => [adapter.id, adapter]));
+  const adaptersBefore = new Map(listBackendDefinitions().map((adapter) => [adapter.id, adapter]));
   const providersBefore = new Map(listProviders().map((provider) => [provider.id, provider]));
   const pricingBefore = new Map(listPricing().map((entry) => [entry.id, entry]));
   // Revalidate the canonical path, trusted ancestor chain, and exact bytes at
@@ -241,7 +241,7 @@ async function loadExtensionModule(
     throw new Error(`Daemon extension module must export default or registerHeadlessExtension as a function: ${module.path}`);
   }
 
-  const stagedAdapters: BackendAdapter[] = [];
+  const stagedAdapters: BackendDefinition[] = [];
   const stagedProviders: ProviderDefinition[] = [];
   const stagedPricing: PricingEntry[] = [];
   const stagedAdapterIds = new Set<string>();
@@ -249,9 +249,9 @@ async function loadExtensionModule(
   const stagedPricingIds = new Set<string>();
   const api: HeadlessExtensionApi = Object.freeze({
     version: 1 as const,
-    registerAdapter(adapter: BackendAdapter) {
-      validateAdapterDefinition(adapter);
-      if (getAdapter(adapter.id) || stagedAdapterIds.has(adapter.id)) {
+    registerBackendDefinition(adapter: BackendDefinition) {
+      validateBackendDefinition(adapter);
+      if (getBackendDefinition(adapter.id) || stagedAdapterIds.has(adapter.id)) {
         throw new Error(`Backend adapter already registered: ${adapter.id}`);
       }
       stagedAdapterIds.add(adapter.id);
@@ -302,7 +302,7 @@ async function loadExtensionModule(
   const committedPricing: string[] = [];
   try {
     for (const adapter of stagedAdapters) {
-      registerAdapter(adapter);
+      registerBackendDefinition(adapter);
       committedAdapters.push(adapter.id);
     }
     for (const provider of stagedProviders) {
@@ -316,7 +316,7 @@ async function loadExtensionModule(
   } catch (error) {
     for (const id of committedPricing.reverse()) unregisterPricing(id);
     for (const id of committedProviders.reverse()) unregisterProvider(id);
-    for (const id of committedAdapters.reverse()) unregisterAdapter(id);
+    for (const id of committedAdapters.reverse()) unregisterBackendDefinition(id);
     throw error;
   }
   return Object.freeze({
@@ -328,11 +328,11 @@ async function loadExtensionModule(
 }
 
 function registryChanged(
-  adaptersBefore: ReadonlyMap<string, BackendAdapter>,
+  adaptersBefore: ReadonlyMap<string, BackendDefinition>,
   providersBefore: ReadonlyMap<string, ProviderDefinition>,
   pricingBefore: ReadonlyMap<string, PricingEntry>,
 ) {
-  const adaptersAfter = new Map(listAdapters().map((adapter) => [adapter.id, adapter]));
+  const adaptersAfter = new Map(listBackendDefinitions().map((adapter) => [adapter.id, adapter]));
   const providersAfter = new Map(listProviders().map((provider) => [provider.id, provider]));
   if (
     adaptersAfter.size !== adaptersBefore.size
@@ -351,15 +351,15 @@ function registryChanged(
 }
 
 function restoreRegistry(
-  adaptersBefore: ReadonlyMap<string, BackendAdapter>,
+  adaptersBefore: ReadonlyMap<string, BackendDefinition>,
   providersBefore: ReadonlyMap<string, ProviderDefinition>,
   pricingBefore: ReadonlyMap<string, PricingEntry>,
 ) {
-  for (const adapter of listAdapters()) {
-    if (!adaptersBefore.has(adapter.id)) unregisterAdapter(adapter.id);
+  for (const adapter of listBackendDefinitions()) {
+    if (!adaptersBefore.has(adapter.id)) unregisterBackendDefinition(adapter.id);
   }
   for (const [id, adapter] of adaptersBefore) {
-    if (getAdapter(id) !== adapter) registerAdapter(adapter, { replace: true });
+    if (getBackendDefinition(id) !== adapter) registerBackendDefinition(adapter, { replace: true });
   }
   for (const provider of listProviders()) {
     if (!providersBefore.has(provider.id)) unregisterProvider(provider.id);

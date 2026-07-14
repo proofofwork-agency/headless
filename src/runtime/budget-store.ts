@@ -336,7 +336,7 @@ export class BudgetStore {
    * Every run is bounded even when no user budget exists; matching budgets can
    * only reduce that bound.
    */
-  brokerLeaseLimits(reservationId: string, defaultMaxRequests = 64) {
+  brokerLeaseLimits(reservationId: string, defaultMaxRequests = 8) {
     if (!Number.isSafeInteger(defaultMaxRequests) || defaultMaxRequests <= 0) {
       throw new TypeError("Default broker request limit must be a positive safe integer.");
     }
@@ -421,8 +421,15 @@ export class BudgetStore {
     };
   }
 
+  hasCostLimit(value: BudgetScope) {
+    const scope = BudgetScopeSchema.parse(value);
+    if (scope.projectId !== this.projectId) return false;
+    return this.matchingBudgets(scope).some((budget) => budget.maxCostUsd !== null);
+  }
+
   private matchingBudgets(scope: z.infer<typeof BudgetScopeSchema>) {
     return this.state.budgets.filter((budget) => {
+      if (budget.expiresAt !== null && budget.expiresAt <= this.now()) return false;
       if (budget.projectId !== scope.projectId) return false;
       if (budget.principal !== null && budget.principal !== scope.principal) return false;
       if (budget.sessionId !== null && budget.sessionId !== scope.sessionId) return false;

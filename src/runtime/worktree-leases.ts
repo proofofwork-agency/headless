@@ -40,6 +40,7 @@ export type WorktreeLease = z.infer<typeof WorktreeLeaseSchema>;
 type WorktreeLeaseStoreOptions = {
   owner?: z.infer<typeof OwnerSchema>;
   now?: () => number;
+  checkoutBase?: string;
 };
 
 /** Durable manifests for every daemon-owned write/integration checkout. */
@@ -54,7 +55,7 @@ export class WorktreeLeaseStore {
     private readonly projectId: string,
     options: WorktreeLeaseStoreOptions = {},
   ) {
-    this.checkoutRoot = ensureOwnerOnlyDirectory(join(root, "checkouts"));
+    this.checkoutRoot = ensureOwnerOnlyDirectory(options.checkoutBase ?? join(root, "checkouts"));
     this.manifestsRoot = ensureOwnerOnlyDirectory(join(root, "leases"));
     this.owner = OwnerSchema.parse(options.owner ?? {
       pid: process.pid,

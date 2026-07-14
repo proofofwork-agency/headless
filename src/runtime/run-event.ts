@@ -18,6 +18,7 @@ export type RunEventContext = {
   sessionId?: string | null;
   sequence: number;
   timestamp?: number;
+  eventId?: string;
 };
 
 export type RunEventBuilderOptions = {
@@ -38,7 +39,7 @@ export function buildRunEvent(
   const sanitize = textSanitizer(options.redact ?? redactAndTruncate);
   const envelope = {
     version: 2 as const,
-    eventId: options.createId?.() ?? randomUUID(),
+    eventId: context.eventId ?? options.createId?.() ?? randomUUID(),
     jobId: context.jobId,
     sessionId: context.sessionId ?? null,
     sequence: context.sequence,

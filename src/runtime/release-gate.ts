@@ -1,7 +1,7 @@
 import { redactAndTruncate } from "./redaction";
 import { recordArtifact } from "./ledger-api";
 import { executableReadRoots, maybeWrapWithSandbox, terminateProcessTree } from "../runner/simple";
-import { getAdapter } from "../backends/registry";
+import { getBackendDefinition } from "../backends/registry";
 import { createWorkerEnvironment } from "./worker-environment";
 import type { ProjectStateOptions } from "./project-state";
 import { cleanupWithDiagnostic, recordRuntimeDiagnostic } from "./diagnostics";
@@ -80,7 +80,7 @@ export function runGateAndReport(options: GateCheck[] | RunGateOptions = DEFAULT
 async function runGateCheck(check: GateCheck, cwd: string, timeoutMs: number, signal?: AbortSignal, primaryRoot?: string): Promise<GateCheckResult> {
   const started = Date.now();
   if (signal?.aborted) return gateFailure(check, started, "Gate cancelled before launch.", false, true);
-  const adapter = getAdapter("opencode");
+  const adapter = getBackendDefinition("opencode");
   if (!adapter) return gateFailure(check, started, "Gate containment adapter is unavailable.", false, false);
   const worker = createWorkerEnvironment();
   const runtimeReadRoots = executableReadRoots([check.command], worker.env);

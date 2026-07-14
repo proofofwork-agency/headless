@@ -54,7 +54,7 @@ export class PersistentSessionStore {
       model: input.model ?? null,
       agent: input.agent ?? null,
       containment: input.containment ?? "required",
-      authMode: input.authMode ?? "native-login",
+      authMode: input.authMode ?? "broker",
       approvalPolicy: input.approvalPolicy ?? "ask",
       state: "idle",
       nativeSessionId: input.nativeSessionId ?? null,

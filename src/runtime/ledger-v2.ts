@@ -98,7 +98,32 @@ export type LedgerV2Options = {
   readModelPath: string;
   projectId: string;
   principal: string;
+  /** Legacy single-key convenience. The derived key id is stable across restarts. */
   hmacKey?: string;
+  /** Explicit active writer key. Use with `hmacKey` to give rotations a durable id. */
+  hmacKeyId?: string;
+  /** Verification keys for mixed historical HMAC records and key rotation. */
+  hmacKeyring?: Readonly<Record<string, string>>;
+  /** Selects the keyring entry used for new records. */
+  activeHmacKeyId?: string;
+};
+
+export function ledgerIntegrityOptionsFromEnv(env: NodeJS.ProcessEnv = process.env) {
+  let hmacKeyring: Record<string, string> | undefined;
+  if (env.HEADLESS_LEDGER_KEYS) {
+    hmacKeyring = z.record(z.string().min(16)).parse(safeJsonParse(env.HEADLESS_LEDGER_KEYS));
+  }
+  return {
+    hmacKey: env.HEADLESS_LEDGER_KEY,
+    hmacKeyId: env.HEADLESS_LEDGER_KEY_ID,
+    hmacKeyring,
+    activeHmacKeyId: env.HEADLESS_LEDGER_ACTIVE_KEY_ID,
+  };
+}
+
+type LedgerIntegrityKeys = {
+  active: { id: string; key: string } | null;
+  keyring: ReadonlyMap<string, string>;
 };
 
 export class LedgerV2IntegrityError extends Error {
@@ -114,6 +139,8 @@ export class LedgerV2 {
   readonly projectId: string;
   readonly principal: string;
   readonly hmacKey?: string;
+  readonly hmacKeyId?: string;
+  private readonly integrityKeys: LedgerIntegrityKeys;
   private cache: ReadCache;
   private fullEvents: LedgerRecordV2[] | null = null;
   /** Exact in-process index; the persisted read projection remains bounded. */
@@ -126,13 +153,15 @@ export class LedgerV2 {
     this.readModelPath = options.readModelPath;
     this.projectId = ProjectIdSchema.parse(options.projectId);
     this.principal = z.string().min(1).max(128).parse(options.principal);
-    this.hmacKey = options.hmacKey;
+    this.integrityKeys = ledgerIntegrityKeys(options);
+    this.hmacKey = this.integrityKeys.active?.key;
+    this.hmacKeyId = this.integrityKeys.active?.id;
     mkdirPrivate(dirname(this.ledgerPath));
     mkdirPrivate(dirname(this.readModelPath));
     // Persisted read models are bounded projections, never authority. Their
     // ledger-prefix digest is checked before their offset/head is trusted.
     const loaded = loadReadCache(this.readModelPath);
-    this.cache = loaded && cachedPrefixMatches(this.ledgerPath, loaded, this.projectId, this.hmacKey) ? loaded : emptyReadCache();
+    this.cache = loaded && cachedPrefixMatches(this.ledgerPath, loaded, this.projectId, this.integrityKeys) ? loaded : emptyReadCache();
     this.persistedSequence = this.cache.lastSequence;
     this.refresh();
   }
@@ -152,6 +181,7 @@ export class LedgerV2 {
       if (existing) return { record: existing, appended: false as const };
 
       const safePayload = redactDeep(payload).value;
+      const integrity = writerIntegrity(this.ledgerPath, this.cache, this.integrityKeys);
       const withoutHash: LedgerRecordWithoutHash = {
         version: 2,
         sequence: this.cache.lastSequence + 1,
@@ -160,13 +190,13 @@ export class LedgerV2 {
         principal: this.principal,
         eventId: parsedEventId,
         previousHash: this.cache.lastHash,
-        integrity: integrityMetadata(this.hmacKey),
+        integrity,
         type: z.string().min(1).max(128).parse(type),
         payload: z.record(z.unknown()).parse(safePayload),
       };
       const record = LedgerRecordV2Schema.parse({
         ...withoutHash,
-        hash: hashRecord(withoutHash, this.hmacKey),
+        hash: hashRecord(withoutHash, integrityKey(integrity, this.integrityKeys)),
       });
       const line = `${JSON.stringify(record)}\n`;
       if (Buffer.byteLength(line) > MAX_LEDGER_EVENT_BYTES) {
@@ -238,7 +268,7 @@ export class LedgerV2 {
   readAll() {
     this.refresh();
     if (!this.fullEvents) {
-      this.fullEvents = scanVerifiedLedger(this.ledgerPath, this.projectId, this.hmacKey);
+      this.fullEvents = scanVerifiedLedger(this.ledgerPath, this.projectId, this.integrityKeys);
       this.exactEventIndex = new Map(this.fullEvents.map((record) => [record.eventId, record]));
     }
     return [...this.fullEvents];
@@ -283,7 +313,7 @@ export class LedgerV2 {
       } catch (error) {
         throw new LedgerV2IntegrityError(`Invalid v2 ledger record after sequence ${this.cache.lastSequence}: ${messageOf(error)}`);
       }
-      verifyRecord(record, this.cache.lastSequence + 1, this.cache.lastHash, this.projectId, this.hmacKey);
+      verifyRecord(record, this.cache.lastSequence + 1, this.cache.lastHash, this.projectId, this.integrityKeys);
       this.cache.lastSequence = record.sequence;
       this.cache.lastHash = record.hash;
       if (seen.has(record.eventId)) continue;
@@ -311,7 +341,7 @@ export class LedgerV2 {
     const index = scanVerifiedLedgerPrefixIndex(
       this.ledgerPath,
       this.projectId,
-      this.hmacKey,
+      this.integrityKeys,
       this.cache.lastSequence,
     );
     if (index.size !== this.cache.eventCount) {
@@ -486,18 +516,79 @@ export function cleanupOwnedLedgerLock(lockPath: string) {
   return true;
 }
 
+/**
+ * Explicit recovery for a crash-truncated final append. This never repairs a
+ * malformed complete record or a broken verified prefix. The caller must have
+ * already enforced administrator authority.
+ */
+export function repairLedgerPartialTail(options: LedgerV2Options & { backupPath?: string }) {
+  const repair = withOwnedLock(`${options.ledgerPath}.lock`, () => {
+    if (!existsSync(options.ledgerPath)) throw new LedgerV2IntegrityError("Ledger does not exist; there is no partial tail to repair.");
+    const bytes = readFileSync(options.ledgerPath);
+    const lastNewline = bytes.lastIndexOf(0x0a);
+    const completeBytes = lastNewline < 0 ? Buffer.alloc(0) : bytes.subarray(0, lastNewline + 1);
+    const trailingBytes = bytes.length - completeBytes.length;
+    if (trailingBytes === 0) throw new LedgerV2IntegrityError("Ledger has no partial trailing bytes to repair.");
+
+    const keys = ledgerIntegrityKeys(options);
+    scanVerifiedLedgerText(completeBytes.toString("utf8"), options.projectId, keys);
+    const backupPath = options.backupPath ?? `${options.ledgerPath}.partial-tail-${Date.now()}.bak`;
+    if (existsSync(backupPath)) throw new LedgerV2IntegrityError(`Ledger repair backup already exists: ${backupPath}`);
+    atomicWriteFile(backupPath, bytes, { mode: 0o600 });
+
+    atomicWriteFile(options.ledgerPath, completeBytes, { mode: 0o600 });
+    rmSync(options.readModelPath, { force: true });
+    return {
+      backupPath,
+      truncatedBytes: trailingBytes,
+      truncatedSha256: createHash("sha256").update(bytes.subarray(completeBytes.length)).digest("hex"),
+    };
+  });
+  const ledger = new LedgerV2(options);
+  const recovery = ledger.append("ledger_tail_repaired", {
+    backupPath: repair.backupPath,
+    truncatedBytes: repair.truncatedBytes,
+    truncatedSha256: repair.truncatedSha256,
+    verifiedPrefixSequence: ledger.snapshot().sequence,
+    repairedAt: Date.now(),
+  });
+  return { backupPath: repair.backupPath, truncatedBytes: repair.truncatedBytes, recovery };
+}
+
+function scanVerifiedLedgerText(text: string, projectId: string, keys: LedgerIntegrityKeys) {
+  let sequence = 0;
+  let previousHash: string | null = null;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    if (Buffer.byteLength(line) > MAX_LEDGER_EVENT_BYTES) {
+      throw new LedgerV2IntegrityError(`Ledger line exceeds ${MAX_LEDGER_EVENT_BYTES} bytes.`);
+    }
+    let record: LedgerRecordV2;
+    try {
+      record = LedgerRecordV2Schema.parse(safeJsonParse(line));
+    } catch (error) {
+      throw new LedgerV2IntegrityError(`Invalid v2 ledger record after sequence ${sequence}: ${messageOf(error)}`);
+    }
+    verifyRecord(record, sequence + 1, previousHash, projectId, keys);
+    sequence = record.sequence;
+    previousHash = record.hash;
+  }
+  return sequence;
+}
+
 function verifyRecord(
   record: LedgerRecordV2,
   expectedSequence: number,
   expectedPreviousHash: string | null,
   projectId: string,
-  hmacKey?: string,
+  keys: LedgerIntegrityKeys,
 ) {
   if (record.sequence !== expectedSequence) throw new LedgerV2IntegrityError(`Expected sequence ${expectedSequence}, got ${record.sequence}.`);
   if (record.previousHash !== expectedPreviousHash) throw new LedgerV2IntegrityError(`Previous hash mismatch at sequence ${record.sequence}.`);
   if (record.projectId !== projectId) throw new LedgerV2IntegrityError(`Project ID mismatch at sequence ${record.sequence}.`);
   const { hash, ...withoutHash } = record;
-  if (hash !== hashRecord(withoutHash, hmacKey)) throw new LedgerV2IntegrityError(`Hash mismatch at sequence ${record.sequence}.`);
+  const key = integrityKey(record.integrity, keys, record.sequence);
+  if (hash !== hashRecord(withoutHash, key)) throw new LedgerV2IntegrityError(`Hash mismatch at sequence ${record.sequence}.`);
 }
 
 function hashRecord(record: LedgerRecordWithoutHash, hmacKey?: string) {
@@ -507,10 +598,74 @@ function hashRecord(record: LedgerRecordWithoutHash, hmacKey?: string) {
     : createHash("sha256").update(body).digest("hex");
 }
 
-function integrityMetadata(hmacKey?: string) {
-  return hmacKey
-    ? { algorithm: "hmac-sha256" as const, keyId: createHash("sha256").update(hmacKey).digest("hex").slice(0, 16) }
+function integrityMetadata(active: LedgerIntegrityKeys["active"]) {
+  return active
+    ? { algorithm: "hmac-sha256" as const, keyId: active.id }
     : { algorithm: "sha256" as const, keyId: null };
+}
+
+function writerIntegrity(ledgerPath: string, cache: ReadCache, keys: LedgerIntegrityKeys) {
+  const integrity = integrityMetadata(keys.active);
+  if (cache.lastSequence === 0) return integrity;
+  const tail = readCachedPrefixTail(ledgerPath, cache.offset, Buffer.byteLength(cache.partial));
+  if (tail?.integrity?.algorithm === "hmac-sha256" && !keys.active) {
+    throw new LedgerV2IntegrityError(
+      `Refusing to append an unsigned SHA record after HMAC sequence ${tail.sequence}; configure an active HMAC key.`,
+    );
+  }
+  return integrity;
+}
+
+function integrityKey(
+  integrity: LedgerRecordV2["integrity"],
+  keys: LedgerIntegrityKeys,
+  sequence?: number,
+) {
+  if (integrity.algorithm === "sha256") {
+    if (integrity.keyId !== null) {
+      throw new LedgerV2IntegrityError(`SHA record${sequence ? ` at sequence ${sequence}` : ""} must not declare a key id.`);
+    }
+    return undefined;
+  }
+  if (!integrity.keyId) {
+    throw new LedgerV2IntegrityError(`HMAC record${sequence ? ` at sequence ${sequence}` : ""} is missing its key id.`);
+  }
+  const key = keys.keyring.get(integrity.keyId);
+  if (!key) {
+    throw new LedgerV2IntegrityError(
+      `HMAC record${sequence ? ` at sequence ${sequence}` : ""} declares unknown key id ${integrity.keyId}.`,
+    );
+  }
+  return key;
+}
+
+function ledgerIntegrityKeys(options: Pick<LedgerV2Options, "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId">): LedgerIntegrityKeys {
+  const keyring = new Map<string, string>();
+  for (const [id, key] of Object.entries(options.hmacKeyring ?? {})) {
+    keyring.set(ledgerKeyId(id), ledgerKey(key));
+  }
+  if (options.hmacKey) {
+    const id = ledgerKeyId(options.hmacKeyId ?? createHash("sha256").update(options.hmacKey).digest("hex").slice(0, 16));
+    const key = ledgerKey(options.hmacKey);
+    const existing = keyring.get(id);
+    if (existing && existing !== key) throw new TypeError(`Ledger key id ${id} resolves to multiple keys.`);
+    keyring.set(id, key);
+  }
+  const activeId = options.activeHmacKeyId ?? (options.hmacKey ? options.hmacKeyId ?? createHash("sha256").update(options.hmacKey).digest("hex").slice(0, 16) : undefined);
+  if (!activeId) return { active: null, keyring };
+  const id = ledgerKeyId(activeId);
+  const key = keyring.get(id);
+  if (!key) throw new TypeError(`Active ledger HMAC key id ${id} is absent from the keyring.`);
+  return { active: { id, key }, keyring };
+}
+
+function ledgerKeyId(value: string) {
+  return z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/).parse(value);
+}
+
+function ledgerKey(value: string) {
+  if (Buffer.byteLength(value) < 16) throw new TypeError("Ledger HMAC keys must contain at least 16 bytes.");
+  return value;
 }
 
 function withOwnedLock<T>(lockPath: string, operation: () => T) {
@@ -690,7 +845,7 @@ function shouldPersistCache(previousSequence: number, nextSequence: number) {
   return nextSequence >= previousSequence * 2;
 }
 
-function cachedPrefixMatches(ledgerPath: string, cache: ReadCache, projectId: string, hmacKey?: string) {
+function cachedPrefixMatches(ledgerPath: string, cache: ReadCache, projectId: string, keys: LedgerIntegrityKeys) {
   if (cache.offset === 0) {
     return cache.lastSequence === 0
       && cache.lastHash === null
@@ -711,7 +866,7 @@ function cachedPrefixMatches(ledgerPath: string, cache: ReadCache, projectId: st
     for (const record of cache.events) {
       if (record.projectId !== projectId) return false;
       const { hash, ...withoutHash } = record;
-      if (hash !== hashRecord(withoutHash, hmacKey)) return false;
+      if (hash !== hashRecord(withoutHash, integrityKey(record.integrity, keys, record.sequence))) return false;
     }
     const tail = readCachedPrefixTail(ledgerPath, cache.offset, Buffer.byteLength(cache.partial));
     if (!tail) return false;
@@ -733,7 +888,7 @@ function readCachedPrefixTail(path: string, offset: number, partialBytes: number
     const text = bytes.subarray(0, read).toString("utf8").replace(/\n+$/, "");
     const line = text.slice(text.lastIndexOf("\n") + 1);
     const record = LedgerRecordV2Schema.parse(safeJsonParse(line));
-    return { sequence: record.sequence, hash: record.hash };
+    return { sequence: record.sequence, hash: record.hash, integrity: record.integrity };
   } finally {
     closeSync(fd);
   }
@@ -758,7 +913,7 @@ function hashFilePrefix(path: string, length: number) {
   }
 }
 
-function scanVerifiedLedger(path: string, projectId: string, hmacKey?: string) {
+function scanVerifiedLedger(path: string, projectId: string, keys: LedgerIntegrityKeys) {
   if (!existsSync(path)) return [];
   const text = readFileSync(path, "utf8");
   const lines = text.split("\n");
@@ -778,7 +933,7 @@ function scanVerifiedLedger(path: string, projectId: string, hmacKey?: string) {
     } catch (error) {
       throw new LedgerV2IntegrityError(`Invalid v2 ledger record after sequence ${sequence}: ${messageOf(error)}`);
     }
-    verifyRecord(record, sequence + 1, previousHash, projectId, hmacKey);
+    verifyRecord(record, sequence + 1, previousHash, projectId, keys);
     sequence = record.sequence;
     previousHash = record.hash;
     if (seen.has(record.eventId)) continue;
@@ -791,7 +946,7 @@ function scanVerifiedLedger(path: string, projectId: string, hmacKey?: string) {
 function scanVerifiedLedgerPrefixIndex(
   path: string,
   projectId: string,
-  hmacKey: string | undefined,
+  keys: LedgerIntegrityKeys,
   expectedSequence: number,
 ) {
   const index = new Map<string, LedgerRecordV2>();
@@ -812,7 +967,7 @@ function scanVerifiedLedgerPrefixIndex(
     } catch (error) {
       throw new LedgerV2IntegrityError(`Invalid v2 ledger record after sequence ${sequence}: ${messageOf(error)}`);
     }
-    verifyRecord(record, sequence + 1, previousHash, projectId, hmacKey);
+    verifyRecord(record, sequence + 1, previousHash, projectId, keys);
     sequence = record.sequence;
     previousHash = record.hash;
     if (!index.has(record.eventId)) index.set(record.eventId, record);

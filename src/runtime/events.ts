@@ -1,4 +1,4 @@
-import type { ExecResult } from "../index";
+import type { ExperimentalExecResult as ExecResult } from "../experimental/exec-result";
 
 export type HeadlessEventType =
   | "session_started"

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { PrincipalIdSchema, ProjectIdSchema, TimestampSchema } from "../contracts/common";
@@ -19,6 +19,7 @@ export const CredentialScopeSchema = z.enum([
   "gate",
   "orchestrator",
   "session",
+  "observe",
 ]);
 export type CredentialScope = z.infer<typeof CredentialScopeSchema>;
 
@@ -36,7 +37,7 @@ export const DEFAULT_INTEGRATION_SCOPES: CredentialScope[] = [
 const CredentialRecordSchema = z.object({
   id: z.string().min(1).max(128),
   principal: PrincipalIdSchema,
-  kind: z.enum(["root", "integration"]),
+  kind: z.enum(["root", "integration", "observer"]),
   tokenDigest: z.string().regex(/^[a-f0-9]{64}$/),
   scopes: z.array(CredentialScopeSchema).min(1).max(32),
   createdAt: TimestampSchema,
@@ -128,11 +129,62 @@ export class CredentialStore {
     return { credential: publicRecord(record), tokenPath };
   }
 
+  provisionObserver(actor: AuthenticatedCredential) {
+    this.assertAdmin(actor);
+    const existing = this.state.credentials.find((record) => record.id === "observer" && record.revokedAt === null);
+    if (existing && existsSync(this.paths.observerTokenPath)) {
+      ensureOwnerOnlyFile(this.paths.observerTokenPath);
+      const token = readFileSync(this.paths.observerTokenPath, "utf8").trim();
+      if (safeDigestEqual(existing.tokenDigest, tokenDigest(token))) {
+        if (!sameScopes(existing.scopes, ["observe"])) {
+          existing.scopes = ["observe"];
+          this.persist();
+        }
+        return { credential: publicRecord(existing), tokenPath: this.paths.observerTokenPath };
+      }
+    }
+    const token = randomBytes(48).toString("base64url");
+    const record = CredentialRecordSchema.parse({
+      id: "observer",
+      principal: "observer",
+      kind: "observer",
+      tokenDigest: tokenDigest(token),
+      scopes: ["observe"],
+      createdAt: this.now(),
+      expiresAt: null,
+      revokedAt: null,
+    });
+    this.state.credentials = this.state.credentials.filter((candidate) => candidate.id !== record.id);
+    this.state.credentials.push(record);
+    atomicWriteFile(this.paths.observerTokenPath, `${token}\n`, { mode: 0o600 });
+    ensureOwnerOnlyFile(this.paths.observerTokenPath);
+    this.persist();
+    return { credential: publicRecord(record), tokenPath: this.paths.observerTokenPath };
+  }
+
+  revokeLegacyIntegrations(actor: AuthenticatedCredential) {
+    this.assertAdmin(actor);
+    const revokedAt = this.now();
+    const revoked = this.state.credentials.filter((record) =>
+      record.kind === "integration"
+      && record.revokedAt === null
+      && !record.id.startsWith("integration:lead-"));
+    for (const record of revoked) {
+      record.revokedAt = revokedAt;
+      const name = record.id.slice("integration:".length);
+      rmSync(integrationTokenPath(this.paths, name), { force: true });
+    }
+    if (revoked.length > 0) this.persist();
+    return revoked.map(publicRecord);
+  }
+
   revoke(actor: AuthenticatedCredential, id: string) {
     this.assertAdmin(actor);
     const record = this.state.credentials.find((candidate) => candidate.id === id && candidate.kind !== "root");
     if (!record) throw new Error(`Unknown revocable credential: ${id}`);
     if (record.revokedAt === null) record.revokedAt = this.now();
+    if (record.kind === "observer") rmSync(this.paths.observerTokenPath, { force: true });
+    if (record.kind === "integration") rmSync(integrationTokenPath(this.paths, record.id.slice("integration:".length)), { force: true });
     this.persist();
     return publicRecord(record);
   }

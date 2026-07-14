@@ -22,7 +22,12 @@ export function parseGoalPlan(output: string | null, fallbackTask: string): Pars
     reason,
   });
   if (!output) return fallback("Planner returned no output.");
-  const normalized = output.replaceAll("\r\n", "\n");
+  let normalized = output.replaceAll("\r\n", "\n");
+  // Some provider stream wrappers can replay a completed planner envelope
+  // before closing the transport. Keep the first bounded envelope; the
+  // duplicate is transport noise, not a second plan.
+  const duplicateHeader = normalized.indexOf(GOAL_PLAN_HEADER, GOAL_PLAN_HEADER.length);
+  if (duplicateHeader > 0) normalized = normalized.slice(0, duplicateHeader).trim();
   const separator = normalized.indexOf("\n");
   if (separator < 0 || normalized.slice(0, separator).trim() !== GOAL_PLAN_HEADER) {
     return fallback(`Planner omitted the required ${GOAL_PLAN_HEADER} header.`);

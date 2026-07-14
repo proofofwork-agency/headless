@@ -8,6 +8,7 @@ import {
   cleanupAbandonedLedgerLock,
   cleanupOwnedLedgerLock,
   importV1Ledger,
+  ledgerIntegrityOptionsFromEnv,
   LedgerV2,
   LedgerV2IntegrityError,
   type LedgerRecordV2,
@@ -113,7 +114,7 @@ export function getOrCreateSession(options: SessionOptions = {}): HeadlessSessio
       readModelPath: state.readModelPath,
       projectId: state.projectId,
       principal,
-      hmacKey: process.env.HEADLESS_LEDGER_KEY,
+      ...ledgerIntegrityOptionsFromEnv(),
     });
     ledgers.set(ledgerKey, ledger);
   }
@@ -397,7 +398,7 @@ function migrateLegacyLedger(state: ProjectStatePaths, ledger: LedgerV2) {
     sourcePath,
     target: ledger,
     manifestPath: state.migrationManifestPath,
-    hmacKey: process.env.HEADLESS_LEDGER_KEY,
+    hmacKey: ledger.hmacKey,
   });
 }
 

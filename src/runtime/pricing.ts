@@ -7,6 +7,7 @@ export const PricingEntrySchema = z.object({
   id: z.string().trim().min(1).max(256),
   provider: z.string().trim().toLowerCase().regex(/^[a-z][a-z0-9_-]{0,63}$/),
   model: z.string().trim().min(1).max(256),
+  source: z.string().trim().min(1).max(1_024).default("operator-supplied"),
   effectiveFrom: z.number().int().nonnegative(),
   effectiveTo: z.number().int().positive().nullable().default(null),
   inputUsdPerMillion: rate,

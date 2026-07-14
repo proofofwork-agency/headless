@@ -677,7 +677,7 @@ function suggestionLane(goal: Goal, profile: FleetProfile, opportunity: IdleOppo
     kind: "suggest",
     goalId: goal.id,
     fleetProfileId: profile.id,
-    recipientId: goal.leaderAgentId ?? "coordinator",
+    recipientId: goal.synthesizerAgentId ?? "coordinator",
     title: idleTitle(opportunity),
     detail: opportunity.detail,
     opportunity,

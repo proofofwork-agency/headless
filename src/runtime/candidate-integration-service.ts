@@ -152,7 +152,6 @@ export class CandidateIntegrationService {
     input: { signal?: AbortSignal } = {},
   ) {
     const job = await this.loadVisibleJob(candidateId, authorization);
-    this.requireAdmin(authorization);
     if (this.inFlight.has(job.id)) throw new HeadlessError("CONFLICT", "Candidate integration is already in progress.", { retryable: true });
     this.inFlight.add(job.id);
     try {
@@ -163,12 +162,14 @@ export class CandidateIntegrationService {
         return alreadyIntegratedResult(job, existing.resultingCommit);
       }
       const inspection = await this.inspect(job.id, authorization);
+      const overflowRecovery = inspection.finality ? null : this.overflowRecoverySource(inspection);
       const deferredReasons = new Set([
         "Candidate is already contained in primary.",
         "Primary checkout is dirty or could not be verified.",
         "Ask-mode candidate has no approved merge request.",
       ]);
-      const structuralReasons = inspection.reasons.filter((reason) => !deferredReasons.has(reason));
+      const structuralReasons = inspection.reasons.filter((reason) => !deferredReasons.has(reason)
+        && !(overflowRecovery && reason === "Candidate has no allowed durable write finality decision."));
       if (structuralReasons.length > 0) {
         throw new HeadlessError(
           inspection.finality ? "INVALID_REQUEST" : "GATE_FAILED",
@@ -177,9 +178,15 @@ export class CandidateIntegrationService {
       }
       const baseCommit = inspection.baseCommit!;
       const candidateCommit = inspection.candidateCommit!;
-      const finality = inspection.finality!;
       const startedAt = this.now();
       const attemptId = this.attemptId();
+
+      const initialAuthority = this.currentAuthority(job, authorization.actor);
+      if (!initialAuthority.allowed || !initialAuthority.mergeAllowed) {
+        throw new HeadlessError("POLICY_DENIED", initialAuthority.reason);
+      }
+      this.options.authority.consumeIteration(initialAuthority.grantId, `candidate:${job.id}`);
+      const finality = inspection.finality ?? this.ensureOverflowRecoveryAdmission(job, authorization.actor, overflowRecovery!);
 
       if (input.signal?.aborted) {
         this.recordExpectedFailure(job, authorization.actor, {
@@ -196,24 +203,8 @@ export class CandidateIntegrationService {
         throw new HeadlessError("CANCELLED", "Candidate integration was cancelled.");
       }
 
-      const initialAuthority = this.currentAuthority(job, authorization.actor);
-      if (!initialAuthority.allowed || !initialAuthority.mergeAllowed) {
-        this.recordExpectedFailure(job, authorization.actor, {
-          attemptId,
-          startedAt,
-          outcome: "unauthorized",
-          reason: initialAuthority.reason,
-          baseCommit,
-          candidateCommit,
-          expectedPrimaryHead: inspection.primaryHead,
-          approval: inspection.approval,
-          finality,
-          grantId: initialAuthority.grantId,
-        });
-        throw new HeadlessError("POLICY_DENIED", initialAuthority.reason);
-      }
-
       if (job.approvalPolicy === "ask" && !inspection.approval) {
+        const approval = overflowRecovery ? this.ensureOverflowRecoveryApproval(job, authorization.actor, baseCommit, candidateCommit) : null;
         this.recordExpectedFailure(job, authorization.actor, {
           attemptId,
           startedAt,
@@ -226,7 +217,13 @@ export class CandidateIntegrationService {
           finality,
           grantId: initialAuthority.grantId,
         });
-        throw new HeadlessError("APPROVAL_REQUIRED", "Ask-mode candidates require an approved merge request.");
+        throw new HeadlessError(
+          "APPROVAL_REQUIRED",
+          approval
+            ? `Output-overflow candidate requires approved merge request ${approval.id} before recovery gates run.`
+            : "Ask-mode candidates require an approved merge request.",
+          { details: approval ? { approvalId: approval.id, candidateId: job.id } : undefined },
+        );
       }
 
       if (inspection.candidateAlreadyIntegrated && inspection.primaryHead) {
@@ -263,6 +260,7 @@ export class CandidateIntegrationService {
         journal: this.options.journal,
         signal: input.signal,
         worktreeLease: this.options.worktreeLeases?.createHooks(job.id),
+        requireIntegrationGates: Boolean(overflowRecovery),
         reauthorize: () => {
           const decision = this.currentAuthority(job, authorization.actor);
           currentGrantId = decision.grantId;
@@ -406,6 +404,48 @@ export class CandidateIntegrationService {
       return record;
     }
     return null;
+  }
+
+  private overflowRecoverySource(inspection: CandidateInspection) {
+    if (inspection.job.mode !== "write" || inspection.job.result?.error?.code !== "OUTPUT_OVERFLOW") return null;
+    if (!inspection.baseCommit || !inspection.candidateCommit || inspection.baseCommit === inspection.candidateCommit) return null;
+    if (!inspection.baseExists || !inspection.candidateExists || !inspection.baseIsCandidateAncestor || !inspection.baseIsPrimaryAncestor) return null;
+    if (!inspection.primaryClean || inspection.decision?.status === "rejected") return null;
+    return [...this.options.finality.list()].reverse().find((record) =>
+      record.decision.jobId === inspection.job.id && record.decision.budgetPassed) ?? null;
+  }
+
+  private ensureOverflowRecoveryAdmission(job: Job, actor: string, source: FinalityRecord) {
+    const existing = [...this.options.finality.list()].reverse().find((record) =>
+      record.decision.jobId === job.id
+      && record.decision.allowed
+      && record.requirements.tests === false
+      && record.requirements.review === false);
+    if (existing) return existing;
+    const decision = this.options.finality.evaluate({
+      projectId: this.options.paths.projectId,
+      jobId: job.id,
+      decidedBy: actor,
+      requirements: { policy: true, tests: false, review: false, vote: false, budget: true },
+      gates: { policyPassed: true, testsPassed: false, reviewPassed: false, votePassed: false, budgetPassed: source.decision.budgetPassed },
+    });
+    return this.options.finality.list().find((record) => record.decision.id === decision.id)!;
+  }
+
+  private ensureOverflowRecoveryApproval(job: Job, actor: string, baseCommit: string, candidateCommit: string) {
+    const existing = this.options.approvals.list({ collaborationId: job.id, assignedTo: actor })
+      .find((approval) => approval.kind === "merge" && approval.status === "pending");
+    if (existing) return existing;
+    return this.options.approvals.create({
+      collaborationId: job.id,
+      requestedBy: actor,
+      assignedTo: actor,
+      kind: "merge",
+      summary: "Approve review and integration of the preserved output-overflow candidate.",
+      details: { candidateId: job.id, baseCommit, candidateCommit, recovery: "output-overflow" },
+      artifactIds: [job.id],
+      expiresAt: this.now() + 86_400_000,
+    });
   }
 
   private approvedMergeRequest(candidateId: string) {
@@ -628,6 +668,7 @@ function executionSummary(job: Job): WriteExecutionSummary {
   return {
     succeeded: true,
     status: "succeeded",
+    failureCode: null,
     usage: job.result?.usage ?? { input: null, output: null, reasoning: null, cached: null, providerTotal: null },
     costUsd: job.result?.cost.amountUsd ?? null,
   };

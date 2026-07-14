@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { AgentProfile, ApprovalRequest, CoordinatorSelection, FleetProfile, Goal, Review, Turn, Vote } from "../contracts/collaboration";
+import { normalizeBackend } from "../backends/ids";
+import { backendMetadata } from "../backends/metadata";
+import type { AgentProfile, ApprovalRequest, FleetProfile, Goal, Review, SynthesizerSelection, Turn, Vote } from "../contracts/collaboration";
 import type { RunResult } from "../contracts/run";
 import type { ApprovalPolicy, AuthMode } from "../contracts/native";
 import type { DelegationScheduler } from "./delegation-scheduler";
@@ -15,6 +17,8 @@ import { redactAndTruncate } from "./redaction";
 
 const MAX_DURABLE_REVIEWS_PER_GOAL = 2_048;
 const MAX_DURABLE_TURNS_PER_GOAL = 4_096;
+const MAX_CANDIDATE_TURN_TIMEOUT_MS = 900_000;
+const DEFAULT_EXTENSION_TURN_TIMEOUT_MS = 180_000;
 
 export type GoalAgentAvailability = {
   authenticated: boolean;
@@ -27,6 +31,7 @@ export type GoalAgentAvailability = {
 export type GoalSecurityControls = {
   authMode: AuthMode;
   approvalPolicy: ApprovalPolicy;
+  mode?: Goal["mode"];
 };
 
 export type GoalTurnExecution = {
@@ -94,6 +99,8 @@ export type GoalCoordinatorServiceOptions = {
   }) => Promise<GoalCandidateIntegrationResult>;
   cancelJob: (jobId: string) => void;
   availability: (agent: AgentProfile, security: GoalSecurityControls) => GoalAgentAvailability;
+  /** Foreground providers are not selected for implicit worker/synthesis routing. */
+  activeLeadBackend?: () => string | null;
   delegationScheduler?: DelegationScheduler;
   delegationEvent?: (event: GoalDelegationEvent) => void;
   diagnostic?: (message: string, error?: unknown) => void;
@@ -135,10 +142,11 @@ export class GoalCoordinatorService {
   }
 
   start(input: {
+    id?: string;
     principal: string;
     objective: string;
     fleetProfileId?: string;
-    coordinator?: CoordinatorSelection;
+    synthesizer?: SynthesizerSelection;
     authMode?: AuthMode;
     approvalPolicy?: ApprovalPolicy;
     mode?: Goal["mode"];
@@ -149,13 +157,14 @@ export class GoalCoordinatorService {
       ? this.options.fleets.get(input.fleetProfileId)
       : this.options.fleets.getActive();
     if (!profile) throw new HeadlessError("INVALID_REQUEST", "No matching fleet profile is configured for this project.");
-    const coordinator = input.coordinator ?? profile.coordinator;
+    const synthesizer = input.synthesizer ?? { kind: "automatic" };
     const security = {
       authMode: input.authMode ?? profile.authMode,
       approvalPolicy: input.approvalPolicy ?? profile.approvalPolicy,
     };
-    const decision = this.selectLeader(profile, coordinator, null, security);
-    if (coordinator.kind !== "human" && !decision.leaderId) {
+    const mode = input.mode ?? "read-only";
+    const decision = this.selectLeader(profile, synthesizer, null, { ...security, mode });
+    if (!decision.leaderId) {
       if (decision.election) {
         throw new HeadlessError("GATE_FAILED", `Leader election failed: ${decision.election.evidence.join(" ")}`, {
           retryable: decision.election.status === "quorum_not_met" || decision.election.status === "insufficient_council",
@@ -166,13 +175,14 @@ export class GoalCoordinatorService {
     }
     const timeoutMs = Math.min(input.timeoutMs ?? profile.goalTimeoutMs, profile.goalTimeoutMs);
     const record = this.options.goals.create({
+      id: input.id,
       principal: input.principal,
       fleetProfileId: profile.id,
       objective: input.objective,
       ...security,
-      mode: input.mode ?? "read-only",
-      coordinator,
-      leaderAgentId: decision.leaderId,
+      mode,
+      synthesizer,
+      synthesizerAgentId: decision.leaderId,
       autonomous: input.autonomous ?? false,
       deadlineAt: this.now() + timeoutMs,
     });
@@ -195,7 +205,7 @@ export class GoalCoordinatorService {
   send(goalId: string, principal: string, text: string) {
     const record = this.requireOwned(goalId, principal);
     if (record.result) throw new HeadlessError("INVALID_REQUEST", `Goal ${goalId} is already ${record.goal.state}.`);
-    const recipientId = record.goal.leaderAgentId ?? principal;
+    const recipientId = record.goal.synthesizerAgentId ?? principal;
     const message = this.options.mailbox.send({
       collaborationId: goalId,
       senderId: principal,
@@ -203,7 +213,7 @@ export class GoalCoordinatorService {
       kind: "chat",
       content: text,
     });
-    if (record.goal.leaderAgentId) this.enqueue(goalId, text);
+    if (record.goal.synthesizerAgentId) this.enqueue(goalId, text);
     return { goal: this.options.goals.status(goalId), message };
   }
 
@@ -230,14 +240,14 @@ export class GoalCoordinatorService {
     return record.result ? record.goal : this.options.goals.cancel(goalId, principal);
   }
 
-  transferLeader(goalId: string, agentId: string, actor: string) {
+  transferSynthesizer(goalId: string, agentId: string, actor: string) {
     const record = this.options.goals.get(goalId);
     if (!record) throw new HeadlessError("INVALID_REQUEST", `Unknown goal: ${goalId}`);
     const profile = this.requireProfile(record.goal.fleetProfileId);
     if (!profile.agents.some((agent) => agent.id === agentId && agent.enabled)) {
       throw new HeadlessError("INVALID_REQUEST", `Agent ${agentId} is not enabled in fleet profile ${profile.id}.`);
     }
-    return this.options.goals.transferLeader(goalId, agentId, actor, `Leadership transferred to ${agentId}.`);
+    return this.options.goals.transferSynthesizer(goalId, agentId, actor, `Leadership transferred to ${agentId}.`);
   }
 
   recover() {
@@ -264,7 +274,7 @@ export class GoalCoordinatorService {
         this.resumeIntegration(record.goal.id);
         continue;
       }
-      if (record.goal.leaderAgentId) {
+      if (record.goal.synthesizerAgentId) {
         this.enqueue(record.goal.id, `Resume the durable goal after daemon recovery.\n\nOBJECTIVE:\n${record.goal.objective}`);
       }
     }
@@ -326,13 +336,11 @@ export class GoalCoordinatorService {
     const profile = this.requireProfile(record.goal.fleetProfileId);
     let leader = this.resolveLeader(profile, record);
     this.preparePlanning(goalId, record.goal.principal);
-    const planTurn = await this.runTurn(
+    const planTurn = await this.runPlanningTurn(
+      profile,
       record.goal,
       leader,
       planningPrompt(record.goal.objective, prompt, profile.maxActiveWorkers),
-      record.goal.principal,
-      "planning",
-      record.goal.principal,
     );
     const plan = parseGoalPlan(planTurn.turn.output, `${record.goal.objective}\n\nCURRENT TURN:\n${prompt}`);
     const assignments = this.assignDelegations(profile, record.goal, plan, leader.id);
@@ -349,35 +357,44 @@ export class GoalCoordinatorService {
       });
     }
     this.advance(goalId, "active", record.goal.principal, "Independent worker delegations started through the durable scheduler.");
-    const workerSettled = await Promise.allSettled(assignments.map(async (assignment) => {
-      const completed = await this.runTurn(
-        record!.goal,
-        assignment.agent,
-        workerPrompt(record!.goal.objective, assignment.plan, planTurn),
-        leader.id,
-        "worker",
-        leader.id,
+    const workerGoal = record.goal;
+    const workerResults = await Promise.all(
+      assignments.map((assignment) => this.runDelegationWithFailover(workerGoal, planTurn, assignment, leader)),
+    );
+    const workerTurns = workerResults
+      .filter((result): result is { turn: CompletedGoalTurn } => "turn" in result)
+      .map((result) => result.turn);
+    const delegationFailures = workerResults.filter((result): result is { failure: string } => "failure" in result);
+    if (workerTurns.length === 0) {
+      const current = this.options.goals.get(goalId);
+      const halted = !current || current.result || ["cancelled", "failed", "succeeded", "timed_out"].includes(current.goal.state);
+      if (halted) return;
+      throw new HeadlessError(
+        "PROCESS_ERROR",
+        `All ${assignments.length} worker delegation(s) failed after healthy-backend failover: ${delegationFailures
+          .map((entry) => entry.failure)
+          .join("; ")}`,
       );
-      this.publishWorkerQuestions(record!.goal, assignment.agent.id, leader.id, completed);
-      return completed;
-    }));
-    const workerFailures = workerSettled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (workerFailures.length > 0) {
-      throw new HeadlessError("PROCESS_ERROR", `${workerFailures.length} worker delegation(s) failed: ${workerFailures
-        .map((failure) => failure.reason instanceof Error ? failure.reason.message : String(failure.reason))
-        .join("; ")}`);
     }
-    const workerTurns = workerSettled.map((result) => (result as PromiseFulfilledResult<CompletedGoalTurn>).value);
+    if (delegationFailures.length > 0) {
+      this.options.mailbox.send({
+        collaborationId: goalId,
+        senderId: leader.id,
+        recipientId: workerGoal.principal,
+        kind: "lifecycle",
+        content: boundedSummary(`${delegationFailures.length} delegation(s) unrecoverable after failover; synthesizing from ${workerTurns.length} completed worker turn(s).`),
+      });
+    }
     record = this.options.goals.get(goalId);
     if (!record || record.result) return;
     leader = this.resolveLeader(profile, record);
-    const synthesis = await this.runTurn(
+    const independentReviewExpected = this.availableReviewers(profile, record.goal, new Set([leader.id])).length > 0;
+    const synthesis = await this.runCandidateWithFailover(
+      profile,
       record.goal,
       leader,
       synthesisPrompt(record.goal.objective, planTurn, plan, workerTurns),
-      leader.id,
       "candidate",
-      record.goal.principal,
     );
     const turns = [planTurn, ...workerTurns, synthesis];
     let finalTurn = synthesis;
@@ -386,8 +403,8 @@ export class GoalCoordinatorService {
     let reviewFailureDecision: "blocked" | "revise" | null = null;
     const reviews: Review[] = [];
     const votes: Vote[] = [];
-    let reviewers = this.availableReviewers(profile, record.goal, leader.id);
-    const reviewRequired = reviewers.length > 0;
+    let reviewers = this.availableReviewers(profile, record.goal, new Set([leader.id, synthesis.turn.agentId]));
+    const reviewRequired = independentReviewExpected;
     if (reviewers.length > 0) {
       for (let round = 1; round <= profile.maxDeliberationRounds; round += 1) {
         this.advance(
@@ -419,17 +436,16 @@ export class GoalCoordinatorService {
         record = this.options.goals.get(goalId);
         if (!record || record.result) return;
         leader = this.resolveLeader(profile, record);
-        const revision = await this.runTurn(
+        const revision = await this.runCandidateWithFailover(
+          profile,
           record.goal,
           leader,
           revisionPrompt(finalTurn, reviewRound.turns, reviewRound.reviews),
-          record.goal.principal,
           "revision",
-          record.goal.principal,
         );
         turns.push(revision);
         finalTurn = revision;
-        reviewers = this.availableReviewers(profile, record.goal, leader.id);
+        reviewers = this.availableReviewers(profile, record.goal, new Set([leader.id, finalTurn.turn.agentId]));
         if (reviewers.length === 0) {
           reviewFailure = `No grounded reviewer remained available for revised candidate ${finalTurn.candidateId}.`;
           reviewFailureDecision = "blocked";
@@ -514,12 +530,12 @@ export class GoalCoordinatorService {
   }
 
   private resolveLeader(profile: FleetProfile, record: GoalRecord) {
-    const decision = this.selectLeader(profile, record.goal.coordinator, record.goal.leaderAgentId, record.goal);
+    const decision = this.selectLeader(profile, record.goal.synthesizer, record.goal.synthesizerAgentId, record.goal);
     if (!decision.leaderId) {
       throw new HeadlessError("NATIVE_SESSION_LOST", "No healthy leader is available for goal recovery.", { retryable: true });
     }
-    if (decision.leaderId !== record.goal.leaderAgentId) {
-      this.options.goals.transferLeader(record.goal.id, decision.leaderId, record.goal.principal, `Health-based ${decision.reason}.`);
+    if (decision.leaderId !== record.goal.synthesizerAgentId) {
+      this.options.goals.transferSynthesizer(record.goal.id, decision.leaderId, record.goal.principal, `Health-based ${decision.reason}.`);
       if (decision.election) this.publishLeaderElection(this.options.goals.status(record.goal.id), decision.election);
       this.options.mailbox.send({
         collaborationId: record.goal.id,
@@ -538,8 +554,8 @@ export class GoalCoordinatorService {
     plan: ParsedGoalPlan,
     leaderId: string,
   ): AssignedDelegation[] {
-    const candidates = profile.agents
-      .map((agent) => ({ agent, availability: this.options.availability(agent, goal) }))
+    const candidates = this.automaticAgents(profile)
+      .map((agent) => ({ agent, availability: this.options.availability(agent, readOnlySecurity(goal)) }))
       .filter(({ agent, availability }) => agent.enabled
         && isAvailableNow(availability, this.now())
         && availability.activeTurns < agent.maxConcurrentTurns)
@@ -565,23 +581,222 @@ export class GoalCoordinatorService {
     return [{
       plan: {
         id: "fallback-worker-1",
-        task: boundedPart(`${goal.objective}\n\nExecute one safe, concrete unit of analysis for leader synthesis.`, 8_192),
+        task: boundedPart(`${goal.objective}\n\nExecute one safe, concrete unit of analysis for task synthesis.`, 8_192),
         capabilities: [],
       },
       agent: fallbackAgent,
     }];
   }
 
-  private availableReviewers(profile: FleetProfile, goal: Goal, leaderId: string) {
+  private async runCandidateWithFailover(
+    profile: FleetProfile,
+    goal: Goal,
+    leader: AgentProfile,
+    prompt: string,
+    role: "candidate" | "revision",
+  ) {
+    const triedAgentIds = new Set<string>();
+    const triedBackends = new Set<string>();
+    let agent: AgentProfile | null = leader;
+    let lastError: unknown = new HeadlessError("PROCESS_ERROR", "No healthy candidate executor was available.");
+    while (agent) {
+      triedAgentIds.add(agent.id);
+      triedBackends.add(agent.backend);
+      try {
+        const turn = await this.runTurn(goal, agent, prompt, leader.id, role, goal.principal);
+        if (agent.id !== leader.id) {
+          this.options.mailbox.send({
+            collaborationId: goal.id,
+            senderId: agent.id,
+            recipientId: goal.principal,
+            kind: "lifecycle",
+            content: boundedSummary(`${role === "candidate" ? "Candidate execution" : "Revision"} recovered on ${agent.id} (${agent.backend}); ${leader.id} remains the sticky goal leader.`),
+            artifactIds: turn.artifactIds,
+          });
+        }
+        return turn;
+      } catch (error) {
+        lastError = error;
+        if (!isOperationalCandidateFailure(error)) throw error;
+        const current = this.options.goals.get(goal.id);
+        if (!current || current.result || this.now() >= goal.deadlineAt || current.turns.length >= MAX_DURABLE_TURNS_PER_GOAL) throw error;
+        const failedAgent = agent;
+        agent = this.automaticAgents(profile)
+          .map((candidate) => ({ candidate, availability: this.options.availability(candidate, goalSecurity(goal)) }))
+          .filter(({ candidate, availability }) => candidate.enabled
+            && !triedAgentIds.has(candidate.id)
+            && !triedBackends.has(candidate.backend)
+            && (goal.mode !== "write" || backendMetadata[normalizeBackend(candidate.backend)].canWrite)
+            && isAvailableNow(availability, this.now())
+            && availability.activeTurns < candidate.maxConcurrentTurns)
+          .map(({ candidate }) => candidate)
+          .sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id))
+          .at(0) ?? null;
+        if (agent) {
+          this.options.mailbox.send({
+            collaborationId: goal.id,
+            senderId: leader.id,
+            recipientId: goal.principal,
+            kind: "lifecycle",
+            content: boundedSummary(`${role === "candidate" ? "Candidate executor" : "Revision executor"} ${failedAgent.id} failed after its bounded retry budget. Retrying on ${agent.id} (${agent.backend}) without changing goal leadership.`),
+          });
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  private async runPlanningTurn(profile: FleetProfile, goal: Goal, leader: AgentProfile, prompt: string) {
+    const triedAgentIds = new Set<string>();
+    const triedBackends = new Set<string>();
+    let planner: AgentProfile | null = leader;
+    let lastError: unknown = new HeadlessError("PROCESS_ERROR", "No healthy planner was available.");
+    while (planner) {
+      triedAgentIds.add(planner.id);
+      triedBackends.add(planner.backend);
+      try {
+        const turn = await this.runTurn(goal, planner, prompt, goal.principal, "planning", goal.principal);
+        if (planner.id !== leader.id) {
+          this.options.mailbox.send({
+            collaborationId: goal.id,
+            senderId: planner.id,
+            recipientId: goal.principal,
+            kind: "lifecycle",
+            content: boundedSummary(`Planning recovered on ${planner.id} (${planner.backend}); ${leader.id} remains the sticky goal leader.`),
+            artifactIds: turn.artifactIds,
+          });
+        }
+        return turn;
+      } catch (error) {
+        lastError = error;
+        planner = this.automaticAgents(profile)
+          .map((candidate) => ({ candidate, availability: this.options.availability(candidate, readOnlySecurity(goal)) }))
+          .filter(({ candidate, availability }) => candidate.enabled
+            && !triedAgentIds.has(candidate.id)
+            && !triedBackends.has(candidate.backend)
+            && isAvailableNow(availability, this.now())
+            && availability.activeTurns < candidate.maxConcurrentTurns)
+          .map(({ candidate }) => candidate)
+          .sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id))
+          .at(0) ?? null;
+        if (planner) {
+          this.options.mailbox.send({
+            collaborationId: goal.id,
+            senderId: leader.id,
+            recipientId: goal.principal,
+            kind: "lifecycle",
+            content: boundedSummary(`Planner ${[...triedAgentIds].at(-1)} failed after its bounded retry budget. Retrying the read-only plan on ${planner.id} (${planner.backend}) without changing goal leadership.`),
+          });
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  // Run a single delegation, reassigning it to a distinct healthy backend on
+  // worker failure (e.g. a provider stream disconnect). Each distinct backend
+  // is attempted at most once; failed attempts keep their durable turn evidence.
+  // The goal only fails a delegation after every eligible healthy agent is
+  // exhausted or the durable-turn cap / deadline is reached.
+  private async runDelegationWithFailover(
+    goal: Goal,
+    planTurn: CompletedGoalTurn,
+    assignment: AssignedDelegation,
+    leader: AgentProfile,
+  ): Promise<{ turn: CompletedGoalTurn } | { failure: string }> {
+    const triedAgentIds = new Set<string>();
+    const triedBackends = new Set<string>();
+    let lastError = `No eligible healthy worker was available for delegation ${assignment.plan.id}.`;
+    let agent: AgentProfile | null = assignment.agent;
+    let attempt = 0;
+    while (agent) {
+      const current = this.options.goals.get(goal.id);
+      const halted = !current || current.result || ["cancelled", "failed", "succeeded", "timed_out"].includes(current.goal.state);
+      if (halted) return { failure: lastError };
+      if (current.turns.length >= MAX_DURABLE_TURNS_PER_GOAL) {
+        lastError = `Durable turn cap reached before delegation ${assignment.plan.id} could recover.`;
+        break;
+      }
+      if (this.now() >= goal.deadlineAt) {
+        lastError = `Deadline reached before delegation ${assignment.plan.id} could recover.`;
+        break;
+      }
+      triedAgentIds.add(agent.id);
+      triedBackends.add(agent.backend);
+      try {
+        const completed = await this.runTurn(
+          goal,
+          agent,
+          workerPrompt(goal.objective, assignment.plan, planTurn),
+          leader.id,
+          "worker",
+          leader.id,
+        );
+        this.publishWorkerQuestions(goal, agent.id, leader.id, completed);
+        if (attempt > 0) {
+          this.options.mailbox.send({
+            collaborationId: goal.id,
+            senderId: leader.id,
+            recipientId: goal.principal,
+            kind: "lifecycle",
+            content: boundedSummary(`Delegation ${assignment.plan.id} recovered on ${agent.id} (${agent.backend}) after ${attempt} failed worker attempt(s).`),
+            artifactIds: completed.artifactIds,
+          });
+        }
+        return { turn: completed };
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        const latest = this.options.goals.get(goal.id);
+        const halted = !latest || latest.result || ["cancelled", "failed", "succeeded", "timed_out"].includes(latest.goal.state);
+        if (halted) {
+          return { failure: lastError };
+        }
+        this.options.mailbox.send({
+          collaborationId: goal.id,
+          senderId: leader.id,
+          recipientId: goal.principal,
+          kind: "lifecycle",
+          content: boundedSummary(`Worker ${agent.id} (${agent.backend}) failed delegation ${assignment.plan.id}: ${lastError}. Reassigning to a distinct healthy backend.`),
+        });
+      }
+      attempt += 1;
+      agent = this.selectFailoverAgent(goal, assignment, leader, triedAgentIds, triedBackends);
+    }
+    return { failure: lastError };
+  }
+
+  private selectFailoverAgent(
+    goal: Goal,
+    assignment: AssignedDelegation,
+    leader: AgentProfile,
+    triedAgentIds: Set<string>,
+    triedBackends: Set<string>,
+  ): AgentProfile | null {
+    const profile = this.requireProfile(goal.fleetProfileId);
+    return this.automaticAgents(profile)
+      .map((candidate) => ({ candidate, availability: this.options.availability(candidate, readOnlySecurity(goal)) }))
+      .filter(({ candidate, availability }) => candidate.enabled
+        && !triedAgentIds.has(candidate.id)
+        && !triedBackends.has(candidate.backend)
+        && assignment.plan.capabilities.every((capability) => candidate.capabilities.includes(capability))
+        && isAvailableNow(availability, this.now()))
+      .map(({ candidate }) => candidate)
+      .sort((left, right) => Number(left.id === leader.id) - Number(right.id === leader.id)
+        || right.priority - left.priority
+        || left.id.localeCompare(right.id))
+      .at(0) ?? null;
+  }
+
+  private availableReviewers(profile: FleetProfile, goal: Goal, excludedAgentIds: Set<string>) {
     const attemptTurnCapacity = Math.floor(MAX_DURABLE_TURNS_PER_GOAL / profile.maxAttemptsPerDelegation);
     const fixedTurnCapacity = profile.maxActiveWorkers + profile.maxDeliberationRounds + 1;
     const reviewerTurnCapacity = Math.max(1, Math.floor(
       (attemptTurnCapacity - fixedTurnCapacity) / profile.maxDeliberationRounds,
     ));
-    return profile.agents
-      .map((agent) => ({ agent, availability: this.options.availability(agent, goal) }))
+    return this.automaticAgents(profile)
+      .map((agent) => ({ agent, availability: this.options.availability(agent, readOnlySecurity(goal)) }))
       .filter(({ agent, availability }) => agent.enabled
-        && agent.id !== leaderId
+        && !excludedAgentIds.has(agent.id)
         && isAvailableNow(availability, this.now())
         && availability.activeTurns < agent.maxConcurrentTurns)
       .map(({ agent }) => agent)
@@ -724,7 +939,7 @@ export class GoalCoordinatorService {
           goal: record.goal,
           candidateId: decision.candidateId,
           decisionId: decision.id,
-          senderId: record.goal.leaderAgentId ?? record.goal.principal,
+          senderId: record.goal.synthesizerAgentId ?? record.goal.principal,
           output: turn.output ?? "Goal candidate integrated.",
           artifactIds: turn.artifactIds,
         });
@@ -844,9 +1059,15 @@ export class GoalCoordinatorService {
         });
         this.options.goals.putTurn(goal.id, { ...turn, state: "running", startedAt: this.now(), updatedAt: this.now() });
         let execution: GoalTurnExecution;
+        let turnTimeoutMs = 1;
         try {
-          const timeoutMs = Math.max(1, goal.deadlineAt - this.now());
-          execution = this.options.executeTurn({ goal, agent, role, prompt: turn.input, timeoutMs });
+          turnTimeoutMs = Math.max(1, Math.min(
+            goal.deadlineAt - this.now(),
+            role === "candidate" || role === "revision"
+              ? MAX_CANDIDATE_TURN_TIMEOUT_MS
+              : providerTurnTimeoutMs(agent.backend),
+          ));
+          execution = this.options.executeTurn({ goal, agent, role, prompt: turn.input, timeoutMs: turnTimeoutMs });
           currentJobId = execution.jobId;
           artifactIds = uniqueIds([execution.jobId, ...(execution.artifactIds ?? [])]);
           const activeJobs = this.activeJobs.get(goal.id) ?? new Set<string>();
@@ -873,12 +1094,13 @@ export class GoalCoordinatorService {
             completedAt: this.now(),
             updatedAt: this.now(),
           });
-          return { kind: "failed" as const, error: output };
+          const failure = error instanceof HeadlessError ? error : new HeadlessError("PROCESS_ERROR", output);
+          return { kind: "failed" as const, error: output, code: failure.code, retryable: failure.retryable };
         }
 
         let result: RunResult;
         try {
-          result = await execution.completion;
+          result = await withTurnTimeout(execution.completion, turnTimeoutMs, () => this.options.cancelJob(execution.jobId));
         } catch (error) {
           const output = bounded(error instanceof Error ? error.message : String(error));
           this.options.goals.putTurn(goal.id, {
@@ -891,7 +1113,8 @@ export class GoalCoordinatorService {
             completedAt: this.now(),
             updatedAt: this.now(),
           });
-          return { kind: "failed" as const, error: output };
+          const failure = error instanceof HeadlessError ? error : new HeadlessError("PROCESS_ERROR", output);
+          return { kind: "failed" as const, error: output, code: failure.code, retryable: failure.retryable };
         } finally {
           const activeJobs = this.activeJobs.get(goal.id);
           activeJobs?.delete(execution.jobId);
@@ -913,10 +1136,18 @@ export class GoalCoordinatorService {
           });
           return { kind: "rate_limited" as const, error: output, ...rateLimit };
         }
-        const state: Turn["state"] = result.status === "succeeded"
+        const plannerEnvelopeRecovered = role === "planning"
+          && parseGoalPlan(result.output, "").source === "planner";
+        const prematureWorkerCompletion = role === "worker" && isPrematureWorkerCompletion(result);
+        const usableTimedOutWorker = role === "worker" && isSubstantiveTimedOutWorker(result);
+        const state: Turn["state"] = (result.status === "succeeded" && !prematureWorkerCompletion) || plannerEnvelopeRecovered || usableTimedOutWorker
           ? "succeeded"
           : result.status === "cancelled" ? "cancelled" : result.status === "timed_out" ? "timed_out" : "failed";
-        const output = bounded(result.output || result.error?.message || "Turn completed without output.");
+        const output = bounded(prematureWorkerCompletion
+          ? `Provider exited after a planning preamble without concrete findings: ${result.output}`
+          : usableTimedOutWorker
+            ? `Provider reached its turn limit after producing substantive read-only evidence; preserving the bounded report for synthesis.\n\n${result.output}`
+          : result.output || result.error?.message || "Turn completed without output.");
         const completed = this.options.goals.putTurn(goal.id, {
           ...turn,
           state,
@@ -944,7 +1175,12 @@ export class GoalCoordinatorService {
         };
         return state === "succeeded"
           ? { kind: "succeeded" as const, value, resultTurnId: completed.id, artifactIds: completed.artifactIds }
-          : { kind: "failed" as const, error: output };
+          : {
+            kind: "failed" as const,
+            error: output,
+            code: result.error?.code ?? (state === "cancelled" ? "CANCELLED" : state === "timed_out" ? "TIMED_OUT" : "PROCESS_ERROR"),
+            retryable: result.error?.retryable,
+          };
       },
     });
   }
@@ -957,7 +1193,7 @@ export class GoalCoordinatorService {
       this.options.goals.setResult(goalId, record.goal.principal, { status: "failed", summary: message });
       this.options.mailbox.send({
         collaborationId: goalId,
-        senderId: record.goal.leaderAgentId ?? record.goal.principal,
+        senderId: record.goal.synthesizerAgentId ?? record.goal.principal,
         recipientId: record.goal.principal,
         kind: "completion",
         content: message,
@@ -982,22 +1218,19 @@ export class GoalCoordinatorService {
 
   private selectLeader(
     profile: FleetProfile,
-    coordinator: CoordinatorSelection,
+    synthesizer: SynthesizerSelection,
     currentLeaderId: string | null,
     security: GoalSecurityControls,
   ): GoalLeaderDecision {
-    if (coordinator.kind === "human") {
-      return { leaderId: null, keptCurrent: false, reason: "no_eligible_candidate", scores: [] };
-    }
-    if (coordinator.kind === "agent") {
-      const agent = this.requireAgent(profile, coordinator.agentId);
+    if (synthesizer.kind === "agent") {
+      const agent = this.requireAgent(profile, synthesizer.agentId);
       const availability = this.options.availability(agent, security);
       if (!agent.enabled || !availability.authenticated || availability.health === "offline" || availability.health === "unhealthy") {
         return { leaderId: null, keptCurrent: false, reason: "no_eligible_candidate", scores: [] };
       }
       return { leaderId: agent.id, keptCurrent: currentLeaderId === agent.id, reason: currentLeaderId === agent.id ? "sticky" : "selected", scores: [] };
     }
-    const candidates = profile.agents.map((agent) => {
+    const candidates = this.automaticAgents(profile).map((agent) => {
       const availability = this.options.availability(agent, security);
       return {
         agentId: agent.id,
@@ -1012,7 +1245,7 @@ export class GoalCoordinatorService {
         recentFailures: availability.recentFailures,
       };
     });
-    if (coordinator.kind === "election") {
+    if (synthesizer.kind === "election") {
       const sticky = selectStickyLeader({ now: this.now(), currentLeaderId, requiredCapabilities: [], candidates });
       if (sticky.keptCurrent) return sticky;
       const election = runCouncilLeaderElection({
@@ -1083,10 +1316,16 @@ export class GoalCoordinatorService {
     if (!agent) throw new HeadlessError("INVALID_REQUEST", `Unknown fleet agent ${agentId} in profile ${profile.id}.`);
     return agent;
   }
+
+  private automaticAgents(profile: FleetProfile) {
+    const activeLeadBackend = this.options.activeLeadBackend?.();
+    if (!activeLeadBackend) return profile.agents;
+    return profile.agents.filter((agent) => normalizeBackend(agent.backend) !== normalizeBackend(activeLeadBackend));
+  }
 }
 
 function planningPrompt(objective: string, prompt: string, maxDelegations: number) {
-  return bounded(`You are the sticky coordinator planning a durable Headless goal. This planning turn is read-only. Return only the strict plan envelope below, with between 1 and ${maxDelegations} independent delegations. Do not use markdown fences or add prose. Each capability is an optional bounded identifier; use an empty list unless the task truly requires a declared fleet capability.
+  return bounded(`You are the sticky task synthesizer planning a durable Headless goal. This planning turn is read-only. Return only the strict plan envelope below, with between 1 and ${maxDelegations} independent delegations. Do not use markdown fences or add prose. Each capability is an optional bounded identifier; use an empty list unless the task truly requires a declared fleet capability.
 
 ${GOAL_PLAN_HEADER}
 {"delegations":[{"id":"work-1","task":"one concrete independent read-only task","capabilities":[]}]}
@@ -1099,7 +1338,7 @@ ${boundedPart(prompt, 8_000)}`);
 }
 
 function workerPrompt(objective: string, plan: GoalPlanDelegation, planning: CompletedGoalTurn) {
-  return bounded(`Execute the assigned independent delegation for a durable Headless goal. This worker turn is read-only. Report concrete findings, verification evidence, and artifact references for leader synthesis. If clarification is essential, put each bounded question on its own line starting with "QUESTION:"; still provide all progress possible.
+  return bounded(`Execute the assigned independent delegation for a durable Headless goal. This worker turn is read-only. Report concrete findings, verification evidence, and artifact references for task synthesis. If clarification is essential, put each bounded question on its own line starting with "QUESTION:"; still provide all progress possible.
 
 GOAL:
 ${boundedPart(objective, 6_000)}
@@ -1117,7 +1356,7 @@ function synthesisPrompt(
   plan: ParsedGoalPlan,
   workers: CompletedGoalTurn[],
 ) {
-  return bounded(`Act as the sticky leader and synthesize one complete candidate from the actual bounded worker outputs, diffs, and artifacts below. Resolve reported questions from the available evidence. Do not claim evidence that is not present. For a write goal, make only the contained changes needed for the candidate; for a read-only goal, return the concrete final result with verification evidence.
+  return bounded(`Act as the sticky task synthesizer and produce one complete candidate from the actual bounded worker outputs, diffs, and artifacts below. Resolve reported questions from the available evidence. Do not claim evidence that is not present. For a write goal, make only the contained changes needed for the candidate; for a read-only goal, return the concrete final result with verification evidence.
 
 GOAL:
 ${boundedPart(objective, 4_000)}
@@ -1129,6 +1368,8 @@ ${workerEvidenceBundle(workers)}`);
 
 function reviewPrompt(objective: string, candidate: CompletedGoalTurn) {
   return bounded(`Review the actual candidate output and diff below against the stated goal. Do not merely echo this prompt or the supplied candidate material.
+
+The write candidate is isolated from the primary checkout until every review and daemon gate passes. Your read-only workspace therefore remains unchanged by design: do not inspect the primary checkout as evidence that the candidate is absent. A base/resulting commit match is also expected before integration. Judge the supplied bounded diff and output. Headless runs configured project gates after approval, so missing raw terminal logs alone is not a reason to reject otherwise concrete candidate evidence.
 
 Your first line must be exactly one of "VERDICT: APPROVE", "VERDICT: REQUEST_CHANGES", or "VERDICT: REJECT".
 Your second line must be exactly "EVIDENCE: ${candidate.candidateId}".
@@ -1182,9 +1423,9 @@ function candidateEvidence(candidateId: string, result: RunResult, output: strin
   const diff = result.diff;
   return bounded([
     `CANDIDATE ARTIFACT ID: ${candidateId}`,
-    `OUTPUT:\n${boundedPart(output, 10_000)}`,
+    `OUTPUT:\n${boundedPart(output, 2_000)}`,
     diff
-      ? `DIFF STATUS:\n${boundedPart(diff.status, 3_000)}\n\nDIFF FILES:\n${boundedPart(diff.files.join("\n"), 2_000)}\n\nDIFF PATCH:\n${boundedPart(diff.patch, 12_000)}`
+      ? `DIFF STATUS:\n${boundedPart(diff.status, 1_000)}\n\nDIFF FILES:\n${boundedPart(diff.files.join("\n"), 1_500)}\n\nDIFF PATCH:\n${boundedPart(diff.patch, 22_000)}`
       : "DIFF: none reported by the daemon-owned run.",
     `COMMITS: base=${result.diff?.baseCommit ?? result.commit?.base ?? "none"}; candidate=${result.diff?.candidateCommit ?? result.commit?.candidate ?? "none"}; resulting=${result.diff?.resultingCommit ?? result.commit?.result ?? "none"}`,
   ].join("\n\n"));
@@ -1214,6 +1455,29 @@ function uniqueIds(values: string[]) {
   return [...new Set(values)].slice(0, 256);
 }
 
+function providerTurnTimeoutMs(backend: string) {
+  try {
+    return backendMetadata[normalizeBackend(backend)].timeoutMs;
+  } catch {
+    return DEFAULT_EXTENSION_TURN_TIMEOUT_MS;
+  }
+}
+
+async function withTurnTimeout<T>(promise: Promise<T>, timeoutMs: number, cancel: () => void) {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      try { cancel(); } catch { /* best-effort cancellation; timeout remains authoritative */ }
+      reject(new HeadlessError("TIMED_OUT", `Provider turn exceeded its bounded ${timeoutMs}ms timeout.`, { retryable: true }));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function boundedUtf8(value: string, maxLength: number, maxBytes: number) {
   const redacted = redactAndTruncate(value, maxLength).text;
   let text = redacted.length <= maxLength ? redacted : redacted.slice(0, maxLength);
@@ -1237,6 +1501,37 @@ function latestNativeSession(record: GoalRecord | null, agentId: string) {
     if (turn.agentId === agentId && turn.nativeSessionId) return turn.nativeSessionId;
   }
   return null;
+}
+
+function readOnlySecurity(goal: Goal): GoalSecurityControls {
+  return { authMode: goal.authMode, approvalPolicy: goal.approvalPolicy, mode: "read-only" };
+}
+
+function goalSecurity(goal: Goal): GoalSecurityControls {
+  return { authMode: goal.authMode, approvalPolicy: goal.approvalPolicy, mode: goal.mode };
+}
+
+function isOperationalCandidateFailure(error: unknown) {
+  if (!(error instanceof HeadlessError)) return false;
+  return new Set([
+    "BACKEND_UNAVAILABLE",
+    "NATIVE_SESSION_LOST",
+    "DAEMON_UNAVAILABLE",
+    "RATE_LIMITED",
+    "PROCESS_ERROR",
+    "TIMED_OUT",
+  ]).has(error.code);
+}
+
+function isPrematureWorkerCompletion(result: RunResult) {
+  if (result.status !== "succeeded" || result.output.length > 512) return false;
+  return /^(?:i(?:'ll| will|'m going to| am going to)|let me)\b/i.test(result.output.trim());
+}
+
+function isSubstantiveTimedOutWorker(result: RunResult) {
+  return result.status === "timed_out"
+    && result.output.trim().length >= 512
+    && result.diagnostics.malformedEvents === 0;
 }
 
 function isAvailableNow(availability: GoalAgentAvailability, now: number) {

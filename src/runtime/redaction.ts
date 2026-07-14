@@ -26,13 +26,17 @@ export const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/"private_key"\s*:\s*"-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----\\n?"/g, "\"private_key\":\"[REDACTED_GCP_PRIVATE_KEY]\""],
   // Hardened generic key=value redaction (avoids invalid JSON + reduces false positives):
   // - word-boundary on keyword start via lookbehind (?<![A-Za-z0-9]) prevents substring matches inside words like "monkey", "turkey", "mykey", "apikeyfoo" etc.
-  // - still catches "api_key", "SECRET_KEY", "my-token", "key" etc because _ - . " ' etc don't block start of keyword.
+  // - still catches "api_key", "SECRET_KEY", "access-token", etc because _ - . " ' etc don't block start of keyword.
+  // - intentionally excludes bare `key` assignments: React `key={...}` and
+  //   ordinary constants such as `STORAGE_KEY` are not credentials, while
+  //   compound API/access/secret key names remain covered by their prefixes.
   // - matches key names optionally quoted, before :=
   // - captures opening quote style (group 2), requires matching closer via backref \2
   // - replacement re-uses exact quotes (so "k":"v" -> "k":"[REDACTED]" not broken)
   // - value stops at JSON structure chars / ws / common terminators to avoid mangling code, urls, paths
   // - requires 8+ chars, skips already-redacted
-  [/(?<![A-Za-z0-9])((?:["']?(?:api|access|secret|auth|bearer|token|password|passwd|pwd|key)[A-Z0-9_\-. ]{0,20}["']?\s*[:=]\s*))(["']?)(?!\[REDACTED_)([^"'\s,}\]>&|;]{8,})\2/gi, '$1$2[REDACTED]$2'],
+  [/(?<![A-Za-z0-9])((?:["']?(?:api|access|secret|auth|bearer|token|password|passwd|pwd)[A-Z0-9_\-. ]{0,20}["']?\s*[:=]\s*))(["'])(?!\[REDACTED_)([^"'\r\n]{8,})\2/gi, '$1$2[REDACTED]$2'],
+  [/(?<![A-Za-z0-9])((?:["']?(?:api|access|secret|auth|bearer|token|password|passwd|pwd)[A-Z0-9_\-. ]{0,20}["']?\s*[:=]\s*))(["']?)(?!\[REDACTED_)(?![A-Za-z_$][A-Za-z0-9_$]*\s*\()([^"'\s,}\]>&|;]{8,})\2/gi, '$1$2[REDACTED]$2'],
 ];
 assert(SECRET_PATTERNS.length >= 18, `redaction must cover 18+ patterns, got ${SECRET_PATTERNS.length}`);
 
@@ -120,7 +124,7 @@ export class StreamingRedactor {
   }
 }
 
-const STREAM_TOKEN_START = /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-|anthropic-|xai-|hls_|hlt_|xox[baprs]-|gh[pousr]_|github_pat_|AIza|xapp-|AKIA|ASIA|Bearer\s+|Basic\s+|(?:sk|pk)_(?:live|test)_|eyJ)|(?<![A-Za-z0-9])(?:["']?(?:api|access|secret|auth|bearer|token|password|passwd|pwd|key)[A-Z0-9_\-. ]{0,20}["']?\s*[:=]\s*["']?))/gi;
+const STREAM_TOKEN_START = /(?:-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-|anthropic-|xai-|hls_|hlt_|xox[baprs]-|gh[pousr]_|github_pat_|AIza|xapp-|AKIA|ASIA|Bearer\s+|Basic\s+|(?:sk|pk)_(?:live|test)_|eyJ)|(?<![A-Za-z0-9])(?:["']?(?:api|access|secret|auth|bearer|token|password|passwd|pwd)[A-Z0-9_\-. ]{0,20}["']?\s*[:=]\s*["']?))/gi;
 
 function safeStreamingCut(value: string, overlapChars: number) {
   let cut = Math.max(0, value.length - overlapChars);

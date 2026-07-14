@@ -446,8 +446,13 @@ export class DelegationScheduler {
   }
 
   private persist() {
+    // Each mutation validates its changed delegation and preserves the
+    // scheduler-wide bounds explicitly. Avoid reparsing the entire bounded
+    // history for an in-memory scheduler on every lifecycle transition;
+    // snapshot() and durable writes still validate the complete state.
+    if (!this.statePath) return;
     this.state = SchedulerSnapshotSchema.parse(this.state);
-    if (this.statePath) writeOwnerOnlyJson(this.statePath, this.state);
+    writeOwnerOnlyJson(this.statePath, this.state);
   }
 }
 

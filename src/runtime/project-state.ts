@@ -33,18 +33,27 @@ export type ProjectStatePaths = {
   goalsDir: string;
   policyPath: string;
   budgetsPath: string;
+  brokerQuotasPath: string;
   projectTrustPath: string;
   fleetProfilesPath: string;
   collaborationPath: string;
   approvalsPath: string;
   delegationSchedulerPath: string;
   idleOpportunitiesPath: string;
+  legacyOperatorStatePath: string;
+  skillsDir: string;
+  loopsDir: string;
+  legacyContextRelayAdapterPath: string;
+  leadBindingPath: string;
+  activeStateMigrationPath: string;
+  archiveDir: string;
   worktreesDir: string;
   artifactsDir: string;
   daemonDir: string;
   daemonRuntimeDir: string;
   daemonMetadataPath: string;
   credentialsPath: string;
+  observerTokenPath: string;
   integrationsDir: string;
   tokenPath: string;
   socketPath: string;
@@ -118,18 +127,27 @@ export function getProjectStatePaths(projectRoot: string, options: ProjectStateO
     goalsDir: join(projectDir, "goals"),
     policyPath: join(projectDir, "policy.json"),
     budgetsPath: join(projectDir, "budgets.json"),
+    brokerQuotasPath: join(projectDir, "broker-quotas.json"),
     projectTrustPath: join(projectDir, "project-trust.json"),
     fleetProfilesPath: join(projectDir, "fleet-profiles.json"),
     collaborationPath: join(projectDir, "collaboration.sqlite"),
     approvalsPath: join(projectDir, "approvals.json"),
     delegationSchedulerPath: join(projectDir, "delegation-scheduler.json"),
     idleOpportunitiesPath: join(projectDir, "idle-opportunities.json"),
+    legacyOperatorStatePath: join(projectDir, "operator-state.json"),
+    skillsDir: join(projectDir, "skills"),
+    loopsDir: join(projectDir, "loops"),
+    legacyContextRelayAdapterPath: join(projectDir, "contextrelay-adapter.json"),
+    leadBindingPath: join(projectDir, "lead-binding.json"),
+    activeStateMigrationPath: join(projectDir, "migration-single-lead-v1.json"),
+    archiveDir: join(projectDir, "archive"),
     worktreesDir: join(projectDir, "worktrees"),
     artifactsDir: join(projectDir, "artifacts"),
     daemonDir,
     daemonRuntimeDir,
     daemonMetadataPath: join(daemonDir, "metadata.json"),
     credentialsPath: join(daemonDir, "credentials.json"),
+    observerTokenPath: join(daemonDir, "observer.token"),
     integrationsDir: join(daemonDir, "integrations"),
     tokenPath: join(daemonDir, "token"),
     socketPath,
@@ -165,8 +183,11 @@ export function ensureProjectStateDirectories(paths: ProjectStatePaths) {
     paths.sessionsDir,
     paths.workflowsDir,
     paths.goalsDir,
+    paths.skillsDir,
+    paths.loopsDir,
     paths.worktreesDir,
     paths.artifactsDir,
+    paths.archiveDir,
     paths.daemonDir,
     paths.integrationsDir,
     paths.daemonRuntimeDir,

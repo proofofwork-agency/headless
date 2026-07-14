@@ -68,7 +68,7 @@ export class CouncilStore {
       principal,
       jobId: options.jobId ?? randomUUID(),
       phase: "proposal",
-      authMode: options.authMode ?? "native-login",
+      authMode: options.authMode ?? "broker",
       approvalPolicy: options.approvalPolicy ?? "ask",
       participants,
       proposalArtifactIds: [],

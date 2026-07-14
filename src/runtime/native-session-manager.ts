@@ -1,9 +1,9 @@
-import type { ExecResult } from "../index";
+import type { ExperimentalExecResult as ExecResult } from "../experimental/exec-result";
 import type { DurableSession } from "../contracts/durable";
-import { getAdapter, requiredContainmentSecurityGaps } from "../backends/registry";
+import { getBackendDefinition, requiredContainmentSecurityGaps } from "../backends/registry";
 import { executableReadRoots, maybeWrapWithSandbox } from "../runner/simple";
 import { installNativeAuthCapsule, supportsNativeAuthCapsule } from "./native-auth-capsule";
-import { installGrokIsolation } from "./grok-isolation";
+import { installGrokIsolation, validateGrokIsolationInspection } from "./grok-isolation";
 import { createWorkerEnvironment, type WorkerEnvironment } from "./worker-environment";
 import type { PersistentSessionStore } from "./persistent-sessions";
 import {
@@ -57,6 +57,7 @@ export class NativeSessionManager {
     private readonly options: {
       diagnostic?: (message: string, error?: unknown) => void;
       authHomeDir?: string;
+      workerBaseDir?: string;
     } = {},
   ) {
     this.diagnostic = options.diagnostic ?? ((message, error) => recordRuntimeDiagnostic("state", message, error ?? message));
@@ -214,7 +215,7 @@ export class NativeSessionManager {
     const initializing = this.initializations.get(session.id);
     if (initializing) return waitForPromise(initializing.promise, signal);
     throwIfCancelled(signal, `Native session ${session.id} was cancelled before initialization.`);
-    const worker = createWorkerEnvironment();
+    const worker = createWorkerEnvironment({ baseDir: this.options.workerBaseDir });
     const controller = new AbortController();
     const detach = forwardAbort(signal, controller);
     let initialization: InitializingRuntime;
@@ -237,10 +238,10 @@ export class NativeSessionManager {
   ) {
     let opened: { driver: SessionDriver; handle: SessionHandle } | null = null;
     try {
-      const adapter = getAdapter(session.backend);
+      const adapter = getBackendDefinition(session.backend);
       if (!adapter) throw new Error(`Backend ${session.backend} is unavailable for native sessions.`);
       if (session.containment === "required") {
-        const gaps = requiredContainmentSecurityGaps(adapter);
+        const gaps = requiredContainmentSecurityGaps(adapter, "read-only");
         if (gaps.length > 0) {
           throw new SessionDriverError(
             "BACKEND_UNSUPPORTED",
@@ -266,7 +267,7 @@ export class NativeSessionManager {
         throw new SessionDriverError("NATIVE_AUTH_UNAVAILABLE", capsule.reason ?? "Native authentication is unavailable.");
       }
       const selectedModel = capsule.model ?? session.model;
-      if (session.backend === "grok-build") installGrokIsolation(worker);
+      if (session.backend === "grok-build") installGrokIsolation(worker, { homeDir: this.options.authHomeDir });
       const options = {
         backend: session.backend,
         prompt: "",
@@ -282,7 +283,7 @@ export class NativeSessionManager {
       const processExecutor = new BunSessionExecutor({
         prepare: async (request) => {
           const sandboxOptions = request.purpose === "capability-probe"
-            ? { ...options, authMode: "broker" as const, sandboxNetwork: "denied" as const }
+            ? { ...options, containment: "required" as const, authMode: "broker" as const, sandboxNetwork: "denied" as const }
             : request.purpose === "auth-probe"
               ? { ...options, sandboxNetwork: "native-auth-local" as const }
               : options;
@@ -295,7 +296,7 @@ export class NativeSessionManager {
             worker,
             executableReadRoots(request.argv, request.env),
           );
-          if (session.containment === "required" && !wrapped.sandboxed) {
+          if ((request.purpose === "capability-probe" || session.containment === "required") && !wrapped.sandboxed) {
             await cleanupWithDiagnostic("native-session.unavailable-sandbox", wrapped.cleanup);
             throw new Error(`Required native-session containment is unavailable: ${wrapped.reason}`);
           }
@@ -303,6 +304,20 @@ export class NativeSessionManager {
         },
       });
       const executor = executorWithInitializationSignal(processExecutor, signal);
+      if (session.backend === "grok-build") {
+        const attestation = await executor.execute({
+          argv: ["grok", "inspect", "--json"],
+          cwd: this.projectRoot,
+          env,
+          stdin: null,
+          timeoutMs: Math.min(timeoutMs, 30_000),
+          signal,
+          protocol: "text",
+          purpose: "capability-probe",
+        });
+        const failure = grokSessionAttestationFailure(attestation);
+        if (failure) throw new SessionDriverError("BACKEND_UNSUPPORTED", `Grok isolation attestation failed before provider access: ${failure}`);
+      }
       const factory = new SessionDriverFactory({ executor });
       const selected = await factory.select(session.backend, {
         cwd: this.projectRoot,
@@ -509,6 +524,17 @@ export class NativeSessionManager {
   }
 }
 
+function grokSessionAttestationFailure(result: Awaited<ReturnType<SessionExecutor["execute"]>>) {
+  if (result.timedOut) return "inspect timed out";
+  if (result.overflowed) return "inspect output exceeded its bound";
+  if (result.exitCode !== 0) return result.stderr || `inspect exited ${result.exitCode}`;
+  try {
+    return validateGrokIsolationInspection(JSON.parse(result.stdout ?? ""));
+  } catch {
+    return "inspect returned malformed JSON";
+  }
+}
+
 function sessionExecResult(
   session: DurableSession,
   driverKind: SessionHandle["driverKind"] | "prelaunch",
@@ -578,7 +604,7 @@ function sessionExecResult(
       isolatedHome: true,
       credentialsIsolated: true,
       network: runtimeReady
-        ? session.containment === "unsafe" ? "unrestricted" : "provider-direct"
+        ? session.containment === "unsafe" ? "unrestricted" : "native-direct-unrestricted"
         : "denied",
       credentialAccess: runtimeReady ? "backend-native" : "none",
       unsafe: runtimeReady && session.containment === "unsafe",

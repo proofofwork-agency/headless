@@ -47,6 +47,8 @@ export type WriteGateContext = {
 export type WriteExecutionSummary = {
   succeeded: boolean;
   status: "succeeded" | "failed" | "timed_out" | "cancelled" | "blocked";
+  /** Only OUTPUT_OVERFLOW may be recovered through candidate gates. */
+  failureCode?: string | null;
   usage: {
     input: number | null;
     output: number | null;
@@ -131,6 +133,7 @@ export async function integrateWriteCandidate(input: {
   policy: WriteIntegrationPolicy;
 }): Promise<WriteIntegrationResult> {
   const { plan, diff, execution, policy } = input;
+  const recoverableOutputOverflow = !execution.succeeded && execution.failureCode === "OUTPUT_OVERFLOW";
   const gates: WriteIntegrationResult["gates"] = [];
   let preserveCandidate = true;
   let candidateCommit: string | null = null;
@@ -192,7 +195,7 @@ export async function integrateWriteCandidate(input: {
     let candidateGate: WriteGateDecision;
     if (!candidateAuthorization.allowed) {
       candidateGate = failedGate(candidateAuthorization.reason);
-    } else if (!execution.succeeded) {
+    } else if (!execution.succeeded && !recoverableOutputOverflow) {
       candidateGate = failedGate(`Worker execution ended as ${execution.status}; integration gates were not eligible to pass.`);
     } else if (policy.signal?.aborted) {
       candidateGate = failedGate("Write integration was cancelled before candidate gates ran.");
@@ -224,14 +227,19 @@ export async function integrateWriteCandidate(input: {
     }
     candidateCommit = committed.sha;
 
-    if (!execution.succeeded) {
+    if (!execution.succeeded && !recoverableOutputOverflow) {
       return finish("preserved_execution_failure", `Candidate commit preserved because worker execution ended as ${execution.status}.`);
     }
     if (!gatePassed(candidateGate)) {
       return finish("blocked_candidate_gates", gateReason("Candidate gates failed.", candidateGate));
     }
-    if (!policy.autoMerge) {
-      return finish("preserved_no_merge_authority", "Candidate commit preserved because this principal has no merge authority.");
+    if (!policy.autoMerge || recoverableOutputOverflow) {
+      return finish(
+        "preserved_no_merge_authority",
+        recoverableOutputOverflow
+          ? "Output-overflow candidate passed gates and was preserved for explicit review; it was not auto-integrated."
+          : "Candidate commit preserved because this principal has no merge authority.",
+      );
     }
     if (policy.signal?.aborted) {
       return finish("preserved_execution_failure", "Candidate commit preserved because integration was cancelled.");

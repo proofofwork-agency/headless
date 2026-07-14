@@ -240,14 +240,16 @@ export function decodeGrokEvent(value: Record<string, unknown>): DecodedSessionE
     return [decoded("session", { stableId: providerEventId(value), sessionId, providerSequence: sequence })];
   }
   if (type === "text" || type === "assistant" || type === "content.delta" || type === "message.delta") {
-    const text = firstString(value.delta, value.text, value.content);
+    const grokDataDelta = type === "text" ? firstString(value.data) : null;
+    const text = grokDataDelta ?? firstString(value.delta, value.text, value.content);
+    const delta = grokDataDelta !== null || type.endsWith("delta");
     return text ? [decoded("text", {
-      stableId: providerEventId(value, value, type.endsWith("delta")),
+      stableId: providerEventId(value, value, delta),
       sessionId,
       turnId,
       itemId,
       text,
-      textMode: type.endsWith("delta") ? "delta" : "snapshot",
+      textMode: delta ? "delta" : "snapshot",
       providerSequence: sequence,
     })] : [];
   }
@@ -262,7 +264,7 @@ export function decodeGrokEvent(value: Record<string, unknown>): DecodedSessionE
       providerSequence: sequence,
     })];
   }
-  if (type === "result" || type === "completed" || type === "turn.completed") {
+  if (type === "result" || type === "completed" || type === "turn.completed" || type === "end") {
     const events: DecodedSessionEvent[] = [];
     const text = firstString(value.output, value.result, value.text);
     if (text) events.push(decoded("text", {
@@ -283,11 +285,12 @@ export function decodeGrokEvent(value: Record<string, unknown>): DecodedSessionE
       costUsd,
       providerSequence: sequence,
     }));
+    const stopReason = firstString(value.stop_reason, value.stopReason)?.toLowerCase() ?? "";
     events.push(decoded("completion", {
       stableId: turnId ? `turn:${turnId}:completed` : providerEventId(value),
       sessionId,
       turnId,
-      failed: value.ok === false || value.success === false,
+      failed: value.ok === false || value.success === false || stopReason.includes("error") || stopReason.includes("fail"),
       providerSequence: sequence,
     }));
     return events;

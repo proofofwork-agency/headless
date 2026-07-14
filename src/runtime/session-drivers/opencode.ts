@@ -40,7 +40,7 @@ function openCodeCommand(runtime: SessionDriverRuntime, prompt: string, nativeSe
   if (nativeSessionId) argv.push("--session", safeSessionOption(nativeSessionId, "native id")!);
   if (runtime.model) argv.push("--model", safeSessionOption(runtime.model, "model")!);
   if (runtime.agent) argv.push("--agent", safeAgentName(runtime.agent, "OpenCode"));
-  if (runtime.approvalPolicy === "auto" || runtime.approvalPolicy === "bypass") argv.push("--dangerously-skip-permissions");
+  if (runtime.approvalPolicy === "auto" || runtime.approvalPolicy === "bypass") argv.push("--auto");
   argv.push("--", prompt);
   return { argv, stdin: null, protocol: "jsonl" as const };
 }

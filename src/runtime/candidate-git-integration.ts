@@ -55,6 +55,8 @@ export type PreservedCandidateGitIntegrationOptions = {
   journal: IntegrationJournal;
   signal?: AbortSignal;
   worktreeLease?: WorktreeLeaseHooks;
+  /** Force isolated gates even when primary still equals the candidate base. */
+  requireIntegrationGates?: boolean;
   reauthorize: (checkpoint: WriteAuthorizationCheckpoint) => Promise<{ allowed: boolean; reason: string }> | { allowed: boolean; reason: string };
   evaluateIntegrationGates: (context: WriteGateContext) => Promise<WriteGateDecision>;
 };
@@ -79,7 +81,7 @@ export async function integratePreservedCandidateCommit(
       expectedPrimaryHead: primary.head,
     });
   }
-  if (primary.head === options.baseCommit) return integrateFastForward(options, primary.head);
+  if (primary.head === options.baseCommit && !options.requireIntegrationGates) return integrateFastForward(options, primary.head);
   return integrateAdvanced(options, primary.head);
 }
 
