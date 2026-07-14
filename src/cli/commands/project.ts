@@ -10,13 +10,14 @@ export function parseProjectCommand(args: string[]): ProjectCommandCall {
   const namespace = args[1];
   const action = args[2] ?? "status";
   if (namespace !== "trust" || !["status", "grant", "revoke"].includes(action)) {
-    throw new CliUsageError("Usage: headless project trust <status|grant|revoke> [--allow-bypass] [--deny-native-login]");
+    throw new CliUsageError("Usage: headless project trust <status|grant|revoke> [--allow-native-direct-unrestricted] [--allow-bypass]");
   }
   if (action === "grant") {
     return {
       method: "project.trust.grant",
       params: {
-        nativeLoginAllowed: !args.includes("--deny-native-login"),
+        nativeLoginAllowed: args.includes("--allow-native-direct-unrestricted"),
+        nativeDirectUnrestrictedAcknowledged: args.includes("--allow-native-direct-unrestricted"),
         bypassAllowed: args.includes("--allow-bypass"),
       },
     };

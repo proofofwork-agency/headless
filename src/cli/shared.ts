@@ -137,12 +137,17 @@ export function ensureSupportedPlatform() {
   }
 }
 
-export async function daemonClient(projectRoot: string, flags: string[] = []) {
+export async function daemonClient(
+  projectRoot: string,
+  flags: string[] = [],
+  options: { enableExperimentalSessions?: boolean } = {},
+) {
   ensureSupportedPlatform();
   return connectOrStartDaemon({
     projectRoot,
     extensionConfigPath: getArg(flags, "--extension-config"),
     extensionModules: getRepeatedArgs(flags, "--extension-module"),
+    enableExperimentalSessions: options.enableExperimentalSessions,
   });
 }
 
@@ -167,7 +172,7 @@ export async function waitForJob(client: HeadlessDaemonClient, job: Job, timeout
 
 export function printRunResult(result: RunResult, json: boolean, stream: boolean) {
   if (json) {
-    console.log(JSON.stringify(result, null, 2));
+    printJson(result);
     return;
   }
   const output = result.output ? redactAndTruncate(result.output).text : "(no text output)";
@@ -177,6 +182,11 @@ export function printRunResult(result: RunResult, json: boolean, stream: boolean
     console.error(`\n---\ncost: ${result.cost.amountUsd ?? "n/a"}  tokens: ${result.usage.providerTotal ?? "n/a"}  time: ${result.durationMs}ms`);
   }
   if (result.containment.unsafe) console.error("WARNING: result was produced without required OS containment.");
+}
+
+/** Write one complete JSON document without console/renderer byte clipping. */
+export function printJson(value: unknown) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
 export function boundedCouncilTimeout(runTimeoutMs: number, participants: number) {

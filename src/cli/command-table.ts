@@ -15,6 +15,11 @@ import { runCouncilCommand, runGateCommand } from "./commands/quality";
 import { runSessionCommand } from "./commands/session";
 import { runWorkflowCommand } from "./commands/workflow";
 import { COMMAND_SPECS, resolveCommandSpec, type CliCommandName } from "./command-specs";
+import { runSkillCommand } from "./commands/skill";
+import { runLoopCommand } from "./commands/loop";
+import { runLedgerCommand } from "./commands/ledger";
+import { runLeadCommand } from "./commands/lead";
+import { UNIFIED_COMMAND_REGISTRY } from "../command-registry";
 
 export type CliCommandHandler = (args: string[]) => Promise<void>;
 
@@ -43,9 +48,13 @@ const handlers = {
   launch: runLaunchCommand,
   ask: runAskCommand,
   "coop-proof": runCooperationProofCommand,
+  skill: runSkillCommand,
+  loop: runLoopCommand,
+  ledger: runLedgerCommand,
+  lead: runLeadCommand,
 } satisfies Record<CliCommandName, CliCommandHandler>;
 
-export const COMMAND_TABLE = new Map(COMMAND_SPECS.map((spec) => [spec.name, {
+export const COMMAND_TABLE = new Map(UNIFIED_COMMAND_REGISTRY.cli.map(({ source: spec }) => [spec.name, {
   spec,
   handler: handlers[spec.name],
 }] as const));

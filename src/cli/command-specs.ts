@@ -11,6 +11,11 @@ export type CliCommandSpec<Name extends string = string> = {
  */
 export const COMMAND_SPECS = [
   {
+    name: "lead",
+    valueFlags: ["--cwd", "--extension-config", "--extension-module"],
+    help: "lead <use <host>|status|release> [--cwd dir]   Configure the externally launched foreground lead.",
+  },
+  {
     name: "exec",
     aliases: ["run"],
     valueFlags: ["--backend", "--model", "--agent", "--session-id", "--timeout-ms", "--cwd", "--extension-config", "--extension-module", "--mode", "--auth-mode", "--approval-policy"],
@@ -24,7 +29,7 @@ export const COMMAND_SPECS = [
   {
     name: "project",
     valueFlags: ["--cwd", "--extension-config", "--extension-module"],
-    help: "project trust <status|grant|revoke> [--allow-bypass] [--deny-native-login] [--cwd dir]",
+    help: "project trust <status|grant|revoke> [--allow-native-direct-unrestricted] [--allow-bypass] [--cwd dir]",
   },
   {
     name: "fleet",
@@ -33,13 +38,13 @@ export const COMMAND_SPECS = [
   },
   {
     name: "goal",
-    valueFlags: ["--goal-id", "--fleet-profile-id", "--coordinator", "--mode", "--auth-mode", "--approval-policy", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"],
+    valueFlags: ["--goal-id", "--fleet-profile-id", "--synthesizer", "--mode", "--auth-mode", "--approval-policy", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"],
     help: "goal <start|run|send|follow|status|list|cancel|result> [--goal-id id] [--mode read-only|write] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--detach] [--timeout-ms n]",
   },
   {
     name: "collaboration",
     valueFlags: ["--goal-id", "--after-sequence", "--limit", "--agent-id", "--message-id", "--cwd", "--extension-config", "--extension-module"],
-    help: "collaboration <turns|messages|acknowledge|transfer-leader> --goal-id id [--message-id id ...] [--retain]",
+    help: "collaboration <turns|messages|acknowledge|transfer-synthesizer> --goal-id id [--message-id id ...] [--retain]",
   },
   {
     name: "approval",
@@ -58,18 +63,19 @@ export const COMMAND_SPECS = [
   },
   {
     name: "workflow",
-    valueFlags: ["--file", "--workflow-id", "--timeout-ms", "--auth-mode", "--approval-policy", "--cwd", "--extension-config", "--extension-module"],
-    help: "workflow <run|list|status|wait|cancel> [--file workflow.json|--workflow-id id] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--timeout-ms n]",
+    valueFlags: ["--file", "--workflow-id", "--draft-id", "--timeout-ms", "--auth-mode", "--approval-policy", "--cwd", "--extension-config", "--extension-module"],
+    help: "workflow <run|validate|draft-create|draft-list|draft-get|draft-launch|list|status|wait|pause|resume|cancel> [options]",
   },
   {
     name: "events",
-    valueFlags: ["--limit", "--session-id", "--cwd", "--extension-config", "--extension-module"],
-    help: "events [--follow] [--pretty] [--limit n] [--session-id id] [--cwd dir]",
+    aliases: ["logs"],
+    valueFlags: ["--limit", "--session-id", "--display-mode", "--cwd", "--extension-config", "--extension-module"],
+    help: "events | logs [--display-mode compact|verbose|strict] [--errors|--activity] [--follow] [--pretty] [--limit n]",
   },
   {
     name: "autonomy",
     valueFlags: ["--cwd", "--extension-config", "--extension-module"],
-    help: "autonomy <start|stop|status|ask|backup> [--cwd dir]",
+    help: "autonomy <start|stop|status|ask|backup> [options]",
   },
   {
     name: "orchestrate",
@@ -95,9 +101,9 @@ export const COMMAND_SPECS = [
   {
     name: "status",
     valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"],
-    help: "status | doctor | tui | pair",
+    help: "status [--cwd dir]              Show project and daemon status.",
   },
-  { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"] },
+  { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "doctor [--cwd dir]              Check backend, containment, and daemon readiness." },
   { name: "tui", valueFlags: ["--cwd"] },
   { name: "pair", valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"] },
   {
@@ -114,7 +120,10 @@ export const COMMAND_SPECS = [
     aliases: ["ask-for-work", "ask-for-more-work"],
     valueFlags: ["--strength", "--completed", "--session-id", "--cwd", "--extension-config", "--extension-module"],
   },
-  { name: "coop-proof", aliases: ["autonomy-coop-proof"] },
+  { name: "coop-proof", aliases: ["autonomy-coop-proof"], valueFlags: ["--cwd", "--extension-config", "--extension-module"] },
+  { name: "skill", aliases: ["skills"], valueFlags: ["--source", "--backend", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"], help: "skill | skills <list|inspect|import|enable|use|revoke> [options]" },
+  { name: "loop", valueFlags: ["--loop-id", "--file", "--mode", "--deadline-ms", "--max-iterations", "--per-iteration-cost-usd", "--total-cost-usd", "--cwd", "--extension-config", "--extension-module"], help: "loop <start|list|status|pause|resume|cancel> --confirm [finite policy options]" },
+  { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "ledger repair-tail --confirm [--cwd dir]   Admin-only partial-tail recovery." },
 ] as const satisfies readonly CliCommandSpec[];
 
 export type CliCommandName = typeof COMMAND_SPECS[number]["name"];
@@ -138,22 +147,34 @@ export type CliInvocation =
   | { kind: "unknown"; name: string | undefined };
 
 export function parseCliInvocation(args: string[]): CliInvocation {
-  const name = args[0];
-  if (name === "help" || args.includes("--help") || args.includes("-h")) return { kind: "help" };
+  const experimental = args[0] === "experimental";
+  const name = experimental ? args[1] : args[0];
+  if (!name || name === "help" || args.includes("--help") || args.includes("-h")) return { kind: "help" };
   if (args.includes("--version") || args.includes("-V")) return { kind: "version" };
   const spec = resolveCommandSpec(name);
-  return spec ? { kind: "command", spec } : { kind: "unknown", name };
+  if (!spec) return { kind: "unknown", name };
+  return experimental || STABLE_COMMAND_NAMES.has(spec.name)
+    ? { kind: "command", spec }
+    : { kind: "unknown", name };
 }
 
-export function renderHelp() {
+export const STABLE_COMMAND_NAMES = new Set(["exec", "lead", "daemon", "project", "init", "status", "doctor"]);
+
+export function renderHelp(includeExperimental = false) {
   return [
-    "headless (hless) v0.2 — universal contained runner and local orchestrator",
+    "headless (hless) — Beta 1 contained execution runner",
     "",
     "Commands:",
-    ...COMMAND_SPECS.flatMap((spec) => "help" in spec ? [`  ${spec.help}`] : []),
+    ...COMMAND_SPECS.flatMap((spec) => {
+      if (!("help" in spec) || (!includeExperimental && !STABLE_COMMAND_NAMES.has(spec.name))) return [];
+      return [`  ${includeExperimental && !STABLE_COMMAND_NAMES.has(spec.name) ? `experimental ${spec.help}` : spec.help}`];
+    }),
     "",
     "Required containment is the default. --unsafe-no-sandbox is the only local bypass and is visibly marked in results.",
-    "Autonomy and councils always require containment.",
+    "Broker authentication is the default; native login requires explicit project consent to unrestricted provider egress.",
+    includeExperimental
+      ? "Experimental compatibility commands require the `headless experimental` namespace and are outside the beta stability promise."
+      : "Run `headless experimental --help` to list compatibility commands outside the beta stability promise.",
     "Use a literal -- before prompts that begin with a flag.",
   ].join("\n");
 }

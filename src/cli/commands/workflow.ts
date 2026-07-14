@@ -9,10 +9,11 @@ import {
   getApprovalPolicy,
   getAuthMode,
   parseIntegerArg,
+  printJson,
   requiredArg,
 } from "../shared";
 
-const workflowActions = new Set(["status", "wait", "cancel"]);
+const workflowActions = new Set(["status", "wait", "pause", "resume", "cancel"]);
 
 export async function runWorkflowCommand(args: string[]) {
   const action = args[1] || "list";
@@ -26,21 +27,30 @@ export async function runWorkflowCommand(args: string[]) {
       ...(getAuthMode(flags) ? { authMode: getAuthMode(flags) } : {}),
       ...(getApprovalPolicy(flags) ? { approvalPolicy: getApprovalPolicy(flags) } : {}),
     });
-    console.log(JSON.stringify(workflow, null, 2));
+    printJson(workflow);
     return;
   }
+  if (action === "validate" || action === "draft-create") {
+    const definition = await readWorkflowDefinition(requiredArg(flags, "--file"));
+    printJson(await client.call(action === "validate" ? "workflow.validate" : "workflow.draft.create", definition));
+    return;
+  }
+  if (action === "draft-list") { printJson(await client.call("workflow.draft.list")); return; }
+  if (action === "draft-get" || action === "draft-launch") {
+    printJson(await client.call(action === "draft-get" ? "workflow.draft.get" : "workflow.draft.launch", { draftId: requiredArg(flags, "--draft-id") })); return;
+  }
   if (action === "list") {
-    console.log(JSON.stringify(await client.call<Workflow[]>("workflow.list"), null, 2));
+    printJson(await client.call<Workflow[]>("workflow.list"));
     return;
   }
   if (!workflowActions.has(action)) {
-    throw new CliUsageError("Usage: headless workflow <run|list|status|wait|cancel> [--file workflow.json|--workflow-id id]");
+    throw new CliUsageError("Usage: headless workflow <run|validate|draft-create|draft-list|draft-get|draft-launch|list|status|wait|pause|resume|cancel> [options]");
   }
   const workflowId = requiredArg(flags, "--workflow-id");
-  const method = action === "status" ? "workflow.status" : action === "cancel" ? "workflow.cancel" : "workflow.wait";
+  const method = action === "status" ? "workflow.status" : action === "cancel" ? "workflow.cancel" : action === "pause" ? "workflow.pause" : action === "resume" ? "workflow.resume" : "workflow.wait";
   const timeoutMs = action === "wait" ? parseIntegerArg(flags, "--timeout-ms") ?? DEFAULT_RUN_TIMEOUT_MS : undefined;
   const workflow = await client.call<Workflow>(method, { workflowId, timeoutMs }, timeoutMs ? Math.min(timeoutMs + 5_000, MAX_TIMEOUT_MS) : undefined);
-  console.log(JSON.stringify(workflow, null, 2));
+  printJson(workflow);
   if (action === "wait") process.exitCode = workflow.state === "succeeded" ? 0 : 1;
 }
 

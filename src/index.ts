@@ -1,124 +1,13 @@
-/**
- * Headless — Universal AI Coding Agent Runner & Orchestrator
- *
- * Re-exports and thin unified surface for adapters, orchestration,
- * and the native .headless ledger runtime.
- */
+/** Stable Beta 1 surface: contained execution, run contracts, backend metadata, and structured errors. */
 
 export type { Backend } from "./backends/ids";
-export * from "./contracts/index";
-export {
-  BrokerBudgetQuotaSchema,
-  BrokerLeaseScopeSchema,
-  type BrokerBudgetQuota,
-  type BrokerLeaseScope,
-  type BrokerRequestLog,
-} from "./broker/server";
-export { getProvider, listProviders, registerProvider, unregisterProvider, type ProviderDefinition } from "./broker/providers";
+export type { RunEvent, RunRequest, RunResult } from "./contracts/run";
 export { backendChoices, normalizeBackend } from "./backends/ids";
 export { backendMetadata, type BackendMetadata } from "./backends/metadata";
-export {
-  assertModeAllowed,
-  backendAdapters,
-  getAdapter,
-  listAdapters,
-  registerAdapter,
-  resolveAdapterId,
-  unregisterAdapter,
-  type BackendAdapter,
-  type BackendAdapterProbeSpec,
-  type BackendAdapterSecurity,
-} from "./backends/registry";
-export { probeBackendAdapter, type ProbeExecution, type ProbeExecutor } from "./backends/probe";
-export type { ArtifactStatus, HeadlessEvent, HeadlessEventType } from "./runtime/events";
-export {
-  isEventOfType,
-  isNoteEvent,
-  isArtifactEvent,
-  isHandoffEvent,
-  isHeadlessResultEvent,
-  isAskForMoreWorkEvent,
-  isAskForBackupEvent,
-  isMessageEvent,
-  isReleaseGateEvent,
-  isTaskClaimEvent,
-  isConsensusVoteEvent,
-} from "./runtime/events";
-export type { ReadContextView, TaskState } from "./runtime/read-model";
-export { getCooperationInstructions } from "./runtime/cooperation";
-export { splitList } from "./utils/list";
-export { PricingEntrySchema, registerPricing, unregisterPricing, listPricing, resolvePricing, calculatePricedCost, type PricingEntry } from "./runtime/pricing";
-export { Semaphore, withBoundedConcurrency, createLimiter } from "./runtime/concurrency";
 export { HeadlessError, errorCode, isHeadlessError, toHeadlessError, toStructuredError } from "./runtime/headless-error";
-export { safeOption, positiveTimeout, supportedPlatform } from "./runtime/validation";
-export { signalProcessTree, terminateProcessTree as terminateChildProcessTree } from "./runtime/process-tree";
-export { installNativeAuthCapsule, type NativeAuthCapsuleOptions, type NativeAuthCapsuleResult } from "./runtime/native-auth-capsule";
-export { resolveOpenCodeNativeModel, type OpenCodeNativeModelResolution } from "./runtime/opencode-native-model";
-export { NativeSessionManager } from "./runtime/native-session-manager";
-export { DelegationScheduler, DelegationSchedulerError } from "./runtime/delegation-scheduler";
-export {
-  GoalDelegationRuntime,
-  type GoalDelegationAttempt,
-  type GoalDelegationEvent,
-  type GoalDelegationRunInput,
-} from "./runtime/goal-delegation-runtime";
-export { DirectedMailbox, DirectedMailboxError } from "./runtime/directed-mailbox";
-export { DeterministicIdleOpportunityDetector, detectIdleOpportunities } from "./runtime/idle-opportunity-detector";
-export {
-  IdleAutonomyService,
-  deriveIdleAutonomyEvidence,
-  type IdleAutonomyAction,
-  type IdleAutonomyEvidence,
-  type IdleAutonomyScanReport,
-  type IdleAutonomyServiceOptions,
-  type IdleSuggestionLane,
-  type IdleWorktreeLease,
-} from "./runtime/idle-autonomy-service";
-export { scoreLeaderCandidate, selectStickyLeader } from "./runtime/leader-selector";
-export {
-  CouncilElectionBallotSchema,
-  CouncilElectionRankingSchema,
-  CouncilElectionRoundSchema,
-  CouncilLeaderElectionDecisionSchema,
-  CouncilLeaderElectionInputSchema,
-  LeaderElectionError,
-  createCouncilLeaderBallot,
-  runCouncilLeaderElection,
-  tallyCouncilLeaderElection,
-  type CouncilElectionBallot,
-  type CouncilElectionRound,
-  type CouncilLeaderElectionDecision,
-  type CouncilLeaderElectionInput,
-  type LeaderElectionErrorCode,
-} from "./runtime/leader-election";
-export {
-  CandidateIntegrationService,
-  type CandidateAuthorizationContext,
-  type CandidateInspection,
-  type CandidateIntegrationServiceOptions,
-} from "./runtime/candidate-integration-service";
-export {
-  CandidateDecisionStore,
-  type CandidateDecisionRecord,
-  type CandidateIntegrationAttempt,
-  type CandidateIntegrationOutcome,
-} from "./runtime/candidate-decision-store";
-export * from "./runtime/session-drivers/index";
-export { connectOrStartDaemon, type ConnectDaemonOptions } from "./daemon/connect";
-export { HeadlessDaemonClient, MAX_DAEMON_TRANSPORT_TIMEOUT_MS, type HeadlessDaemonClientOptions } from "./daemon/client";
-export { HeadlessDaemon, type HeadlessDaemonOptions } from "./daemon/server";
-export { getProjectStatePaths, getHeadlessStateHome, canonicalizeProjectRoot, projectIdForRoot } from "./runtime/project-state";
-export {
-  resolveDaemonExtensionConfig,
-  type HeadlessExtensionApi,
-  type HeadlessExtensionRegistration,
-  type LoadedDaemonExtensions,
-  type ResolvedDaemonExtensionConfig,
-  type ResolveDaemonExtensionConfigOptions,
-} from "./runtime/daemon-extensions";
 
 import type { Backend } from "./backends/ids";
-import { resolveAdapterId } from "./backends/registry";
+import { resolveBackendId } from "./backends/registry";
 import { HeadlessError } from "./runtime/headless-error";
 
 export interface ExecOptions {
@@ -140,51 +29,12 @@ export interface ExecOptions {
   approvalPolicy?: import("./contracts/native").ApprovalPolicy;
   /** Completion callback retained for lightweight callers; daemon events provide live streaming. */
   onStdoutChunk?: (chunk: string) => void;
+  /** Receives each durable run event as it is observed from the daemon. */
+  onEvent?: (event: import("./contracts/run").RunEvent) => void;
   /** Absolute trusted startup config used only when connecting/bootstrapping the daemon. */
   extensionConfigPath?: string;
   /** Absolute trusted extension entrypoints; never serialized into RunRequest. */
   extensionModules?: readonly string[];
-}
-
-export interface ExecResult {
-  ok: boolean;
-  backend: string;
-  output: string;
-  cost: number | null;
-  tokens: number | null;
-  durationMs: number;
-  exitCode: number | null;
-  timedOut: boolean;
-  status?: "succeeded" | "failed" | "timed_out" | "cancelled" | "blocked";
-  error?: import("./contracts/common").StructuredError | null;
-  stderr?: string;
-  diagnostics?: import("./contracts/run").RunResult["diagnostics"];
-  signal?: string | null;
-  usage?: import("./contracts/run").RunResult["usage"];
-  containment?: import("./contracts/run").RunResult["containment"];
-  diff?: {
-    patch: string;
-    status: string;
-    files: string[];
-    baseCommit?: string | null;
-    candidateCommit?: string | null;
-    resultingCommit?: string | null;
-  } | null;
-  worktreeBranch?: string | null;
-  commit?: {
-    base: string | null;
-    candidate: string | null;
-    result: string | null;
-    merged: boolean;
-  } | null;
-  writeOutcome?: import("./runtime/write-integration").WriteMergeOutcome | null;
-  sandboxed?: boolean;
-  sandboxReason?: string;
-  /** Redaction/truncation flags from secret scrubbing (populated by runner + headlessRun redaction paths). */
-  redacted?: boolean;
-  truncated?: boolean;
-  outputTruncated?: boolean;
-  diffTruncated?: boolean;
 }
 
 /**
@@ -192,13 +42,13 @@ export interface ExecResult {
  * Submits through the authenticated project daemon so policy, budgets, events,
  * cancellation, and durable job state have one authority.
  */
-export async function exec(opts: ExecOptions): Promise<ExecResult> {
+export async function exec(opts: ExecOptions): Promise<import("./contracts/run").RunResult> {
   const { connectOrStartDaemon } = await import("./daemon/connect.js");
   const { RunRequestSchema } = await import("./contracts/run.js");
   const projectRoot = (await import("./runtime/project-state.js")).canonicalizeProjectRoot(opts.cwd ?? process.cwd());
   let backend: string;
   try {
-    backend = resolveAdapterId(opts.backend);
+    backend = resolveBackendId(opts.backend);
   } catch {
     // Registered extension adapters may live in the already-running daemon
     // rather than this client process. The daemon remains the authority that
@@ -226,6 +76,9 @@ export async function exec(opts: ExecOptions): Promise<ExecResult> {
   const { projectRoot: _daemonOwnedProjectRoot, ...submittedRequest } = validated;
   const submitted = await client.call<import("./contracts/durable").Job>("run.submit", submittedRequest);
   const cancel = () => { void client.call("run.cancel", { jobId: submitted.id }, 2_000).catch(() => {}); };
+  let waitFinished = false;
+  const streamDiagnostics: string[] = [];
+  const eventStream = streamExecEvents(client, submitted.id, opts, () => waitFinished, streamDiagnostics);
   opts.signal?.addEventListener("abort", cancel, { once: true });
   if (opts.signal?.aborted) cancel();
   try {
@@ -234,11 +87,60 @@ export async function exec(opts: ExecOptions): Promise<ExecResult> {
       ? submitted
       : await waitForExecJob(client, submitted.id, waitTimeoutMs);
     if (!completed.result) throw new Error("Daemon returned a terminal job without a result.");
-    const result = legacyExecResult(completed.result);
-    if (result.output) opts.onStdoutChunk?.(result.output);
+    waitFinished = true;
+    await eventStream;
+    let result = completed.result;
+    if (streamDiagnostics.length > 0 && result.diagnostics) {
+      result.diagnostics = {
+        ...result.diagnostics,
+        ignoredEvents: result.diagnostics.ignoredEvents + streamDiagnostics.length,
+        messages: [...result.diagnostics.messages, ...streamDiagnostics].slice(0, 64),
+      };
+    }
     return result;
   } finally {
+    waitFinished = true;
+    await eventStream;
     opts.signal?.removeEventListener("abort", cancel);
+  }
+}
+
+async function streamExecEvents(
+  client: import("./daemon/client").HeadlessDaemonClient,
+  jobId: string,
+  opts: Pick<ExecOptions, "onEvent" | "onStdoutChunk">,
+  isWaitFinished: () => boolean,
+  diagnostics: string[],
+) {
+  if (!opts.onEvent && !opts.onStdoutChunk) return;
+  let afterCursor = 0;
+  while (true) {
+    try {
+      const snapshot = await client.call<{
+        events: import("./contracts/run").RunEvent[];
+        nextCursor: number;
+      }>("events.wait", { jobId, afterCursor, limit: 200, timeoutMs: 500 }, 2_000);
+      afterCursor = snapshot.nextCursor;
+      for (const event of snapshot.events) {
+        invokeExecCallback(() => opts.onEvent?.(event), "onEvent", diagnostics);
+        if (event.kind === "stdout") {
+          invokeExecCallback(() => opts.onStdoutChunk?.(event.text), "onStdoutChunk", diagnostics);
+        }
+      }
+      if (snapshot.events.some((event) => event.kind === "completion")) return;
+      if (isWaitFinished() && snapshot.events.length === 0) return;
+    } catch {
+      diagnostics.push("SDK event streaming became unavailable; the durable terminal result was still returned.");
+      return;
+    }
+  }
+}
+
+function invokeExecCallback(callback: () => void, name: string, diagnostics: string[]) {
+  try {
+    callback();
+  } catch {
+    diagnostics.push(`SDK ${name} callback failed; execution continued.`);
   }
 }
 
@@ -270,32 +172,4 @@ async function waitForExecJob(
     if (job.result) return job;
     throw new HeadlessError("DAEMON_UNAVAILABLE", "Daemon did not persist a terminal result after the total lifecycle deadline.");
   }
-}
-
-function legacyExecResult(result: import("./contracts/run").RunResult): ExecResult {
-  const tokens = result.usage.providerTotal
-    ?? (result.usage.input !== null && result.usage.output !== null ? result.usage.input + result.usage.output : null);
-  return {
-    ok: result.status === "succeeded",
-    backend: result.backend,
-    output: result.output,
-    stderr: result.stderr,
-    diagnostics: result.diagnostics,
-    cost: result.cost.amountUsd,
-    tokens,
-    usage: result.usage,
-    durationMs: result.durationMs,
-    exitCode: result.exitCode,
-    signal: result.signal,
-    timedOut: result.status === "timed_out",
-    status: result.status,
-    error: result.error,
-    containment: result.containment,
-    diff: result.diff,
-    commit: result.commit,
-    sandboxed: result.containment.enforced,
-    sandboxReason: result.containment.mechanism ?? undefined,
-    redacted: true,
-    truncated: Object.values(result.truncation).some(Boolean),
-  };
 }

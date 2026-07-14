@@ -7,6 +7,7 @@ import {
   getArg,
   getRepeatedArgs,
   parseIntegerArg,
+  printJson,
   requiredArg,
 } from "../shared";
 
@@ -29,9 +30,9 @@ export function parseCollaborationCommand(args: string[]): CollaborationCommandC
       },
     };
   }
-  if (action === "transfer-leader") {
+  if (action === "transfer-synthesizer") {
     return {
-      method: "collaboration.transferLeader",
+      method: "collaboration.transferSynthesizer",
       params: { goalId, agentId: requiredArg(flags, "--agent-id") },
     };
   }
@@ -43,14 +44,14 @@ export function parseCollaborationCommand(args: string[]): CollaborationCommandC
       params: { goalId, messageIds, prune: !flags.includes("--retain") },
     };
   }
-  throw new CliUsageError("Usage: headless collaboration <turns|messages|acknowledge|transfer-leader> --goal-id id [options]");
+  throw new CliUsageError("Usage: headless collaboration <turns|messages|acknowledge|transfer-synthesizer> --goal-id id [options]");
 }
 
 export async function runCollaborationCommand(args: string[]) {
   const flags = flagArgsBeforeSeparator(args);
   const call = parseCollaborationCommand(args);
   const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
-  console.log(JSON.stringify(await client.call(call.method, call.params), null, 2));
+  printJson(await client.call(call.method, call.params));
 }
 
 function parseNonnegativeInteger(args: string[], name: string) {

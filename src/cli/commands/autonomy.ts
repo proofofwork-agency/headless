@@ -33,8 +33,9 @@ export async function runAskCommand(args: string[]) {
   console.log(`${isBackup ? "ask_for_backup" : "ask_for_more_work"}:`, JSON.stringify(event));
 }
 
-export async function runCooperationProofCommand() {
-  const client = await daemonClient(process.cwd());
+export async function runCooperationProofCommand(args: string[] = []) {
+  const flags = flagArgsBeforeSeparator(args);
+  const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
   console.log("COOP-PROOF:START");
   const status = await client.call<{ enabled: boolean }>("orchestrator.status");
   console.log("INSTR_HAS_ASK:", typeof status.enabled === "boolean");
@@ -42,8 +43,8 @@ export async function runCooperationProofCommand() {
   console.log("MORE_WORK_EMITTED:", !!more);
   const backup = await client.call<Record<string, unknown>>("ledger.event", { type: "ask_for_backup", payload: { content: "Proof agent requests backup.", meta: { neededStrength: "review" } } });
   console.log("BACKUP_EMITTED:", !!backup);
-  const claim = await client.call<Record<string, unknown>>("ledger.event", { type: "task_claim", payload: { content: "Authenticated proof claim.", meta: { task: "verify cooperation", claimedBy: "authenticated-cli" } } });
-  console.log("TASK_CLAIM_EMITTED:", !!claim);
+  const claim = await client.call<Record<string, unknown>>("ledger.note", { text: "Authenticated proof claim: verify cooperation." });
+  console.log("CLAIM_NOTE_RECORDED:", !!claim);
   const vote = await client.call<Record<string, unknown>>("ledger.event", { type: "consensus_vote", payload: { content: "approve: daemon cooperation surface", meta: { proposal: "daemon cooperation surface", vote: "yes", agent: "authenticated-cli", rationale: "typed daemon event accepted" } } });
   console.log("CONSENSUS_VOTE_EMITTED:", !!vote);
   const state = await client.call<{ taskClaims: unknown[]; workRequests: unknown[] }>("ledger.task");
@@ -52,7 +53,7 @@ export async function runCooperationProofCommand() {
   console.log("AUTONOMY_RUNNING:", typeof status.enabled === "boolean");
   console.log("AUTONOMY_STOPPED:", !status.enabled);
   console.log("COUNCIL_ROUNDS:", 1, "CONSENSUS:", false);
-  console.log("COOP-PROOF:OK agents can request more work + deliberate (claims/votes recorded)");
+  console.log("COOP-PROOF:OK agents can request more work + deliberate (claim note/vote recorded; daemon task claims not asserted)");
 }
 
 export async function runAutonomyCommand(args: string[]) {
@@ -86,9 +87,8 @@ export async function runPairCommand(args: string[]) {
   const flags = flagArgsBeforeSeparator(args);
   const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
   const sessionId = getArg(flags, "--session-id");
-  await client.call("ledger.event", { type: "task_claim", sessionId, payload: { content: "Planner claimed architecture review.", meta: { task: "plan and review architecture", claimedBy: "authenticated-cli" } } });
-  await client.call("ledger.note", { sessionId, text: "Planner claims the architecture review portion." });
-  await client.call("ledger.event", { type: "task_claim", sessionId, payload: { content: "Executor claimed contained implementation.", meta: { task: "implement changes in a leased worktree", claimedBy: "authenticated-cli" } } });
+  await client.call("ledger.note", { sessionId, text: "Planner claimed the architecture review portion." });
+  await client.call("ledger.note", { sessionId, text: "Executor claimed contained implementation in a leased worktree." });
   await client.call("ledger.event", { type: "ask_for_more_work", sessionId, payload: { content: "Executor is ready for the next task." } });
   console.log(JSON.stringify(await client.call("ledger.task", { sessionId }), null, 2));
 }

@@ -11,6 +11,7 @@ import {
   getMode,
   getPrompt,
   parseIntegerArg,
+  printJson,
   requiredArg,
 } from "../shared";
 
@@ -39,7 +40,7 @@ export function parseGoalCommand(args: string[]): GoalCommandCall {
         objective,
         mode: getMode(flags),
         fleetProfileId: getArg(flags, "--fleet-profile-id"),
-        coordinator: parseCoordinator(getArg(flags, "--coordinator")),
+        synthesizer: parseSynthesizer(getArg(flags, "--synthesizer")),
         authMode: getAuthMode(flags),
         approvalPolicy: getApprovalPolicy(flags),
         autonomous: flags.includes("--autonomous"),
@@ -51,7 +52,7 @@ export function parseGoalCommand(args: string[]): GoalCommandCall {
   }
   if (action === "send") {
     const text = getPrompt(["goal", ...args.slice(2)]);
-    if (!text) throw new CliUsageError("A coordinator message is required for goal send.");
+    if (!text) throw new CliUsageError("A goal message is required for goal send.");
     return {
       action,
       method: "goal.send",
@@ -95,7 +96,7 @@ export async function runGoalCommand(args: string[]) {
     return;
   }
 
-  console.log(JSON.stringify(response, null, 2));
+  printJson(response);
   setGoalExitCode(goalFromResponse(response));
 }
 
@@ -115,11 +116,11 @@ export async function followGoal(client: HeadlessDaemonClient, goalId: string, t
   throw new CliUsageError(`Timed out after ${timeoutMs}ms waiting for goal ${goalId}. The goal remains durable and can be followed again.`);
 }
 
-function parseCoordinator(value?: string) {
+function parseSynthesizer(value?: string) {
   if (!value) return undefined;
-  if (value === "human" || value === "automatic" || value === "election") return { kind: value };
+  if (value === "automatic" || value === "election") return { kind: value };
   if (value.startsWith("agent:") && value.length > "agent:".length) return { kind: "agent", agentId: value.slice("agent:".length) };
-  throw new CliUsageError("Invalid --coordinator. Expected human, automatic, election, or agent:<agent-id>.");
+  throw new CliUsageError("Invalid --synthesizer. Expected automatic, election, or agent:<agent-id>.");
 }
 
 async function printNewTurns(client: HeadlessDaemonClient, goalId: string, afterSequence: number) {
@@ -164,7 +165,7 @@ function goalFromResponse(value: unknown): Goal | null {
 }
 
 function printGoalOutcome(outcome: unknown) {
-  console.log(JSON.stringify(outcome, null, 2));
+  printJson(outcome);
   const goal = goalFromResponse(outcome);
   setGoalExitCode(goal);
 }

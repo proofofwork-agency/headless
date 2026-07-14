@@ -11,6 +11,7 @@ import {
   parseBackend,
   parseContainment,
   parseIntegerArg,
+  printJson,
   requiredArg,
   waitForJob,
 } from "../shared";
@@ -21,7 +22,7 @@ export async function runSessionCommand(args: string[]) {
   const action = args[1] || "status";
   const flags = flagArgsBeforeSeparator(args);
   const projectRoot = getArg(flags, "--cwd") || process.cwd();
-  const client = await daemonClient(projectRoot, flags);
+  const client = await daemonClient(projectRoot, flags, { enableExperimentalSessions: true });
   if (action === "create") {
     const backend = parseBackend(getArg(flags, "--backend") || "opencode");
     const session = await client.call<DurableSession>("session.create", {
@@ -32,7 +33,7 @@ export async function runSessionCommand(args: string[]) {
       authMode: getAuthMode(flags),
       approvalPolicy: getApprovalPolicy(flags),
     });
-    console.log(JSON.stringify(session, null, 2));
+    printJson(session);
     return;
   }
   if (!sessionActions.has(action)) {
@@ -49,9 +50,10 @@ export async function runSessionCommand(args: string[]) {
     );
     const job = await waitForJob(client, response.job, timeoutMs);
     const session = await client.call<DurableSession>("session.status", { sessionId });
-    console.log(JSON.stringify({ ...response, session, job, result: job.result }, null, 2));
+    printJson({ ...response, session, job, result: job.result });
+    process.exitCode = job.result?.status === "succeeded" ? 0 : 1;
     return;
   }
   const method = action === "cancel" ? "session.cancel" : action === "result" ? "session.result" : "session.status";
-  console.log(JSON.stringify(await client.call(method, { sessionId }), null, 2));
+  printJson(await client.call(method, { sessionId }));
 }

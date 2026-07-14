@@ -23,6 +23,7 @@ export async function runExecCommand(args: string[]) {
   const prompt = getPrompt(args);
   if (!prompt) throw new CliUsageError(`Usage: headless exec --backend <${backendUsage()}> "your prompt"`);
   const timeoutMs = parseIntegerArg(flags, "--timeout-ms") ?? DEFAULT_RUN_TIMEOUT_MS;
+  const containment = parseContainment(flags);
   const client = await daemonClient(projectRoot, flags);
   const result = await submitAndWait(client, {
     backend,
@@ -32,7 +33,7 @@ export async function runExecCommand(args: string[]) {
     mode: getMode(flags),
     timeoutMs,
     sessionId: getArg(flags, "--session-id"),
-    containment: parseContainment(flags),
+    containment,
     authMode: getAuthMode(flags),
     approvalPolicy: getApprovalPolicy(flags),
   });

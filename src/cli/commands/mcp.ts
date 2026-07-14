@@ -4,9 +4,10 @@ export async function runMcpCommand(args: string[]) {
   const action = args[1] || "serve";
   if (action === "serve" || action === "server") {
     ensureSupportedPlatform();
-    console.error("Starting Headless MCP server over stdio.");
-    console.error("Register the published server with: codex mcp add headless -- headless-mcp");
-    await import("../../mcp/server.js").then((module) => module.startMcpServer());
+    const host = args[2]?.toLowerCase();
+    if (!host) throw new CliUsageError("Usage: headless mcp serve <host>");
+    console.error(`Starting Headless MCP server over stdio for the configured ${host} lead.`);
+    await import("../../mcp/server.js").then((module) => module.startMcpServer({ host }));
     return;
   }
   const host = args[2]?.toLowerCase() || "codex";
@@ -16,12 +17,12 @@ export async function runMcpCommand(args: string[]) {
   throw new CliUsageError("Usage: headless mcp <serve|install|remove|status> [codex|grok|claude|opencode]");
 }
 
-export function mcpServerCommand() {
-  return { command: "headless-mcp", args: [] as string[] };
+export function mcpServerCommand(host: string) {
+  return { command: "headless-mcp", args: ["--host", host] };
 }
 
 export async function runMcpInstall(host: string) {
-  const server = mcpServerCommand();
+  const server = mcpServerCommand(host);
   const command = [server.command, ...server.args];
   if (host === "codex" || host === "codex-cli") {
     const child = Bun.spawn(["codex", "mcp", "add", "headless", "--", ...command], { stdout: "inherit", stderr: "inherit" });
@@ -32,7 +33,7 @@ export async function runMcpInstall(host: string) {
   }
   if (host === "grok" || host === "grok-build") {
     console.log(`grok mcp add headless -- ${command.join(" ")}`);
-    console.log(`[mcp_servers.headless]\ncommand = "${server.command}"\nargs = []`);
+    console.log(`[mcp_servers.headless]\ncommand = "${server.command}"\nargs = ["--host", "${host}"]`);
     return;
   }
   if (host === "claude" || host === "claude-code") {

@@ -19,6 +19,7 @@ export async function runDaemonCommand(args: string[]) {
       projectRoot,
       extensionConfigPath: getArg(flags, "--extension-config"),
       extensionModules: getRepeatedArgs(flags, "--extension-module"),
+      enableExperimentalSessions: flags.includes("--experimental-sessions"),
     });
     await daemon.start();
     setActiveDaemon(daemon);
