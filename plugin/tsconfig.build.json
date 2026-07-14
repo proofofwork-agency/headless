@@ -3,7 +3,9 @@
   "compilerOptions": {
     "rootDir": ".",
     "paths": {
-      "@proofofwork-agency/headless": ["../dist/index.d.ts"]
+      "@proofofwork-agency/headless": ["../dist/index.d.ts"],
+      "@proofofwork-agency/headless/daemon": ["../dist/daemon/client.d.ts"],
+      "@proofofwork-agency/headless/experimental": ["../dist/experimental.d.ts"]
     }
   }
 }

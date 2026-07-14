@@ -1,12 +1,10 @@
 import { type Plugin, type ToolContext, tool } from "@opencode-ai/plugin";
 import {
-  connectOrStartDaemon,
-  getCooperationInstructions,
+  LeadDaemonClientPool,
   MAX_DAEMON_TRANSPORT_TIMEOUT_MS,
-  splitList,
   type HeadlessDaemonClient,
-  type Job,
-} from "@proofofwork-agency/headless";
+} from "@proofofwork-agency/headless/daemon";
+import { getCooperationInstructions, splitList, type Job } from "@proofofwork-agency/headless/experimental";
 
 export const id = "headless";
 
@@ -105,9 +103,7 @@ export const server: Plugin = async () => ({
     headless_collaboration: collaborationTool(),
     headless_approval: approvalTool(),
     headless_candidate: candidateTool(),
-    ask_for_work: cooperationTool("ask_for_work"),
     headless_ask_for_work: cooperationTool("headless_ask_for_work"),
-    ask_for_more_work: cooperationTool("ask_for_more_work"),
     ask_for_backup: tool({
       description: "Ask the authenticated fleet for bounded backup help.",
       args: { problem: tool.schema.string(), neededStrength: tool.schema.string().optional() },
@@ -247,81 +243,24 @@ function runArgs() {
 
 function projectTrustTool() {
   return tool({
-    description: "Inspect, grant, or revoke native-login trust for the daemon-owned project.",
-    args: {
-      action: tool.schema.enum(["status", "grant", "revoke"]),
-      nativeLoginAllowed: tool.schema.boolean().optional().default(true),
-      bypassAllowed: tool.schema.boolean().optional().default(false),
-    },
-    async execute(args, context) {
-      if (args.action === "status") return result("headless_project_trust", await call(context, "project.trust.status", {}));
-      if (args.action === "revoke") return result("headless_project_trust", await call(context, "project.trust.revoke", {}));
-      return result("headless_project_trust", await call(context, "project.trust.grant", {
-        nativeLoginAllowed: args.nativeLoginAllowed,
-        bypassAllowed: args.bypassAllowed,
-      }));
+    description: "Inspect native-login trust for the daemon-owned project.",
+    args: { action: tool.schema.literal("status") },
+    async execute(_args, context) {
+      return result("headless_project_trust", await call(context, "project.trust.status", {}));
     },
   });
 }
 
 function fleetProfileTool() {
-  const coordinator = tool.schema.object({
-    kind: tool.schema.enum(["human", "agent", "automatic", "election"]),
-    agentId: tool.schema.string().optional(),
-  });
-  const agent = tool.schema.object({
-    id: tool.schema.string(),
-    backend: tool.schema.string(),
-    name: tool.schema.string(),
-    model: tool.schema.string().optional(),
-    authMode: authModeSchema(),
-    approvalPolicy: approvalPolicySchema(),
-    enabled: tool.schema.boolean().optional().default(true),
-    priority: tool.schema.number().int().min(-100).max(100).optional().default(0),
-    capabilities: tool.schema.array(tool.schema.string()).optional().default([]),
-    maxConcurrentTurns: tool.schema.number().int().positive().max(32).optional().default(1),
-  });
   return tool({
-    description: "Create, inspect, list, or remove a durable collaborative fleet profile.",
+    description: "Inspect or list durable collaborative fleet profiles.",
     args: {
-      action: tool.schema.enum(["upsert", "get", "list", "remove"]),
+      action: tool.schema.enum(["get", "list"]),
       profileId: tool.schema.string().optional(),
-      id: tool.schema.string().optional(),
-      name: tool.schema.string().optional(),
-      authMode: authModeSchema(),
-      approvalPolicy: approvalPolicySchema(),
-      coordinator: coordinator.optional(),
-      agents: tool.schema.array(agent).optional(),
-      maxActiveWorkers: tool.schema.number().int().positive().max(64).optional(),
-      maxQueuedDelegations: tool.schema.number().int().positive().max(1_024).optional(),
-      maxDeliberationRounds: tool.schema.number().int().positive().max(64).optional(),
-      maxAttemptsPerDelegation: tool.schema.number().int().positive().max(8).optional(),
-      goalTimeoutMs: tool.schema.number().int().positive().max(86_400_000).optional(),
-      idleAutonomy: tool.schema.enum(["off", "suggest", "read-only", "write"]).optional(),
-      activate: tool.schema.boolean().optional().default(true),
     },
     async execute(args, context) {
       if (args.action === "list") return result("headless_fleet_profile", await call(context, "fleet.profile.list", {}));
-      if (args.action === "get" || args.action === "remove") {
-        const profileId = required(args.profileId, "profileId");
-        const method = args.action === "get" ? "fleet.profile.get" : "fleet.profile.remove";
-        return result("headless_fleet_profile", await call(context, method, { profileId }));
-      }
-      return result("headless_fleet_profile", await call(context, "fleet.profile.upsert", compact({
-        id: required(args.id, "id"),
-        name: required(args.name, "name"),
-        authMode: args.authMode,
-        approvalPolicy: args.approvalPolicy,
-        coordinator: args.coordinator,
-        agents: required(args.agents, "agents"),
-        maxActiveWorkers: args.maxActiveWorkers,
-        maxQueuedDelegations: args.maxQueuedDelegations,
-        maxDeliberationRounds: args.maxDeliberationRounds,
-        maxAttemptsPerDelegation: args.maxAttemptsPerDelegation,
-        goalTimeoutMs: args.goalTimeoutMs,
-        idleAutonomy: args.idleAutonomy,
-        activate: args.activate,
-      })));
+      return result("headless_fleet_profile", await call(context, "fleet.profile.get", { profileId: required(args.profileId, "profileId") }));
     },
   });
 }
@@ -337,8 +276,8 @@ function fleetHealthTool() {
 }
 
 function goalTool() {
-  const coordinator = tool.schema.object({
-    kind: tool.schema.enum(["human", "agent", "automatic", "election"]),
+  const synthesizer = tool.schema.object({
+    kind: tool.schema.enum(["agent", "automatic", "election"]),
     agentId: tool.schema.string().optional(),
   });
   return tool({
@@ -349,7 +288,7 @@ function goalTool() {
       objective: tool.schema.string().optional(),
       mode: tool.schema.enum(["read-only", "write"]).optional().default("read-only"),
       fleetProfileId: tool.schema.string().optional(),
-      coordinator: coordinator.optional(),
+      synthesizer: synthesizer.optional(),
       // Goal-level security controls intentionally have no client-side
       // default: omission inherits the selected fleet profile in the daemon.
       authMode: optionalAuthModeSchema(),
@@ -366,7 +305,7 @@ function goalTool() {
           objective: required(args.objective, "objective"),
           mode: args.mode,
           fleetProfileId: args.fleetProfileId,
-          coordinator: args.coordinator,
+          synthesizer: args.synthesizer,
           authMode: args.authMode,
           approvalPolicy: args.approvalPolicy,
           autonomous: args.autonomous,
@@ -390,19 +329,21 @@ function goalTool() {
 
 function collaborationTool() {
   return tool({
-    description: "Read goal turns or addressed messages, or transfer sticky leadership.",
+    description: "Read goal turns or addressed messages and acknowledge consumed messages.",
     args: {
-      action: tool.schema.enum(["turns", "messages", "transferLeader"]),
+      action: tool.schema.enum(["turns", "messages", "acknowledge"]),
       goalId: tool.schema.string(),
       afterSequence: tool.schema.number().int().nonnegative().optional().default(0),
       limit: tool.schema.number().int().positive().max(1_000).optional().default(200),
-      agentId: tool.schema.string().optional(),
+      messageIds: tool.schema.array(tool.schema.string()).optional(),
+      prune: tool.schema.boolean().optional().default(true),
     },
     async execute(args, context) {
-      if (args.action === "transferLeader") {
-        return result("headless_collaboration", await call(context, "collaboration.transferLeader", {
+      if (args.action === "acknowledge") {
+        return result("headless_collaboration", await call(context, "collaboration.messages.acknowledge", {
           goalId: args.goalId,
-          agentId: required(args.agentId, "agentId"),
+          messageIds: required(args.messageIds, "messageIds"),
+          prune: args.prune,
         }));
       }
       const method = args.action === "turns" ? "collaboration.turns" : "collaboration.messages";
@@ -417,42 +358,27 @@ function collaborationTool() {
 
 function approvalTool() {
   return tool({
-    description: "List approval requests or resolve one with an attributable decision.",
+    description: "List approval requests visible to the attached foreground lead.",
     args: {
-      action: tool.schema.enum(["list", "resolve"]),
+      action: tool.schema.literal("list"),
       goalId: tool.schema.string().optional(),
       status: tool.schema.enum(["pending", "approved", "rejected", "cancelled", "expired"]).optional(),
-      approvalId: tool.schema.string().optional(),
-      decision: tool.schema.enum(["approved", "rejected"]).optional(),
-      resolution: tool.schema.string().optional(),
     },
     async execute(args, context) {
-      if (args.action === "list") {
-        return result("headless_approval", await call(context, "approval.list", compact({ goalId: args.goalId, status: args.status })));
-      }
-      return result("headless_approval", await call(context, "approval.resolve", {
-        approvalId: required(args.approvalId, "approvalId"),
-        decision: required(args.decision, "decision"),
-        resolution: required(args.resolution, "resolution"),
-      }));
+      return result("headless_approval", await call(context, "approval.list", compact({ goalId: args.goalId, status: args.status })));
     },
   });
 }
 
 function candidateTool() {
   return tool({
-    description: "Inspect, integrate, or reject a gated candidate decision.",
+    description: "Inspect a gated candidate decision. Integration remains a CLI or finite-grant operation.",
     args: {
-      action: tool.schema.enum(["inspect", "integrate", "reject"]),
+      action: tool.schema.literal("inspect"),
       candidateId: tool.schema.string(),
     },
     async execute(args, context) {
-      const method = args.action === "inspect"
-        ? "candidate.inspect"
-        : args.action === "integrate"
-          ? "candidate.integrate"
-          : "candidate.reject";
-      return result("headless_candidate", await call(context, method, { candidateId: args.candidateId }));
+      return result("headless_candidate", await call(context, "candidate.inspect", { candidateId: args.candidateId }));
     },
   });
 }
@@ -493,12 +419,11 @@ function cooperationTool(name: string) {
   });
 }
 
+const leadClients = new LeadDaemonClientPool();
+
 async function daemon(context: ToolContext) {
-  return connectOrStartDaemon({
-    projectRoot: runtimeCwd(context),
-    credential: { integration: "opencode-plugin" },
-    bootstrapIntegration: true,
-  });
+  const projectRoot = runtimeCwd(context);
+  return leadClients.client({ projectRoot, host: "opencode" });
 }
 
 function runWaitTimeouts(runTimeoutMs: number) {

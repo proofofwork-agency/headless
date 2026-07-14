@@ -1,10 +1,38 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, render, useApp, useInput, useStdout, type Key } from "ink";
-import type { RunEvent } from "../contracts/run";
+import { Box, render, Text, useApp, useInput, useStdout } from "ink";
 import { connectOrStartDaemon } from "../daemon/connect";
 import type { HeadlessDaemonClient } from "../daemon/client";
-import { TuiController, runReconnectLoop, subscribeControlRoom } from "./controller";
-import { buildControlRoomView, initialControlRoomState, type TuiControlRoomState } from "./model";
+import { runReconnectLoop, subscribeControlRoom, TuiController } from "./controller";
+import { ChromeHeader, Footer, StatusStrip, TabBar } from "./components";
+import { buildHitZones, buildTabLayout, hitTest, nextView, parseMouseEvents, viewForDigit } from "./layout";
+import {
+  approvalRows,
+  type EventFilter,
+  fleetAgentRows,
+  type GoalHistoryMode,
+  goalRows,
+  initialControlRoomState,
+  pendingApprovals,
+  type TuiControlRoomState,
+} from "./model";
+import type { TuiView } from "./theme";
+import { MUTED, WARN } from "./theme";
+import {
+  ApprovalsView,
+  approvalsListMeta,
+  EventsView,
+  eventRowCount,
+  FleetView,
+  fleetListMeta,
+  GoalsView,
+  goalsListMeta,
+  HelpView,
+  OverviewView,
+} from "./views";
+
+const MOUSE_ON = "\u001b[?1000h\u001b[?1006h";
+const MOUSE_OFF = "\u001b[?1000l\u001b[?1006l";
+const TERMINAL_RESTORE = `${MOUSE_OFF}\u001b[0m\u001b[?25h`;
 
 export type RunTuiOptions = {
   projectRoot?: string;
@@ -12,209 +40,194 @@ export type RunTuiOptions = {
 };
 
 export type AppProps = Required<Pick<RunTuiOptions, "projectRoot">> & Pick<RunTuiOptions, "connect">;
+type Selections = { fleet: number; goals: number; approvals: number };
 
 export const App: React.FC<AppProps> = ({ projectRoot, connect = connectProjectDaemon }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const { width, height } = useTerminalSize(stdout);
   const [state, setState] = useState(() => initialControlRoomState(projectRoot));
-  const [input, setInput] = useState("");
-  const [scrollBack, setScrollBack] = useState(0);
   const stateRef = useRef(state);
+  const [view, setView] = useState<TuiView>("overview");
+  const [selections, setSelections] = useState<Selections>({ fleet: 0, goals: 0, approvals: 0 });
+  const [eventScroll, setEventScroll] = useState(0);
+  const [eventFilter, setEventFilter] = useState<EventFilter>("all");
+  const [eventsGrouped, setEventsGrouped] = useState(true);
+  const [goalHistoryMode, setGoalHistoryMode] = useState<GoalHistoryMode>("recent");
   const controllerRef = useRef<TuiController | null>(null);
 
   const patchState = useCallback((patch: Partial<TuiControlRoomState>) => {
-    setState((current) => {
-      const next = { ...current, ...patch };
-      stateRef.current = next;
-      return next;
-    });
+    setState((current) => ({ ...current, ...patch }));
   }, []);
   const setStatus = useCallback((status: string) => patchState({ status }), [patchState]);
+  useEffect(() => { stateRef.current = state; }, [state]);
 
   useEffect(() => {
-    let stopped = false;
-
-    const connectLoop = async () => {
-      await runReconnectLoop({
-        connect: () => connect(projectRoot),
-        shouldStop: () => stopped,
-        onConnecting: () => patchState({ connection: stateRef.current.projectId ? "reconnecting" : "connecting" }),
-        onRetry: (error) => {
-          controllerRef.current = null;
-          patchState({ connection: "reconnecting" });
-          setStatus(`Daemon connection lost: ${errorMessage(error)} · retrying…`);
-        },
-        consume: async (client) => {
-          if (stopped) return;
-          const controller = new TuiController(client, {
-            getState: () => stateRef.current,
-            patchState,
-            setStatus,
-            exit,
-          });
-          controllerRef.current = controller;
-          await controller.refresh();
-          if (stopped) return;
-          patchState({ connection: "connected" });
-          setStatus("Connected · free text is routed to the active goal coordinator.");
-          await subscribeControlRoom(
-            client,
-            { getState: () => stateRef.current, patchState },
-            () => stopped,
-            () => controller.refresh(),
-          );
-        },
-      });
-    };
-
-    void connectLoop();
+    const abort = new AbortController();
+    let refreshTimer: ReturnType<typeof setInterval> | null = null;
+    void runReconnectLoop({
+      signal: abort.signal,
+      connect: () => connect(projectRoot),
+      failed: (error) => patchState({ connection: "reconnecting", status: `Observer reconnecting: ${messageOf(error)}` }),
+      connected: async (client) => {
+        const controller = new TuiController(client, {
+          getState: () => stateRef.current,
+          patchState,
+          setStatus,
+          exit,
+        });
+        controllerRef.current = controller;
+        await controller.refresh();
+        refreshTimer = setInterval(() => { void controller.refresh().catch(() => {}); }, 2_000);
+        await subscribeControlRoom(client, { getState: () => stateRef.current, patchState }, abort.signal);
+      },
+    });
     return () => {
-      stopped = true;
+      abort.abort();
+      if (refreshTimer) clearInterval(refreshTimer);
       controllerRef.current = null;
     };
   }, [connect, exit, patchState, projectRoot, setStatus]);
 
-  const width = stdout.columns || 96;
-  const height = stdout.rows || 28;
-  const view = useMemo(() => buildControlRoomView(state, width, height), [height, state, width]);
-  const eventRows = view.eventRows;
-  const visibleEvents = useMemo(() => {
-    const start = Math.max(0, state.events.length - eventRows - scrollBack);
-    return state.events.slice(start, start + eventRows);
-  }, [eventRows, scrollBack, state.events]);
+  useEffect(() => {
+    if (!process.stdout.isTTY) return;
+    process.stdout.write(MOUSE_ON);
+    return () => { process.stdout.write(MOUSE_OFF); };
+  }, []);
 
-  useInput((inputChar: string, key: Key) => {
-    const isReturn = key.return || inputChar === "\r" || inputChar === "\n";
-    if (isReturn) {
-      const command = input.trim();
-      if (command) {
-        const controller = controllerRef.current;
-        if (controller) controller.execute(command);
-        else setStatus("Daemon is reconnecting; input remains editable until connection returns.");
+  const badges = useMemo(() => ({
+    approvals: pendingApprovals(state).length,
+    events: state.events.filter((event) => event.kind === "stderr" || event.kind === "completion" && event.result.status !== "succeeded").length,
+  }), [state]);
+  const tabs = useMemo(() => buildTabLayout(width, badges), [badges, width]);
+  const selected = { fleet: selections.fleet, goals: selections.goals, approvals: selections.approvals };
+  const list = view === "fleet"
+    ? fleetListMeta(state, width, height, selected.fleet)
+    : view === "goals"
+      ? goalsListMeta(state, width, height, selected.goals)
+      : view === "approvals"
+        ? approvalsListMeta(state, width, height, selected.approvals)
+        : null;
+  const hitZones = useMemo(() => buildHitZones({ width, height, view, badges, list }), [badges, height, list, view, width]);
+
+  useInput((input, key) => {
+    const mouse = parseMouseEvents(input);
+    if (mouse.length > 0) {
+      for (const event of mouse) {
+        if (event.kind === "wheel-up" || event.kind === "wheel-down") moveSelection(event.kind === "wheel-up" ? -1 : 1);
+        else {
+          const action = hitTest(event.x, event.y, hitZones);
+          if (action?.kind === "view") setView(action.view);
+          if (action?.kind === "row") setSelected(action.index);
+        }
       }
-      setInput("");
       return;
     }
-    if (key.escape) {
-      if (input) setInput("");
-      else setStatus("Esc clears input · ↑ older events · ↓ newer events · q quits when input is empty.");
-      return;
+    if (input === "q" || key.escape && view === "overview") return exit();
+    if (key.escape) return setView("overview");
+    if (key.tab) return setView((current) => nextView(current, key.shift ? -1 : 1));
+    const digit = viewForDigit(input);
+    if (digit) return setView(digit);
+    if (key.upArrow || input === "k") return moveSelection(-1);
+    if (key.downArrow || input === "j") return moveSelection(1);
+    if (input === "r") return void controllerRef.current?.refresh();
+    if (view === "events") {
+      if (input === "e") setEventFilter((current) => current === "errors" ? "all" : "errors");
+      if (input === "a") setEventFilter((current) => current === "activity" ? "all" : "activity");
+      if (input === "g") setEventsGrouped((current) => !current);
+      if (key.pageUp) setEventScroll((value) => Math.min(eventRowCount(height), value + 10));
+      if (key.pageDown) setEventScroll((value) => Math.max(0, value - 10));
     }
-    if (key.upArrow) {
-      setScrollBack((current) => Math.min(Math.max(0, state.events.length - eventRows), current + 1));
-      return;
+    if (view === "goals" && input === "h") setGoalHistoryMode((current) => current === "recent" ? "all" : current === "all" ? "grouped" : "recent");
+
+    function moveSelection(delta: number) {
+      if (view === "events") return setEventScroll((value) => Math.max(0, value + delta));
+      const total = view === "fleet" ? fleetAgentRows(stateRef.current).length
+        : view === "goals" ? goalRows({ ...stateRef.current, historyMode: goalHistoryMode }).length
+          : view === "approvals" ? approvalRows(stateRef.current).length : 0;
+      if (total === 0) return;
+      if (view === "fleet" || view === "goals" || view === "approvals") {
+        setSelections((current) => ({ ...current, [view]: clamp(current[view], total, delta) }));
+      }
     }
-    if (key.downArrow) {
-      setScrollBack((current) => Math.max(0, current - 1));
-      return;
-    }
-    if (key.ctrl && inputChar.toLowerCase() === "c") {
-      exit();
-      return;
-    }
-    if (key.backspace || key.delete) {
-      setInput((current) => current.slice(0, -1));
-      return;
-    }
-    if (inputChar === "q" && !input) {
-      exit();
-      return;
-    }
-    if (inputChar && !key.ctrl && !key.meta && inputChar.length === 1) {
-      setInput((current) => current + inputChar);
+
+    function setSelected(index: number) {
+      if (view === "fleet" || view === "goals" || view === "approvals") {
+        setSelections((current) => ({ ...current, [view]: index }));
+      }
     }
   });
 
-  const activeProfile = state.fleetProfiles.find((profile) => profile.id === state.activeFleetProfileId);
-  const activeGoal = state.goals.find((goal) => goal.id === state.activeGoalId);
+  if (width < MIN_WIDTH || height < MIN_HEIGHT) return <MinimumSizeView width={width} height={height} />;
+  const footer = view === "events"
+    ? { hints: [["↑↓", "scroll"], ["e", "errors"], ["a", "activity"], ["g", "group"]] as Array<[string, string]>, right: "observer · r refresh · q quit" }
+    : { hints: [["⇥", "views"], ["1-6", "jump"], ["↑↓", "select"]] as Array<[string, string]>, right: "observer · r refresh · q quit" };
 
-  return (
-    <Box flexDirection="column" height={height} width={width}>
-      <Box borderStyle="single" borderColor={state.connection === "connected" ? "cyan" : "yellow"} paddingX={1}>
-        <Text bold color="cyan">{view.title}</Text>
-      </Box>
-      {!view.compact && <Text dimColor wrap="truncate"> {view.projectLine}</Text>}
-
-      <Box flexDirection={view.narrow ? "column" : "row"}>
-        <Panel title={`Fleet${activeProfile ? ` · ${activeProfile.name}` : ""}`} color="green" width={view.narrow ? "100%" : "50%"}>
-          {view.fleetLines.map((line, index) => <Text key={`${line}-${index}`} wrap="truncate">{line}</Text>)}
-          <Text dimColor wrap="truncate">{view.queueLine}</Text>
-        </Panel>
-        <Panel title={`Goal${activeGoal ? ` · ${activeGoal.id}` : ""}`} color="blue" width={view.narrow ? "100%" : "50%"}>
-          {view.goalLines.map((line, index) => <Text key={`${line}-${index}`} wrap="truncate">{line}</Text>)}
-          {!view.compact && <Text dimColor>/goal · /goal-write · /use-goal · /leader · /cancel-goal</Text>}
-        </Panel>
-      </Box>
-
-      {!view.compact && (
-        <Box flexDirection={view.narrow ? "column" : "row"}>
-          <Panel title="Approval inbox" color="yellow" width={view.narrow ? "100%" : "50%"}>
-            {view.approvalLines.map((line, index) => <Text key={`${line}-${index}`} wrap="truncate">{line}</Text>)}
-          </Panel>
-          <Panel title="Candidate + gates" color="magenta" width={view.narrow ? "100%" : "50%"}>
-            {view.candidateLines.map((line, index) => <Text key={`${line}-${index}`} wrap="truncate">{line}</Text>)}
-          </Panel>
-        </Box>
-      )}
-
-      <Box flexGrow={1} minHeight={eventRows + view.activityLines.length + 2} borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column">
-        <Text bold>Live events · turns {state.turns.length} · messages {state.messages.length}</Text>
-        {view.activityLines.map((line, index) => (
-          <Text key={`activity-${index}-${line}`} color="cyan" wrap="truncate">{line}</Text>
-        ))}
-        {visibleEvents.length === 0 && view.activityLines.length === 0
-          ? <Text dimColor>No run events yet.</Text>
-          : visibleEvents.map((event) => (
-              <Text key={event.eventId} wrap="truncate">[{eventTime(event)}] {event.kind} {eventSummary(event)}</Text>
-            ))}
-        <Text dimColor>↑↓ {state.events.length} events · /ack-message · /help · q quit</Text>
-      </Box>
-
-      <Box borderStyle="single" borderColor={state.approvals.some((approval) => approval.status === "pending") ? "yellow" : "blue"} paddingX={1}>
-        <Text wrap="truncate">{state.status}</Text>
-      </Box>
-      <Box borderStyle="single" borderColor="green" paddingX={1}>
-        <Text color="green">&gt; </Text>
-        <Text wrap="truncate">{input || <Text color="gray">message active coordinator or /help</Text>}</Text>
-      </Box>
+  return <Box flexDirection="column" width={width} height={height}>
+    <ChromeHeader state={state} width={width} />
+    <Text> </Text>
+    <TabBar segments={tabs} active={view} width={width} />
+    <Box flexDirection="column" flexGrow={1}>
+      {view === "overview" ? <OverviewView state={state} width={width} height={height} /> : null}
+      {view === "fleet" ? <FleetView state={state} width={width} height={height} selected={selected.fleet} /> : null}
+      {view === "goals" ? <GoalsView state={state} width={width} height={height} selected={selected.goals} historyMode={goalHistoryMode} /> : null}
+      {view === "approvals" ? <ApprovalsView state={state} width={width} height={height} selected={selected.approvals} /> : null}
+      {view === "events" ? <EventsView state={state} width={width} height={height} scrollBack={eventScroll} filter={eventFilter} grouped={eventsGrouped} mode={state.logMode} /> : null}
+      {view === "help" ? <HelpView width={width} height={height} /> : null}
     </Box>
-  );
+    <StatusStrip state={state} working={state.connection !== "connected"} width={width} />
+    <Footer hints={footer.hints} right={footer.right} width={width} />
+  </Box>;
 };
-
-function Panel(props: React.PropsWithChildren<{ title: string; color: string; width: string }>) {
-  return (
-    <Box borderStyle="round" borderColor={props.color} width={props.width} paddingX={1} flexDirection="column">
-      <Text bold wrap="truncate">{props.title}</Text>
-      {props.children}
-    </Box>
-  );
-}
 
 export function runTui(options: RunTuiOptions = {}) {
   const projectRoot = options.projectRoot ?? process.cwd();
+  const restoreTerminal = () => { if (process.stdout.isTTY) process.stdout.write(TERMINAL_RESTORE); };
+  process.once("uncaughtExceptionMonitor", restoreTerminal);
+  process.once("exit", restoreTerminal);
   const instance = render(<App projectRoot={projectRoot} connect={options.connect} />, { exitOnCtrlC: true });
-  return instance.waitUntilExit?.() ?? Promise.resolve();
+  const done = instance.waitUntilExit?.() ?? Promise.resolve();
+  return done.finally(() => {
+    process.off("uncaughtExceptionMonitor", restoreTerminal);
+    process.off("exit", restoreTerminal);
+    restoreTerminal();
+  });
 }
 
 function connectProjectDaemon(projectRoot: string) {
-  return connectOrStartDaemon({ projectRoot });
+  return connectOrStartDaemon({ projectRoot, credential: { observer: true }, bootstrapObserver: true });
 }
 
-function eventTime(event: RunEvent) {
-  return new Date(event.timestamp).toLocaleTimeString().slice(0, 8);
+function useTerminalSize(stdout: NodeJS.WriteStream) {
+  const read = useCallback(() => ({ width: dimension(stdout.columns, 96), height: dimension(stdout.rows, 28) }), [stdout]);
+  const [size, setSize] = useState(read);
+  useEffect(() => {
+    const resize = () => setSize(read());
+    stdout.on("resize", resize);
+    return () => { stdout.off("resize", resize); };
+  }, [read, stdout]);
+  return size;
 }
 
-function eventSummary(event: RunEvent) {
-  if (event.kind === "stdout" || event.kind === "stderr") return event.text;
-  if (event.kind === "lifecycle") return `${event.state}${event.detail ? ` · ${event.detail}` : ""}`;
-  if (event.kind === "policy") return `${event.decision}: ${event.reason}`;
-  if (event.kind === "tool") return `${event.name}: ${event.summary}`;
-  if (event.kind === "artifact") return `${event.artifactKind}: ${event.summary}`;
-  if (event.kind === "usage") return `input=${event.usage.input ?? "?"} output=${event.usage.output ?? "?"} cost=${event.cost.amountUsd ?? "?"}`;
-  if (event.kind === "completion") return `${event.result.status}: ${event.result.output}`;
-  return "";
+export const MIN_WIDTH = 60;
+export const MIN_HEIGHT = 20;
+
+function dimension(value: number | undefined, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
-function errorMessage(error: unknown) {
+function MinimumSizeView({ width, height }: { width: number; height: number }) {
+  return <Box flexDirection="column" width={width} height={height} paddingX={1}>
+    <Text color={WARN}>Terminal too small for the observer.</Text>
+    <Text color={MUTED}>Resize to at least {MIN_WIDTH}×{MIN_HEIGHT} (current {width}×{height}).</Text>
+    <Text color={MUTED}>The daemon is still running; no work was cancelled.</Text>
+  </Box>;
+}
+
+function clamp(current: number, total: number, delta: number) {
+  return Math.max(0, Math.min(total - 1, current + delta));
+}
+
+function messageOf(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
