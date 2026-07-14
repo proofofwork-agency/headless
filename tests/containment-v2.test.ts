@@ -27,8 +27,16 @@ import { installRunToolClient } from "../src/runtime/run-tool-client";
 
 const cleanupRoots: string[] = [];
 const darwinTest = process.platform === "darwin" ? test : test.skip;
-const linuxBwrapTest = process.platform === "linux" && hasBwrap() ? test : test.skip;
-const linuxX64BwrapTest = process.platform === "linux" && process.arch === "x64" && hasBwrap() ? test : test.skip;
+// Real-sandbox tests spawn bwrap + relay + worker processes; on loaded 2-core
+// CI hosts that regularly exceeds bun's 5s default per-test timeout, so give
+// every such test the same explicit 30s window instead of per-test tuning.
+const SANDBOX_TEST_TIMEOUT_MS = 30_000;
+const linuxBwrapTest: typeof test | typeof test.skip = process.platform === "linux" && hasBwrap()
+  ? ((name: string, fn: () => unknown | Promise<unknown>) => test(name, fn, SANDBOX_TEST_TIMEOUT_MS)) as typeof test
+  : test.skip;
+const linuxX64BwrapTest: typeof test | typeof test.skip = process.platform === "linux" && process.arch === "x64" && hasBwrap()
+  ? ((name: string, fn: () => unknown | Promise<unknown>) => test(name, fn, SANDBOX_TEST_TIMEOUT_MS)) as typeof test
+  : test.skip;
 
 afterEach(() => {
   for (const root of cleanupRoots.splice(0)) rmSync(root, { recursive: true, force: true });

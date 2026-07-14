@@ -6,7 +6,11 @@ import { ProviderBroker } from "../src/broker/server";
 import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { runHeadless } from "../src/runner/simple";
 
-const linuxTest = process.platform === "linux" ? test : test.skip;
+// Real-sandbox relay tests exceed bun's 5s default per-test timeout on loaded
+// 2-core CI hosts; use the same explicit 30s window as containment-v2.
+const linuxTest: typeof test | typeof test.skip = process.platform === "linux"
+  ? ((name: string, fn: () => unknown | Promise<unknown>) => test(name, fn, 30_000)) as typeof test
+  : test.skip;
 const cleanup: Array<() => void> = [];
 const originalPath = process.env.PATH;
 
