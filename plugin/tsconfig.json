@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["bun"],
+    "baseUrl": ".",
+    "paths": {
+      "@proofofwork-agency/headless": ["../src/index.ts"],
+      "@proofofwork-agency/headless/daemon": ["../src/daemon/client.ts"],
+      "@proofofwork-agency/headless/experimental": ["../src/experimental.ts"]
+    }
+  },
+  "include": ["index.ts"]
+}

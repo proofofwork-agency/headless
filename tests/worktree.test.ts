@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runGitStrict } from "../src/runtime/git";
+import { daemonGitEnvironment, runGitStrict } from "../src/runtime/git";
 import {
   captureWriteDiff,
   createWriteWorktree,
@@ -16,6 +16,29 @@ const gitAvailable = runGitStrict(["--version"], process.cwd()).ok;
 const gitTest = gitAvailable ? test : test.skip;
 
 describe("ephemeral write worktrees", () => {
+  test("daemon Git ignores inherited Git control variables and disables interaction", () => {
+    const env = daemonGitEnvironment({
+      PATH: "/owner/bin",
+      GIT_DIR: "/attacker/repository",
+      GIT_WORK_TREE: "/attacker/tree",
+      GIT_CONFIG_GLOBAL: "/attacker/config",
+      GIT_CONFIG_COUNT: "1",
+      GIT_ASKPASS: "/attacker/prompt",
+      GIT_PAGER: "/attacker/pager",
+      LD_PRELOAD: "/attacker/library",
+    });
+    expect(env.PATH).toBe("/owner/bin");
+    expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
+    expect(env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+    expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+    expect(env.GIT_ASKPASS).toBe("/usr/bin/false");
+    expect(env.GIT_PAGER).toBe("cat");
+    expect(env.GIT_DIR).toBeUndefined();
+    expect(env.GIT_WORK_TREE).toBeUndefined();
+    expect(env.GIT_CONFIG_COUNT).toBeUndefined();
+    expect(env.LD_PRELOAD).toBeUndefined();
+  });
+
   gitTest("refuses a non-git cwd", () => {
     const cwd = mkdtempSync(join(tmpdir(), "headless-non-git-"));
 
@@ -30,10 +53,9 @@ describe("ephemeral write worktrees", () => {
     expect(() => createWriteWorktree(plan)).toThrow("refusing to branch from a dirty primary tree");
   });
 
-  gitTest("does not treat headless's own .headless/ state as a dirty primary", () => {
-    // A repo that has NOT pre-ignored .headless/. Headless writes its session
-    // ledger there before creating the worktree; that must not trip the
-    // dirty-primary guard, or contained write mode would refuse everywhere.
+  gitTest("treats an untracked repository .headless directory as user/project dirt", () => {
+    // v0.2 runtime state is external. A repository-local .headless directory
+    // therefore belongs to the checkout and must block automatic integration.
     const repo = mkdtempSync(join(tmpdir(), "headless-repo-noignore-"));
     expect(runGitStrict(["init"], repo).ok).toBe(true);
     writeFileSync(join(repo, "README.md"), "base\n", "utf8");
@@ -42,12 +64,9 @@ describe("ephemeral write worktrees", () => {
     mkdirSync(join(repo, ".headless", "sessions", "s"), { recursive: true });
     writeFileSync(join(repo, ".headless", "sessions", "s", "ledger.jsonl"), "{}\n", "utf8");
 
-    // git sees `?? .headless/`, but the worktree guard must ignore it.
     expect(runGitStrict(["status", "--porcelain"], repo).stdout).toContain(".headless/");
-    const plan = createWriteWorktree(planWriteWorktree({ primaryRoot: repo, tempBase: mkdtempSync(join(tmpdir(), "headless-worktrees-")) }));
-    removeWriteWorktree(plan, { force: true });
-
-    expect(plan.branch).toStartWith("headless/write/");
+    const plan = planWriteWorktree({ primaryRoot: repo, tempBase: mkdtempSync(join(tmpdir(), "headless-worktrees-")) });
+    expect(() => createWriteWorktree(plan)).toThrow("refusing to branch from a dirty primary tree");
   });
 
   gitTest("refuses a worktree target inside the primary tree", () => {
@@ -75,6 +94,54 @@ describe("ephemeral write worktrees", () => {
     expect(existsSync(join(repo, "new-file.txt"))).toBe(false);
     expect(removed.worktreeRemoved).toBe(true);
     expect(afterList).not.toContain(plan.worktreePath);
+  });
+
+  gitTest("tracks integrity when the configured primary is itself a linked worktree", () => {
+    const repo = initRepo();
+    const linkedPrimary = createWriteWorktree(planWriteWorktree({ primaryRoot: repo, label: "linked-primary" }));
+    const nested = createWriteWorktree(planWriteWorktree({ primaryRoot: linkedPrimary.worktreePath, label: "nested" }));
+    writeFileSync(join(nested.worktreePath, "nested.txt"), "candidate\n");
+    expect(captureWriteDiff(nested).files).toContain("nested.txt");
+    expect(removeWriteWorktree(nested, { force: true }).worktreeRemoved).toBe(true);
+    expect(removeWriteWorktree(linkedPrimary, { force: true }).worktreeRemoved).toBe(true);
+  });
+
+  gitTest("fails closed when a worker replaces its linked-worktree .git pointer", () => {
+    const repo = initRepo();
+    const plan = createWriteWorktree(planWriteWorktree({ primaryRoot: repo, label: "pointer" }));
+    const pointer = join(plan.worktreePath, ".git");
+    writeFileSync(pointer, `gitdir: ${join(repo, ".git")}\n`);
+    writeFileSync(join(plan.worktreePath, "candidate.txt"), "must not be captured\n");
+
+    expect(() => captureWriteDiff(plan)).toThrow(".git pointer changed");
+    expect(runGitStrict(["status", "--porcelain"], plan.worktreePath).stderr).toContain(".git pointer changed");
+    expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("base\n");
+    expect(removeWriteWorktree(plan, { force: true }).worktreeRemoved).toBe(true);
+  });
+
+  gitTest("disables checkout hooks even when the repository contains an executable hook", () => {
+    const repo = initRepo();
+    const marker = join(repo, "..", `headless-checkout-hook-${Date.now()}`);
+    const hook = join(repo, ".git", "hooks", "post-checkout");
+    writeFileSync(hook, `#!/bin/sh\ntouch ${shellQuote(marker)}\n`);
+    chmodSync(hook, 0o755);
+
+    const plan = createWriteWorktree(planWriteWorktree({ primaryRoot: repo, label: "hook" }));
+    expect(existsSync(marker)).toBe(false);
+    removeWriteWorktree(plan, { force: true });
+  });
+
+  gitTest("rejects executable fsmonitor, filter, and merge-driver repository config", () => {
+    const cases = [
+      ["core.fsmonitor", "/bin/false"],
+      ["filter.attacker.process", "/bin/false"],
+      ["merge.attacker.driver", "/bin/false %O %A %B"],
+    ] as const;
+    for (const [key, value] of cases) {
+      const repo = initRepo();
+      expect(runGitStrict(["config", key, value], repo).ok).toBe(true);
+      expect(() => planWriteWorktree({ primaryRoot: repo, label: "poisoned-config" })).toThrow(`repository config key ${key}`);
+    }
   });
 
   gitTest("removeWriteWorktree is idempotent after cleanup", () => {
@@ -120,6 +187,41 @@ describe("ephemeral write worktrees", () => {
     expect(swept.prunedBranches).toContain(plan.branch);
     expect(worktreeList(repo)).not.toContain(plan.worktreePath);
   });
+
+  gitTest("planAgentWorktree + create + remove edges", () => {
+    const repo = initRepo();
+    const { planAgentWorktree, createAgentWorktree, removeAgentWorktree, setupAgentWorktrees } = require("../src/runtime/worktree");
+    const plan = planAgentWorktree({ agent: "claude-code", primaryRoot: repo });
+    expect(plan.branch).toContain("headless/agent/");
+    createAgentWorktree(plan);
+    expect(existsSync(plan.worktreePath)).toBe(true);
+    removeAgentWorktree(plan, true);
+    // setup multi
+    const map = setupAgentWorktrees(["opencode", "codex"], repo);
+    expect(Object.keys(map).length).toBe(2);
+    // cleanup manual
+    // (sweep will handle too)
+  });
+
+  gitTest("sweep with log option + non-matching prefixes ignored", () => {
+    const repo = initRepo();
+    const { sweepOrphanWriteWorktrees } = require("../src/runtime/worktree");
+    const logs: string[] = [];
+    const res = sweepOrphanWriteWorktrees(repo, { log: (m: string) => logs.push(m), branchPrefix: "headless/write/" });
+    expect(Array.isArray(res.removedWorktrees)).toBe(true);
+    // no error
+  });
+
+  gitTest("remove refuses dirty unless force", () => {
+    const repo = initRepo();
+    const plan = createWriteWorktree(planWriteWorktree({ primaryRoot: repo }));
+    writeFileSync(join(plan.worktreePath, "dirty.txt"), "d\n");
+    const noForce = removeWriteWorktree(plan);
+    expect(noForce.worktreeRemoved).toBe(false);
+    expect(noForce.refused?.reason).toBe("uncaptured-changes");
+    const forced = removeWriteWorktree(plan, { force: true });
+    expect(forced.worktreeRemoved).toBe(true);
+  });
 });
 
 function initRepo() {
@@ -136,4 +238,8 @@ function worktreeList(repo: string) {
   const list = runGitStrict(["worktree", "list", "--porcelain"], repo);
   expect(list.ok).toBe(true);
   return list.stdout;
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }

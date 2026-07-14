@@ -1,294 +1,1082 @@
-import { spawn } from "bun";
+import { spawn, type Subprocess } from "bun";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import type { ExecOptions, ExecResult, Backend } from "../index";
-import { assertModeAllowed, backendAdapters, buildBackendEnv, type BackendAdapter } from "../backends/registry";
-import { cleanupSandboxProfile, DARWIN_SANDBOX_EXEC, probeDarwinSandboxWriteDenial, writeDarwinSandboxProfile } from "../runtime/os-sandbox";
-import { captureWriteDiff, createWriteWorktree, planWriteWorktree, removeWriteWorktree, type WriteDiff } from "../runtime/worktree";
+import { dirname, join } from "node:path";
+import type { ExecOptions } from "../index";
+import type { ExperimentalExecResult as ExecResult } from "../experimental/exec-result";
+import { assertModeAllowed, getBackendDefinition, requiredContainmentSecurityGaps, type BackendDefinition } from "../backends/registry";
+import { appendAdapterDiagnostic, classifyAdapterFailure, normalizeAdapterResult } from "../backends/result-normalization";
+import { executeBoundedProbe, probeBackendDefinition, type ProbeExecutor } from "../backends/probe";
+import {
+  buildLinuxReadOnlyArgs,
+  buildLinuxWriteSandboxArgs,
+  cleanupSandboxProfile,
+  DARWIN_SANDBOX_EXEC,
+  probeDarwinSandboxWriteDenial,
+  probeHardlinkRisk,
+  probeLinuxBwrap,
+  sandboxCredentialRoots,
+  writeDarwinReadOnlySandboxProfile,
+  writeDarwinWriteSandboxProfile,
+  BWRAP,
+} from "../runtime/os-sandbox";
+import {
+  captureWriteDiff,
+  createWriteWorktree,
+  planWriteWorktree,
+  removeWriteWorktree,
+  type WorktreeLeaseHooks,
+  type WriteDiff,
+} from "../runtime/worktree";
+import { redactAndTruncate, StreamingRedactor } from "../runtime/redaction";
+import { createWorkerEnvironment, type WorkerEnvironment } from "../runtime/worker-environment";
+import { installNativeAuthCapsule, supportsNativeAuthCapsule } from "../runtime/native-auth-capsule";
+import { terminateProcessTree as terminateChildProcessTree } from "../runtime/process-tree";
+import { positiveTimeout } from "../runtime/validation";
+import { cleanupWithDiagnostic, recordRuntimeDiagnostic } from "../runtime/diagnostics";
+import { isHeadlessError } from "../runtime/headless-error";
+import { installRunToolClient, withRunToolInstructions, type RunToolWorkerAccess } from "../runtime/run-tool-client";
+import { executableReadRoots, resolveExecutable } from "../runtime/executable-read-roots";
+import { stageDarwinBunScript } from "../runtime/darwin-bun-stage";
+import {
+  integrateWriteCandidate,
+  type WriteExecutionSummary,
+  type WriteIntegrationPolicy,
+  type WriteIntegrationResult,
+} from "../runtime/write-integration";
 
 const DEFAULT_TIMEOUT = 180_000;
-const STREAM_CAP_BYTES = 16_000_000;
-let sandboxProbe: ReturnType<typeof probeDarwinSandboxWriteDenial> | null = null;
+const STREAM_CAP_BYTES = 262_144;
+const TERMINATION_GRACE_MS = 1_500;
 
-export async function runHeadless(opts: ExecOptions & { backend: Backend }): Promise<ExecResult> {
-  const start = Date.now();
-  const cwd = opts.cwd || process.cwd();
-  const backend = opts.backend;
-  const adapter = backendAdapters[backend];
-  const timeoutMs = opts.timeoutMs || adapter?.metadata.timeoutMs || DEFAULT_TIMEOUT;
-  const prompt = opts.prompt;
+type ExecutionSupervisorState = {
+  activeProcesses: Set<Subprocess>;
+  darwinProbe: ReturnType<typeof probeDarwinSandboxWriteDenial> | null;
+  linuxProbe: ReturnType<typeof probeLinuxBwrap> | null;
+};
 
-  let env: NodeJS.ProcessEnv;
+type SandboxWrap = {
+  cmd: string[];
+  cleanup: () => void;
+  sandboxed: boolean;
+  reason: string;
+  network: "broker-only" | "native-direct-unrestricted" | "denied" | "unrestricted";
+  credentialAccess: "backend-native" | "broker-lease" | "none";
+};
 
-  if (!adapter) {
-    throw new Error(`Backend ${backend} not yet implemented in simple runner`);
+export type InternalRunOptions = ExecOptions & {
+  backend: string;
+  jobId?: string;
+  /** Test/daemon-owned host home used only to derive an audited native capsule. */
+  authHomeDir?: string;
+  resumeNativeSessionId?: string;
+  /** Opaque daemon-issued lease; intentionally absent from the public ExecOptions. */
+  broker?: { provider: string; baseUrl: string; token: string; unixSocket?: string };
+  /** Daemon-owned write policy. Direct library callers intentionally cannot set this through ExecOptions. */
+  writeIntegration?: WriteIntegrationPolicy;
+  /** Daemon-owned durable checkout manifests. */
+  worktreeLease?: WorktreeLeaseHooks;
+  /** Short-lived daemon cooperation capability; absent from public ExecOptions. */
+  runTool?: RunToolWorkerAccess;
+};
+
+/** Owns containment probes, active descendants, deadlines, cleanup, and output bounds. */
+export class ExecutionSupervisor {
+  private readonly state: ExecutionSupervisorState = {
+    activeProcesses: new Set(),
+    darwinProbe: null,
+    linuxProbe: null,
+  };
+
+  execute(options: InternalRunOptions): Promise<ExecResult> {
+    return executeSupervisedRun(options, this.state);
+  }
+
+  async terminateAll(signal: "SIGTERM" | "SIGKILL" = "SIGTERM") {
+    return await Promise.all(
+      [...this.state.activeProcesses].map((process) => terminateProcessTree(
+        process,
+        signal === "SIGKILL" ? 0 : TERMINATION_GRACE_MS,
+      )),
+    );
+  }
+
+  wrapWithSandbox(
+    command: string[],
+    options: ExecOptions & {
+      backend: string;
+      broker?: InternalRunOptions["broker"];
+      runTool?: RunToolWorkerAccess;
+      sandboxNetwork?: "denied" | "native-auth-local" | "provider-direct";
+    },
+    adapter: BackendDefinition,
+    cwd: string,
+    primaryRootForWrite?: string,
+    worker?: WorkerEnvironment,
+    runtimeReadRoots: string[] = [],
+  ) {
+    return wrapWithSandboxWithoutState(
+      command,
+      options,
+      adapter,
+      cwd,
+      primaryRootForWrite,
+      worker,
+      runtimeReadRoots,
+      this.state,
+    );
+  }
+}
+
+export const defaultExecutionSupervisor = new ExecutionSupervisor();
+
+/** Experimental compatibility entry; stable callers submit through exec(). */
+export function runHeadless(options: InternalRunOptions) {
+  return defaultExecutionSupervisor.execute(options);
+}
+
+export function killAllActiveRunners(signal: "SIGTERM" | "SIGKILL" = "SIGTERM") {
+  return defaultExecutionSupervisor.terminateAll(signal);
+}
+
+async function executeSupervisedRun(
+  options: InternalRunOptions,
+  supervisor: ExecutionSupervisorState,
+): Promise<ExecResult> {
+  const started = Date.now();
+  const cwd = options.cwd ?? process.cwd();
+  const containment = containmentRequirement(options);
+  const authMode = options.authMode ?? "broker";
+  const timeoutMs = timeout(options.timeoutMs);
+
+  if (process.platform === "win32") {
+    return failedResult(options.backend, "UNSUPPORTED_PLATFORM", "Headless v0.2 supports macOS and Linux; Windows is unsupported.", Date.now() - started, containment);
+  }
+  if (options.signal?.aborted) {
+    return failedResult(options.backend, "CANCELLED", "Run was cancelled before preparation.", Date.now() - started, containment, "cancelled");
+  }
+
+  const adapter = getBackendDefinition(options.backend);
+  if (!adapter) return failedResult(options.backend, "BACKEND_UNAVAILABLE", `Backend adapter ${options.backend} is not registered.`, Date.now() - started, containment);
+
+  if (containment === "required") {
+    if (authMode === "broker" && adapter.security.strictAuth === "broker-api-key" && !options.broker) {
+      return failedResult(options.backend, "AUTH_UNAVAILABLE", `Backend ${options.backend} requires a daemon-issued provider broker lease in required containment. OAuth, keychain, and host credential fallback are disabled.`, Date.now() - started, containment);
+    }
+    const unsupported = requiredContainmentSecurityGaps(adapter, options.mode);
+    if (unsupported.length) {
+      return failedResult(options.backend, "BACKEND_UNSUPPORTED", `Backend ${options.backend} cannot run in required containment because it does not disable: ${unsupported.join(", ")}.`, Date.now() - started, containment);
+    }
   }
 
   try {
-    assertModeAllowed(backend, opts.mode);
-    env = buildBackendEnv(adapter);
+    assertModeAllowed(options.backend, options.mode);
   } catch (error) {
-    return failedResult(backend, error, Date.now() - start);
+    return failedResult(options.backend, "BACKEND_UNSUPPORTED", messageOf(error), Date.now() - started, containment);
   }
 
-  if (opts.mode === "write") {
-    return runContainedWrite(opts, adapter, cwd, env, start, timeoutMs);
+  const worker = createWorkerEnvironment();
+  try {
+    let nativeOptions = options;
+    if (authMode === "native-login" && adapter.security.strictAuth !== "credential-free") {
+      let capsule;
+      try {
+        capsule = installNativeAuthCapsule(worker, adapter.id, {
+          homeDir: options.authHomeDir,
+          requestedModel: options.model,
+          resolveOpenCodeModel: adapter.nativeAuth?.resolveModel ?? false,
+        });
+      } catch (error) {
+        if (isHeadlessError(error)) {
+          return failedResult(options.backend, error.code, error.safeMessage, Date.now() - started, containment);
+        }
+        return failedResult(
+          options.backend,
+          "NATIVE_AUTH_UNAVAILABLE",
+          "Native authentication state could not be prepared safely.",
+          Date.now() - started,
+          containment,
+          "blocked",
+        );
+      }
+      if (!capsule.available) {
+        return failedResult(options.backend, "NATIVE_AUTH_UNAVAILABLE", capsule.reason ?? "Native authentication is unavailable.", Date.now() - started, containment, "blocked");
+      }
+      if (capsule.model) nativeOptions = { ...options, model: capsule.model };
+    }
+    adapter.configureWorker?.(worker, { authHomeDir: options.authHomeDir });
+    if (containment === "required") {
+      const probe = await probeBackendDefinition(options.backend, containedProbeExecutor(options, adapter, cwd, worker, supervisor));
+      if (!probe.ok) {
+        if (options.signal?.aborted) {
+          return failedResult(options.backend, "CANCELLED", "Run was cancelled during the backend capability probe.", Date.now() - started, containment, "cancelled");
+        }
+        return failedResult(options.backend, "BACKEND_UNAVAILABLE", `Backend ${options.backend} capability probe failed: ${probe.reason ?? "unknown failure"}`, Date.now() - started, containment);
+      }
+    }
+    if (adapter.isolationAttestation) {
+      const inspection = adapter.isolationAttestation;
+      const attestation = await containedProbeExecutor(options, adapter, cwd, worker, supervisor)(
+        inspection.command,
+        { timeoutMs: inspection.timeoutMs, maxOutputBytes: inspection.maxOutputBytes },
+      );
+      const failure = isolationAttestationFailure(attestation, inspection.validate);
+      if (failure) {
+        return failedResult(
+          options.backend,
+          "BACKEND_UNSUPPORTED",
+          `Grok isolation attestation failed before provider access: ${failure}`,
+          Date.now() - started,
+          containment,
+          "blocked",
+        );
+      }
+    }
+    if (options.runTool) {
+      if (containment !== "required") throw new Error("Run-scoped daemon tools are available only in required containment.");
+      Object.assign(worker.env, installRunToolClient(worker, options.runTool));
+    }
+    const prepared = nativeOptions.runTool
+      ? { ...nativeOptions, prompt: withRunToolInstructions(nativeOptions.prompt) }
+      : nativeOptions;
+    const env = adapterEnvironment(adapter, worker, prepared);
+    if (prepared.mode === "write") return await runContainedWrite(prepared, adapter, cwd, env, worker, started, timeoutMs, containment, supervisor);
+    return await runBackendProcess(prepared, adapter, cwd, env, worker, started, timeoutMs, containment, undefined, supervisor);
+  } finally {
+    await cleanupWithDiagnostic("runner.worker-environment", worker.cleanup);
   }
+}
 
-  return runBackendProcess(opts, adapter, cwd, env, start, timeoutMs);
+function isolationAttestationFailure(
+  attestation: Awaited<ReturnType<ProbeExecutor>>,
+  validate: (value: unknown) => string | null,
+) {
+  if (attestation.error) return attestation.error;
+  if (attestation.timedOut) return "inspect timed out";
+  if (attestation.overflowed) return "inspect output exceeded its bound";
+  if (attestation.exitCode !== 0) return attestation.stderr || `inspect exited ${attestation.exitCode}`;
+  try {
+    return validate(JSON.parse(attestation.stdout));
+  } catch {
+    return "inspect returned malformed JSON";
+  }
 }
 
 async function runContainedWrite(
-  opts: ExecOptions & { backend: Backend },
-  adapter: BackendAdapter,
+  options: InternalRunOptions,
+  adapter: BackendDefinition,
   cwd: string,
   env: NodeJS.ProcessEnv,
-  start: number,
+  worker: WorkerEnvironment,
+  started: number,
   timeoutMs: number,
-): Promise<ExecResult> {
+  containment: "required" | "unsafe",
+  supervisor: ExecutionSupervisorState,
+) {
   let plan;
+  let leasePrepared = false;
   try {
-    plan = planWriteWorktree({ primaryRoot: cwd, label: opts.backend });
+    plan = planWriteWorktree({
+      primaryRoot: cwd,
+      label: options.backend,
+      tempBase: options.worktreeLease?.tempBase,
+    });
+    options.worktreeLease?.onPlanned(plan, "candidate");
+    leasePrepared = !!options.worktreeLease;
     createWriteWorktree(plan);
+    try {
+      options.worktreeLease?.onCreated(plan, "candidate");
+    } catch (error) {
+      try {
+        removeWriteWorktree(plan, { force: true, pruneBranch: true });
+      } catch (cleanupError) {
+        recordRuntimeDiagnostic("state", "runner.worktree-create-rollback", cleanupError);
+        throw new Error(`${messageOf(error)}; worktree rollback also failed: ${messageOf(cleanupError)}`, { cause: error });
+      }
+      throw error;
+    }
   } catch (error) {
-    const message = error instanceof Error && error.message.includes("not a git worktree root")
-      ? `write mode requires a git repository: ${cwd}`
-      : error;
-    return failedResult(opts.backend, message, Date.now() - start);
+    let leaseFailure: string | null = null;
+    if (plan && leasePrepared) {
+      try {
+        options.worktreeLease?.onTerminal(plan, "creation_failed", [messageOf(error)]);
+      } catch (terminalError) {
+        leaseFailure = `Failed to persist terminal worktree lease: ${messageOf(terminalError)}`;
+        recordRuntimeDiagnostic("state", "runner.worktree-lease-creation-failure", terminalError);
+      }
+    }
+    const baseMessage = messageOf(error).includes("not a git worktree root") ? `write mode requires a git repository: ${cwd}` : messageOf(error);
+    const message = leaseFailure ? `${baseMessage}; ${leaseFailure}` : baseMessage;
+    return failedResult(options.backend, "PROCESS_ERROR", message, Date.now() - started, containment);
   }
 
-  let result: ExecResult = failedResult(opts.backend, "write-mode backend did not run", Date.now() - start);
+  let result = failedResult(options.backend, "PROCESS_ERROR", "Write backend did not run.", Date.now() - started, containment);
   let captured: WriteDiff | null = null;
+  let integration: WriteIntegrationResult | null = null;
+  let integrationOwnsCleanup = false;
   try {
-    try {
-      result = await runBackendProcess(opts, adapter, plan.worktreePath, env, start, timeoutMs);
-    } catch (error) {
-      result = failedResult(opts.backend, error, Date.now() - start);
-    }
-
+    result = await runBackendProcess(options, adapter, plan.worktreePath, env, worker, started, timeoutMs, containment, cwd, supervisor);
     try {
       captured = captureWriteDiff(plan);
     } catch (error) {
-      result = markFailed(result, `Failed to capture write diff: ${error instanceof Error ? error.message : String(error)}`);
+      result = markFailed(result, "PROCESS_ERROR", `Failed to capture write diff: ${messageOf(error)}`);
     }
+    if (captured && options.writeIntegration) {
+      integrationOwnsCleanup = true;
+      integration = await integrateWriteCandidate({
+        plan,
+        diff: captured,
+        execution: executionSummary(result),
+        policy: { ...options.writeIntegration, worktreeLease: options.worktreeLease },
+      });
+      result = applyWriteIntegration(result, integration);
+    }
+  } catch (error) {
+    result = failedResult(options.backend, "PROCESS_ERROR", messageOf(error), Date.now() - started, containment);
   } finally {
-    try {
-      removeWriteWorktree(plan, { force: true });
-    } catch (error) {
-      // Cleanup errors are surfaced below after the forced removal attempt.
-      captured = captured ?? null;
-      const cleanupMessage = `Failed to clean up write worktree: ${error instanceof Error ? error.message : String(error)}`;
-      result = markFailed(result, cleanupMessage);
+    if (!integrationOwnsCleanup) {
+      try {
+        removeWriteWorktree(plan, { force: true });
+      } catch (error) {
+        result = markFailed(result, "PROCESS_ERROR", `Failed to clean up write worktree: ${messageOf(error)}`);
+      }
+    }
+    if (leasePrepared) {
+      try {
+        options.worktreeLease!.onTerminal(
+          plan,
+          integration?.outcome ?? result.status ?? (result.ok ? "succeeded" : "failed"),
+          integration?.evidence,
+        );
+      } catch (error) {
+        result = markFailed(result, "PROCESS_ERROR", `Failed to persist terminal worktree lease: ${messageOf(error)}`);
+      }
     }
   }
-
+  const safeDiff = captured ? redactWriteDiff(captured) : null;
+  const diffTruncated = captured
+    ? Buffer.byteLength(captured.diff) > STREAM_CAP_BYTES
+      || Buffer.byteLength(captured.status) > 65_536
+      || captured.files.length > 256
+      || captured.files.some((file) => Buffer.byteLength(file) > 2_000)
+    : false;
   return {
     ...result,
-    diff: captured ? { patch: captured.diff, status: captured.status, files: captured.files } : null,
-    worktreeBranch: plan.branch,
+    outputTruncated: result.truncated,
+    truncated: result.truncated || diffTruncated,
+    diffTruncated,
+    diff: safeDiff ? {
+      ...safeDiff,
+      baseCommit: integration?.baseCommit ?? plan.baseSha,
+      candidateCommit: integration?.candidateCommit ?? null,
+      resultingCommit: integration?.resultingCommit ?? null,
+    } : null,
+    worktreeBranch: integration?.branch ?? plan.branch,
+    commit: integration ? {
+      base: integration.baseCommit,
+      candidate: integration.candidateCommit,
+      result: integration.resultingCommit,
+      merged: integration.merged,
+    } : null,
+    writeOutcome: integration?.outcome ?? null,
   };
 }
 
 async function runBackendProcess(
-  opts: ExecOptions & { backend: Backend },
-  adapter: BackendAdapter,
+  options: InternalRunOptions,
+  adapter: BackendDefinition,
   cwd: string,
   env: NodeJS.ProcessEnv,
-  start: number,
+  worker: WorkerEnvironment,
+  started: number,
   timeoutMs: number,
+  containment: "required" | "unsafe",
+  primaryRootForWrite?: string,
+  supervisor?: ExecutionSupervisorState,
 ): Promise<ExecResult> {
-  const backend = opts.backend;
-  const prompt = opts.prompt;
-  const wrapped = maybeWrapWithSandbox(adapter.buildCommand(opts, cwd), opts, adapter, cwd);
+  let command: string[];
+  try {
+    command = options.resumeNativeSessionId
+      ? adapter.buildResumeCommand?.(options, cwd, options.resumeNativeSessionId)
+        ?? (() => { throw new Error(`Backend ${adapter.id} does not implement native resume.`); })()
+      : adapter.prepareCommand(options, cwd);
+  } catch (error) {
+    return failedResult(options.backend, "BACKEND_UNAVAILABLE", `Backend command preparation failed: ${messageOf(error)}`, Date.now() - started, containment);
+  }
+  const runtimeReadRoots = executableReadRoots(command, env);
+  const wrapped = wrapWithSandboxWithoutState(
+    command,
+    options,
+    adapter,
+    cwd,
+    primaryRootForWrite,
+    worker,
+    runtimeReadRoots,
+    supervisor,
+  );
+
+  if (containment === "required" && !wrapped.sandboxed) {
+    await cleanupWithDiagnostic("runner.unavailable-sandbox", wrapped.cleanup);
+    return failedResult(options.backend, "CONTAINMENT_UNAVAILABLE", `Required containment is unavailable: ${wrapped.reason}`, Date.now() - started, containment);
+  }
+  if (containment === "required") {
+    const hardlink = probeHardlinkRisk(cwd);
+    if (!hardlink.ok) {
+      await cleanupWithDiagnostic("runner.hardlink-probe", wrapped.cleanup);
+      return failedResult(options.backend, "CONTAINMENT_UNAVAILABLE", hardlink.reason, Date.now() - started, containment);
+    }
+  }
+
+  let process: Subprocess | null = null;
+  let timedOut = false;
+  let cancelled = false;
+  let overflowed = false;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  let stopping: ReturnType<typeof terminateProcessTree> | null = null;
+  const stop = () => {
+    if (process) stopping ??= terminateProcessTree(process);
+    return stopping;
+  };
+  const abort = () => {
+    cancelled = true;
+    stop();
+  };
+  options.signal?.addEventListener("abort", abort, { once: true });
 
   try {
-    const proc = spawn(wrapped.cmd, {
+    process = spawn(wrapped.cmd, {
       cwd,
       env,
       stdout: "pipe",
       stderr: "pipe",
       stdin: adapter.stdinPrompt ? "pipe" : undefined,
+      detached: true,
     });
-
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-
-    const timer = setTimeout(() => {
+    supervisor?.activeProcesses.add(process);
+    timeoutHandle = setTimeout(() => {
       timedOut = true;
-      killProcessTree(proc.pid);
+      stop();
     }, timeoutMs);
+    timeoutHandle.unref?.();
 
-    // Feed prompt for stdin-based tools. When sandboxed, stdin flows through
-    // sandbox-exec to the wrapped backend process.
-    if (adapter.stdinPrompt && proc.stdin) {
-      proc.stdin.write(prompt + "\n");
-      proc.stdin.end();
+    if (adapter.stdinPrompt && process.stdin && typeof process.stdin !== "number") {
+      process.stdin.write(`${options.prompt}\n`);
+      process.stdin.end();
     }
 
-    // Read with a byte cap so a backend flooding stdout/stderr cannot OOM the
-    // runner: on overflow we stop reading and kill the process tree.
-    const onOverflow = () => killProcessTree(proc.pid);
-    const [exitCode, outText, errText] = await Promise.all([
-      proc.exited,
-      readStreamCapped(proc.stdout, STREAM_CAP_BYTES, onOverflow),
-      readStreamCapped(proc.stderr, STREAM_CAP_BYTES, onOverflow),
+    const onOverflow = () => {
+      overflowed = true;
+      stop();
+    };
+    const stream = safeStreamCallback(options.onStdoutChunk);
+    const [exitCode, stdoutRead, stderrRead] = await Promise.all([
+      process.exited,
+      readStreamCapped(process.stdout as ReadableStream<Uint8Array>, STREAM_CAP_BYTES, onOverflow, stream?.push)
+        .finally(() => stream?.finish()),
+      // stderr is retained separately and redacted as one bounded value below.
+      // Sending it through the stdout callback would misclassify durable events.
+      readStreamCapped(process.stderr as ReadableStream<Uint8Array>, STREAM_CAP_BYTES, onOverflow),
     ]);
-    stdout = outText;
-    stderr = errText;
-
-    clearTimeout(timer);
-    const durationMs = Date.now() - start;
-
-    let output = stdout.trim();
-    let cost: number | null = null;
-    let tokens: number | null = null;
-    let parseError: string | null = null;
-
-    const parsed = adapter.parse(stdout);
-    output = parsed.output;
-    cost = parsed.cost;
-    tokens = parsed.tokens;
-    parseError = parsed.error;
-
-    const noAssistantOutput = !output && !parseError;
-    const finalOutput = output || parseError || stderr.trim() || (noAssistantOutput ? "No assistant output was produced by the backend." : stdout.trim());
-
+    const durationMs = Date.now() - started;
+    const parsed = normalizeAdapterResult(adapter.decodeOutput(stdoutRead.text), adapter.id);
+    const callbackFailures = stream?.failureCount() ?? 0;
+    if (callbackFailures > 0) {
+      appendAdapterDiagnostic(
+        parsed.diagnostics,
+        `User stdout callback failed ${callbackFailures} time${callbackFailures === 1 ? "" : "s"}; backend execution continued.`,
+        { ignored: callbackFailures },
+      );
+    }
+    const parsedOutput = parsed.output || parsed.error || stderrRead.text.trim() || "No assistant output was produced by the backend.";
+    const output = redactSafely(parsedOutput);
+    const stderr = redactSafely(stderrRead.text);
+    const noAssistantOutput = !parsed.output && !parsed.error;
+    const ok = isSuccessfulRun({ timedOut, cancelled, overflowed, parseError: parsed.error, noAssistantOutput, exitCode });
+    const classified = ok || cancelled || timedOut || overflowed ? null : classifyAdapterFailure({
+      authMode: options.authMode ?? "broker",
+      error: parsed.error,
+      output: parsed.output,
+      stderr: stderrRead.text,
+      malformedEvents: parsed.diagnostics.malformedEvents,
+    });
+    const status = cancelled
+      ? "cancelled"
+      : timedOut
+        ? "timed_out"
+        : ok
+          ? "succeeded"
+          : classified?.status ?? "failed";
+    const errorCode = cancelled
+      ? "CANCELLED"
+      : timedOut
+        ? "TIMED_OUT"
+        : overflowed
+          ? "OUTPUT_OVERFLOW"
+          : ok
+            ? null
+            : classified?.code ?? "PROCESS_ERROR";
     return {
-      ok: isSuccessfulRun({ timedOut, parseError, noAssistantOutput, exitCode }),
-      backend,
-      output: finalOutput,
-      cost,
-      tokens,
+      ok,
+      status,
+      error: errorCode ? { code: errorCode, message: output.text, retryable: classified?.retryable ?? false } : null,
+      backend: options.backend,
+      output: output.text,
+      stderr: stderr.text,
+      diagnostics: parsed.diagnostics,
+      cost: parsed.cost,
+      tokens: parsed.tokens,
+      usage: parsed.usage,
       durationMs,
       exitCode,
+      signal: process.signalCode ?? null,
       timedOut,
+      sandboxed: wrapped.sandboxed,
+      sandboxReason: wrapped.reason,
+      containment: containmentEvidence(containment, wrapped, worker),
+      redacted: output.redacted || stderr.redacted,
+      truncated: output.truncated || stderr.truncated || stdoutRead.truncated || stderrRead.truncated,
     };
+  } catch (error) {
+    return failedResult(options.backend, cancelled ? "CANCELLED" : "PROCESS_ERROR", messageOf(error), Date.now() - started, containment, cancelled ? "cancelled" : "failed", wrapped, worker);
   } finally {
-    wrapped.cleanup();
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    options.signal?.removeEventListener("abort", abort);
+    const pendingTermination = stopping as ReturnType<typeof terminateProcessTree> | null;
+    if (pendingTermination) {
+      const termination = await pendingTermination;
+      if (!termination.exited) {
+        recordRuntimeDiagnostic("cleanup", "runner.process-tree", new Error("Backend process tree did not exit after bounded TERM to KILL escalation."));
+      }
+    }
+    if (process) supervisor?.activeProcesses.delete(process);
+    await cleanupWithDiagnostic("runner.sandbox-wrapper", wrapped.cleanup);
   }
 }
 
-export function isSuccessfulRun(input: { timedOut: boolean; parseError: string | null; noAssistantOutput: boolean; exitCode: number | null }) {
-  return !input.timedOut && !input.parseError && !input.noAssistantOutput && input.exitCode === 0;
-}
-
-function failedResult(backend: Backend, error: unknown, durationMs: number): ExecResult {
-  return {
-    ok: false,
-    backend,
-    output: error instanceof Error ? error.message : String(error),
-    cost: null,
-    tokens: null,
-    durationMs,
-    exitCode: null,
-    timedOut: false,
-  };
-}
-
-function markFailed(result: ExecResult, message: string): ExecResult {
-  return {
-    ...result,
-    ok: false,
-    output: result.output ? `${result.output}\n\n${message}` : message,
-  };
+export function isSuccessfulRun(input: {
+  timedOut: boolean;
+  cancelled?: boolean;
+  overflowed?: boolean;
+  parseError: string | null;
+  noAssistantOutput: boolean;
+  exitCode: number | null;
+}) {
+  return !input.timedOut && !input.cancelled && !input.overflowed && !input.parseError && !input.noAssistantOutput && input.exitCode === 0;
 }
 
 export function maybeWrapWithSandbox(
-  cmd: string[],
-  opts: ExecOptions & { backend: Backend },
-  adapter: BackendAdapter,
+  command: string[],
+  options: ExecOptions & {
+    backend: string;
+    broker?: InternalRunOptions["broker"];
+    runTool?: RunToolWorkerAccess;
+    /** Daemon-only probe restriction; never accepted at a public boundary. */
+    sandboxNetwork?: "denied" | "native-auth-local" | "provider-direct";
+  },
+  adapter: BackendDefinition,
   cwd: string,
-): { cmd: string[]; cleanup: () => void; sandboxed: boolean; reason?: string } {
-  if (opts.mode === "write") return { cmd, cleanup: noop, sandboxed: false, reason: "write mode uses worktree containment" };
-  if (process.platform !== "darwin") return { cmd, cleanup: noop, sandboxed: false, reason: `unsupported platform: ${process.platform}` };
-  if (adapter.selfSandboxed) return { cmd, cleanup: noop, sandboxed: false, reason: "backend self-sandboxed" };
+  primaryRootForWrite?: string,
+  worker?: WorkerEnvironment,
+  runtimeReadRoots: string[] = [],
+): SandboxWrap {
+  return defaultExecutionSupervisor.wrapWithSandbox(
+    command,
+    options,
+    adapter,
+    cwd,
+    primaryRootForWrite,
+    worker,
+    runtimeReadRoots,
+  );
+}
 
-  // Cache only a SUCCESSFUL probe (the sandbox won't disappear once proven).
-  // Re-probe whenever we don't yet have a success, so one transient failure
-  // does not latch the sandbox off for the whole process lifetime.
-  if (!sandboxProbe?.ok) sandboxProbe = probeDarwinSandboxWriteDenial();
-  if (!sandboxProbe.ok) return { cmd, cleanup: noop, sandboxed: false, reason: sandboxProbe.reason };
+function wrapWithSandboxWithoutState(
+  command: string[],
+  options: ExecOptions & {
+    backend: string;
+    broker?: InternalRunOptions["broker"];
+    runTool?: RunToolWorkerAccess;
+    sandboxNetwork?: "denied" | "native-auth-local" | "provider-direct";
+  },
+  adapter: BackendDefinition,
+  cwd: string,
+  primaryRootForWrite?: string,
+  worker?: WorkerEnvironment,
+  runtimeReadRoots: string[] = [],
+  supervisor?: ExecutionSupervisorState,
+): SandboxWrap {
+  const containment = containmentRequirement(options);
+  const authMode = options.authMode ?? "broker";
+  // Provider-direct is granted only to an audited backend with a concrete
+  // regular-file capsule path. Legacy strictAuth describes broker compatibility;
+  // it is not a native-login capability flag.
+  const usesNativeCredentials = authMode === "native-login" && supportsNativeAuthCapsule(adapter.id);
+  const sandboxNetwork = options.sandboxNetwork === "native-auth-local"
+    ? "denied"
+    : options.sandboxNetwork ?? (usesNativeCredentials ? "provider-direct" : "denied");
+  const network = sandboxNetwork === "provider-direct" ? "native-direct-unrestricted" : options.broker ? "broker-only" : "denied";
+  const credentialAccess = usesNativeCredentials ? "backend-native" : options.broker ? "broker-lease" : "none";
+  if (containment === "unsafe") return { cmd: command, cleanup: noop, sandboxed: false, reason: "explicit unsafe execution", network: "unrestricted", credentialAccess };
+  if (!worker) return { cmd: command, cleanup: noop, sandboxed: false, reason: "isolated worker environment was not prepared", network: "denied", credentialAccess: "none" };
+  const backendControls = adapter.projectControlPaths
+    ? [...adapter.projectControlPaths(cwd), ...(primaryRootForWrite ? adapter.projectControlPaths(primaryRootForWrite) : [])]
+    : [];
+  const credentialRoots = sandboxCredentialRoots();
+  const denyReadRoots = [...credentialRoots, ...backendControls];
 
-  const profilePath = writeDarwinSandboxProfile({
-    workdir: cwd,
-    denyWriteRoots: sandboxCredentialRoots(),
-    denyReadRoots: sandboxCredentialRoots(),
-  });
+  if (process.platform === "darwin") {
+    const darwinProbe = supervisor?.darwinProbe?.ok
+      ? supervisor.darwinProbe
+      : probeDarwinSandboxWriteDenial();
+    if (supervisor) supervisor.darwinProbe = darwinProbe;
+    if (!darwinProbe.ok) return { cmd: command, cleanup: noop, sandboxed: false, reason: darwinProbe.reason, network: "denied", credentialAccess };
+    const staged = stageDarwinBunScript(command, worker.env.PATH, worker, cwd);
+    if (staged.kind === "rejected") {
+      return { cmd: command, cleanup: staged.cleanup, sandboxed: false, reason: staged.reason, network: "denied", credentialAccess };
+    }
+    const stagedRuntimeRoots = staged.kind === "staged"
+      ? [
+          ...runtimeReadRoots,
+          ...executableReadRoots(command, worker.env),
+          ...executableReadRoots(staged.command, worker.env),
+        ]
+      : runtimeReadRoots;
+    let profile: string;
+    try {
+      profile = primaryRootForWrite
+        ? writeDarwinWriteSandboxProfile({
+            worktree: cwd,
+            primaryRoot: primaryRootForWrite,
+            worker,
+            runtimeReadRoots: stagedRuntimeRoots,
+            denyWriteRoots: credentialRoots,
+            denyReadRoots,
+            brokerPort: brokerPort(options.broker),
+            network: sandboxNetwork,
+            runToolSocket: options.runTool?.socketPath,
+          })
+        : writeDarwinReadOnlySandboxProfile({
+            workdir: cwd,
+            worker,
+            runtimeReadRoots: stagedRuntimeRoots,
+            denyWriteRoots: credentialRoots,
+            denyReadRoots,
+            brokerPort: brokerPort(options.broker),
+            network: sandboxNetwork,
+            runToolSocket: options.runTool?.socketPath,
+          });
+    } catch (error) {
+      staged.cleanup();
+      throw error;
+    }
+    return {
+      cmd: [DARWIN_SANDBOX_EXEC, "-f", profile, ...staged.command],
+      cleanup: () => cleanupDarwinLaunch(profile, staged.cleanup),
+      sandboxed: true,
+      reason: primaryRootForWrite ? "darwin-seatbelt-write" : "darwin-seatbelt-read",
+      network,
+      credentialAccess,
+    };
+  }
 
-  return {
-    cmd: [DARWIN_SANDBOX_EXEC, "-f", profilePath, ...cmd],
-    cleanup: () => cleanupSandboxProfile(profilePath),
-    sandboxed: true,
+  if (process.platform === "linux") {
+    const linuxProbe = supervisor?.linuxProbe?.ok ? supervisor.linuxProbe : probeLinuxBwrap();
+    if (supervisor) supervisor.linuxProbe = linuxProbe;
+    if (!linuxProbe.ok) return { cmd: command, cleanup: noop, sandboxed: false, reason: linuxProbe.reason, network: "denied", credentialAccess };
+    const relay = resolveLinuxRelayEntry();
+    const bun = resolveExecutable("bun", worker.env.PATH);
+    if (!relay || !bun) return { cmd: command, cleanup: noop, sandboxed: false, reason: "Linux containment supervisor runtime is unavailable", network: "denied", credentialAccess };
+    const supervisorArguments = ["supervise"];
+    let brokerSocket: string | undefined;
+    let mechanism = primaryRootForWrite ? "linux-bwrap-write" : "linux-bwrap-read";
+    const linuxRuntimeRoots = [...runtimeReadRoots, relay, bun];
+    let providerPort: number | undefined;
+    if (options.broker) {
+      brokerSocket = options.broker.unixSocket;
+      if (!brokerSocket || !existsSync(brokerSocket)) return { cmd: command, cleanup: noop, sandboxed: false, reason: "daemon broker Unix socket is unavailable", network: "denied", credentialAccess };
+      providerPort = brokerPort(options.broker);
+      supervisorArguments.push("--broker", brokerSocket, String(providerPort));
+      mechanism += "-broker-relay";
+    }
+    if (options.runTool) {
+      if (!existsSync(options.runTool.socketPath)) return { cmd: command, cleanup: noop, sandboxed: false, reason: "daemon run-tool Unix socket is unavailable", network: "denied", credentialAccess };
+      supervisorArguments.push("--run-tool", options.runTool.socketPath, String(linuxRunToolRelayPort(providerPort)));
+      mechanism += "-run-tools";
+    }
+    const sandboxCommand = [bun, relay, ...supervisorArguments, "--", ...command];
+    if (primaryRootForWrite) {
+      return {
+        cmd: [BWRAP, ...buildLinuxWriteSandboxArgs({
+          worktree: cwd,
+          primaryRoot: primaryRootForWrite,
+          worker,
+          denyWriteRoots: credentialRoots,
+          denyReadRoots,
+          runtimeReadRoots: linuxRuntimeRoots,
+          brokerSocket,
+          runToolSocket: options.runTool?.socketPath,
+          network: sandboxNetwork,
+        }), "--", ...sandboxCommand],
+        cleanup: noop,
+        sandboxed: true,
+        reason: mechanism,
+        network,
+        credentialAccess,
+      };
+    }
+    return {
+      cmd: [BWRAP, ...buildLinuxReadOnlyArgs({
+        workdir: cwd,
+        worker,
+        denyWriteRoots: credentialRoots,
+        denyReadRoots,
+        runtimeReadRoots: linuxRuntimeRoots,
+        brokerSocket,
+        runToolSocket: options.runTool?.socketPath,
+        network: sandboxNetwork,
+      }), "--", ...sandboxCommand],
+      cleanup: noop,
+      sandboxed: true,
+      reason: mechanism,
+      network,
+      credentialAccess,
+    };
+  }
+
+  return { cmd: command, cleanup: noop, sandboxed: false, reason: `unsupported platform: ${process.platform}`, network: "denied", credentialAccess: "none" };
+}
+
+function cleanupDarwinLaunch(profile: string, stagedCleanup: () => void) {
+  const errors: unknown[] = [];
+  try {
+    cleanupSandboxProfile(profile);
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    stagedCleanup();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length) throw new AggregateError(errors, "Failed to clean up a contained macOS launch.");
+}
+
+export async function terminateProcessTree(process: Subprocess, graceMs = TERMINATION_GRACE_MS) {
+  return await terminateChildProcessTree(process, { graceMs });
+}
+
+function adapterEnvironment(adapter: BackendDefinition, worker: WorkerEnvironment, options: InternalRunOptions) {
+  const base = { ...worker.env, HEADLESS_DEPTH: process.env.HEADLESS_DEPTH ?? "0" };
+  const env: NodeJS.ProcessEnv = adapter.buildEnv ? adapter.buildEnv(base, options) : base;
+  adapter.prepareEnvironment?.(env, { worker, platform: process.platform });
+  if (options.broker) applyBrokerEnvironment(env, options.broker);
+  return env;
+}
+
+function containedProbeExecutor(
+  options: InternalRunOptions,
+  adapter: BackendDefinition,
+  cwd: string,
+  worker: WorkerEnvironment,
+  supervisor: ExecutionSupervisorState,
+): ProbeExecutor {
+  return async (argv, limits) => {
+    const probeOptions: InternalRunOptions = {
+      ...options,
+      mode: "read-only",
+      containment: "required",
+      // Version/help probes never need provider egress or credentials, even
+      // when the eventual native session does.
+      authMode: "broker",
+      broker: undefined,
+      runTool: undefined,
+      onStdoutChunk: undefined,
+      signal: undefined,
+    };
+    const command = [...argv];
+    const wrapped = wrapWithSandboxWithoutState(
+      command,
+      probeOptions,
+      adapter,
+      cwd,
+      undefined,
+      worker,
+      executableReadRoots(command, worker.env),
+      supervisor,
+    );
+    if (!wrapped.sandboxed) {
+      wrapped.cleanup();
+      return {
+        exitCode: null,
+        stdout: "",
+        stderr: "",
+        timedOut: false,
+        overflowed: false,
+        error: `Required probe containment is unavailable: ${wrapped.reason}`,
+      };
+    }
+    try {
+      return await executeBoundedProbe(wrapped.cmd, limits, { cwd, env: worker.env, signal: options.signal });
+    } finally {
+      wrapped.cleanup();
+    }
   };
 }
 
-// Credential directories a read-only run should never read or write, kept
-// outside the project so ordinary source reads are unaffected. (The project
-// dir itself is always write-denied via `workdir`.)
-function sandboxCredentialRoots() {
-  const home = homedir();
-  return [
-    join(home, ".ssh"),
-    join(home, ".aws"),
-    join(home, ".gnupg"),
-    join(home, ".config", "gcloud"),
-  ].filter((path) => existsSync(path));
+function applyBrokerEnvironment(env: NodeJS.ProcessEnv, broker: NonNullable<InternalRunOptions["broker"]>) {
+  if (broker.provider === "anthropic") {
+    env.ANTHROPIC_API_KEY = broker.token;
+    env.ANTHROPIC_BASE_URL = broker.baseUrl;
+  } else if (broker.provider === "gemini") {
+    env.GEMINI_API_KEY = broker.token;
+    env.GOOGLE_API_KEY = broker.token;
+    env.GEMINI_BASE_URL = broker.baseUrl;
+  } else if (broker.provider === "xai") {
+    env.XAI_API_KEY = broker.token;
+    env.XAI_BASE_URL = broker.baseUrl;
+  } else {
+    env.OPENAI_API_KEY = broker.token;
+    env.OPENAI_BASE_URL = broker.baseUrl;
+  }
+  env.HEADLESS_BROKER_TOKEN = broker.token;
 }
 
-function noop() {}
+function brokerPort(broker?: InternalRunOptions["broker"]) {
+  if (!broker) return undefined;
+  const url = new URL(broker.baseUrl);
+  if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "::1") {
+    throw new Error("Strict broker endpoint must be loopback-only.");
+  }
+  const port = Number(url.port);
+  if (!Number.isSafeInteger(port) || port <= 0 || port > 65_535) throw new Error("Strict broker endpoint must include a valid port.");
+  return port;
+}
 
-async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number, onOverflow: () => void): Promise<string> {
+function linuxRunToolRelayPort(providerPort?: number) {
+  return providerPort === 38_471 ? 38_472 : 38_471;
+}
+
+export { executableReadRoots } from "../runtime/executable-read-roots";
+
+export function resolveLinuxRelayEntry() {
+  const candidates = [
+    join(import.meta.dir, "broker", "linux-relay.js"),
+    join(import.meta.dir, "..", "broker", "linux-relay.js"),
+    join(import.meta.dir, "..", "broker", "linux-relay.ts"),
+  ];
+  for (const candidate of candidates) {
+    const resolved = resolveExecutable(candidate, undefined);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+async function readStreamCapped(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  onOverflow: () => void,
+  onChunk?: (text: string) => void,
+) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
-  let out = "";
+  let output = "";
   let bytes = 0;
+  let truncated = false;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let value: Uint8Array | undefined;
+      let done = false;
+      try {
+        ({ value, done } = await reader.read());
+      } catch (error) {
+        recordRuntimeDiagnostic("transport", "runner.stdout-reader", error);
+        throw error;
+      }
       if (done) break;
       if (!value) continue;
       bytes += value.byteLength;
       if (bytes > maxBytes) {
+        truncated = true;
         onOverflow();
         try {
           await reader.cancel();
-        } catch {}
+        } catch (error) {
+          recordRuntimeDiagnostic("cleanup", "runner.stream-cancel-after-overflow", error);
+        }
         break;
       }
-      out += decoder.decode(value, { stream: true });
+      const text = decoder.decode(value, { stream: true });
+      if (text) onChunk?.(text);
+      output += text;
     }
-    out += decoder.decode();
+    const tail = decoder.decode();
+    if (tail) onChunk?.(tail);
+    output += tail;
   } finally {
     try {
       reader.releaseLock();
-    } catch {}
+    } catch (error) {
+      recordRuntimeDiagnostic("cleanup", "runner.stream-reader-release", error);
+    }
   }
-  return out;
+  return { text: output, truncated };
 }
 
-function killProcessTree(pid: number | undefined) {
-  if (!pid) return;
-  // Recursively signal the WHOLE descendant tree, not just direct children:
-  // `pkill -P` reaches one level, but a sandboxed backend's real workers are
-  // grandchildren under sandbox-exec. TERM the tree (deepest first), then KILL
-  // any survivors after a short grace. Runs detached so the grace doesn't block.
-  const script = [
-    'kt() { for c in $(pgrep -P "$1" 2>/dev/null); do kt "$c"; done; kill -TERM "$1" 2>/dev/null || true; }',
-    'kt "$1"',
-    'sleep 2',
-    'kk() { for c in $(pgrep -P "$1" 2>/dev/null); do kk "$c"; done; kill -KILL "$1" 2>/dev/null || true; }',
-    'kk "$1"',
-  ].join("; ");
-  try {
-    spawn(["sh", "-c", script, "sh", String(pid)], {
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-  } catch {
+function safeStreamCallback(callback?: (chunk: string) => void) {
+  if (!callback) return undefined;
+  let failures = 0;
+  const stream = new StreamingRedactor((chunk) => {
     try {
-      process.kill(pid, "SIGTERM");
-    } catch {}
+      callback(chunk);
+    } catch (error) {
+      failures += 1;
+      if (failures <= 3) recordRuntimeDiagnostic("stream-callback", "runner.stdout-callback", error);
+    }
+  });
+  return {
+    push: (chunk: string) => stream.push(chunk),
+    finish: () => stream.finish(),
+    failureCount: () => failures,
+  };
+}
+
+function redactSafely(value: string) {
+  try {
+    return redactAndTruncate(value, STREAM_CAP_BYTES);
+  } catch {
+    return { text: "[SUPPRESSED: REDACTION FAILURE]", redacted: true, truncated: true };
   }
 }
+
+function containmentRequirement(options: ExecOptions) {
+  return options.containment ?? "required";
+}
+
+function timeout(value?: number) {
+  return positiveTimeout(value, { defaultValue: DEFAULT_TIMEOUT });
+}
+
+function containmentEvidence(requirement: "required" | "unsafe", wrapped?: SandboxWrap, worker?: WorkerEnvironment): NonNullable<ExecResult["containment"]> {
+  const platform = process.platform === "darwin" || process.platform === "linux" || process.platform === "win32" ? process.platform : "other";
+  return {
+    requirement,
+    enforced: !!wrapped?.sandboxed,
+    platform,
+    mechanism: wrapped?.sandboxed ? wrapped.reason : null,
+    probe: wrapped?.reason ?? null,
+    isolatedHome: !!worker,
+    credentialsIsolated: !!worker,
+    network: wrapped?.network ?? (requirement === "unsafe" ? "unrestricted" : "denied"),
+    credentialAccess: wrapped?.credentialAccess ?? "none",
+    unsafe: requirement === "unsafe",
+  };
+}
+
+function failedResult(
+  backend: string,
+  code: NonNullable<ExecResult["error"]>["code"],
+  message: string,
+  durationMs: number,
+  containment: "required" | "unsafe",
+  status: NonNullable<ExecResult["status"]> = code === "CANCELLED" ? "cancelled" : code === "TIMED_OUT" ? "timed_out" : code === "POLICY_DENIED" || code === "CONTAINMENT_UNAVAILABLE" ? "blocked" : "failed",
+  wrapped?: SandboxWrap,
+  worker?: WorkerEnvironment,
+): ExecResult {
+  const safe = redactSafely(message);
+  return {
+    ok: false,
+    status,
+    error: { code, message: safe.text, retryable: false },
+    backend,
+    output: safe.text,
+    stderr: "",
+    diagnostics: { format: "none", malformedEvents: 0, ignoredEvents: 0, messages: [] },
+    cost: null,
+    tokens: null,
+    usage: { input: null, output: null, reasoning: null, cached: null, providerTotal: null },
+    durationMs,
+    exitCode: null,
+    signal: null,
+    timedOut: status === "timed_out",
+    containment: containmentEvidence(containment, wrapped, worker),
+    sandboxed: !!wrapped?.sandboxed,
+    sandboxReason: wrapped?.reason,
+    redacted: safe.redacted,
+    truncated: safe.truncated,
+  };
+}
+
+function markFailed(result: ExecResult, code: NonNullable<ExecResult["error"]>["code"], message: string) {
+  const safe = redactSafely(message);
+  return {
+    ...result,
+    ok: false,
+    status: "failed" as const,
+    error: { code, message: safe.text, retryable: false },
+    output: result.output ? `${result.output}\n\n${safe.text}` : safe.text,
+  };
+}
+
+function executionSummary(result: ExecResult): WriteExecutionSummary {
+  const status = result.status ?? (result.timedOut ? "timed_out" : result.ok ? "succeeded" : "failed");
+  return {
+    succeeded: result.ok && status === "succeeded",
+    status,
+    failureCode: result.error?.code ?? null,
+    usage: result.usage ?? {
+      input: null,
+      output: result.tokens,
+      reasoning: null,
+      cached: null,
+      providerTotal: result.tokens,
+    },
+    costUsd: typeof result.cost === "number" ? result.cost : null,
+  };
+}
+
+function applyWriteIntegration(result: ExecResult, integration: WriteIntegrationResult): ExecResult {
+  if (!result.ok) return result;
+  if (integration.outcome === "merged_fast_forward" || integration.outcome === "merged_advanced" || integration.outcome === "no_changes") {
+    return result;
+  }
+  if (integration.outcome === "commit_failed") {
+    return markFailed(result, "PROCESS_ERROR", integration.reason);
+  }
+  const code = integration.outcome === "preserved_no_merge_authority"
+    ? "POLICY_DENIED"
+    : integration.outcome === "blocked_candidate_gates" || integration.outcome === "blocked_integration_gates"
+      ? "GATE_FAILED"
+      : "CONFLICT";
+  return {
+    ...result,
+    ok: false,
+    status: "blocked",
+    error: { code, message: integration.reason, retryable: false, details: { outcome: integration.outcome, evidence: integration.evidence } },
+  };
+}
+
+function redactWriteDiff(diff: WriteDiff) {
+  const patch = redactSafely(diff.diff);
+  let status;
+  try {
+    status = redactAndTruncate(diff.status, 65_536);
+  } catch {
+    status = { text: "[SUPPRESSED: REDACTION FAILURE]", redacted: true, truncated: true };
+  }
+  return {
+    patch: patch.text,
+    status: status.text,
+    files: diff.files.slice(0, 256).map((file) => {
+      try {
+        return redactAndTruncate(file, 2_000).text;
+      } catch {
+        return "[SUPPRESSED: REDACTION FAILURE]";
+      }
+    }),
+  };
+}
+
+function messageOf(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function noop() {}
