@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerAdapter, unregisterAdapter, type BackendAdapter } from "../src/backends/registry";
+import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { RunRequestSchema, type SerializedRunRequest } from "../src/contracts/run";
 import { JobAdmissionService, daemonFailureResult } from "../src/daemon/job-admission-service";
 import { JobStore } from "../src/daemon/job-store";
@@ -14,12 +14,13 @@ import { BudgetStore } from "../src/runtime/budget-store";
 import { HeadlessError } from "../src/runtime/headless-error";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { ProjectTrustStore } from "../src/runtime/project-trust-store";
+import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 
 const roots: string[] = [];
 const adapters: string[] = [];
 
 afterEach(() => {
-  while (adapters.length) unregisterAdapter(adapters.pop()!);
+  while (adapters.length) unregisterBackendDefinition(adapters.pop()!);
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -211,6 +212,68 @@ describe("job admission service", () => {
     expect(fixture.jobs.list()).toHaveLength(0);
     fixture.service.dispose();
   });
+
+  test("rejects every persisted-session conflict before creating a job or reserving budget", () => {
+    const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
+    const session = fixture.sessions.create({
+      principal: "coordinator",
+      backend: fixture.backend,
+      model: "persisted-model",
+      containment: "required",
+      authMode: "native-login",
+      approvalPolicy: "ask",
+    });
+    const conflicting = [
+      { backend: "codex" },
+      { model: "different-model" },
+      { agent: "reviewer" },
+      { containment: "unsafe" },
+      { authMode: "broker" },
+      { approvalPolicy: "auto" },
+      { mode: "write" },
+    ];
+    for (const conflict of conflicting) {
+      try {
+        fixture.service.submit({
+          sessionId: session.id,
+          prompt: "conflicting session turn",
+          timeoutMs: 5_000,
+          ...conflict,
+        }, "coordinator");
+        throw new Error("Expected persisted-session conflict.");
+      } catch (error) {
+        expect(error).toMatchObject({ code: "CONFLICT" });
+      }
+      expect(fixture.jobs.list()).toHaveLength(0);
+      expect(fixture.budgets.getState().reservations).toHaveLength(0);
+    }
+    expect(() => fixture.service.submit({
+      sessionId: session.id,
+      prompt: "cross-principal turn",
+      timeoutMs: 5_000,
+    }, "other-principal")).toThrow("cannot cross authenticated principals");
+    expect(fixture.jobs.list()).toHaveLength(0);
+    expect(fixture.budgets.getState().reservations).toHaveLength(0);
+    fixture.service.dispose();
+  });
+
+  test("keeps the durable terminal job authoritative when completion event persistence fails", async () => {
+    const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
+    fixture.service.submit(run(fixture.backend, "active"), "coordinator");
+    const queued = fixture.service.submit(run(fixture.backend, "terminal-without-event"), "coordinator");
+    fixture.events.reconcileTerminal = (() => { throw new Error("injected terminal event failure"); }) as typeof fixture.events.reconcileTerminal;
+
+    expect(fixture.service.cancel(queued.id)).toMatchObject({
+      state: "cancelled",
+      result: { status: "cancelled", jobId: queued.id },
+    });
+    expect(fixture.jobs.get(queued.id)).toMatchObject({ state: "cancelled", result: { status: "cancelled" } });
+    expect(fixture.budgets.getReservation(queued.id)).toBeNull();
+
+    fixture.release("active");
+    await fixture.service.waitForIdle();
+    fixture.service.dispose();
+  });
 });
 
 function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
@@ -222,13 +285,14 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
     env: { ...process.env, HEADLESS_STATE_HOME: join(root, "state") },
   }));
   const backend = `admission-${crypto.randomUUID()}`;
-  registerAdapter(adapter(backend));
+  registerBackendDefinition(adapter(backend));
   adapters.push(backend);
   const jobs = new JobStore(paths.jobsDir);
   const tasks = new TaskStore(paths.tasksDir, { recoverOnOpen: false });
   const events = new RunEventStore(paths.runEventsPath, { compactOnOpen: false });
   const budgets = new BudgetStore(paths);
   const approvals = new ApprovalStore(paths, { expiryActor: "coordinator" });
+  const sessions = new PersistentSessionStore(paths);
   const started: string[] = [];
   const approvedTurns: string[] = [];
   const releases = new Map<string, () => void>();
@@ -241,6 +305,7 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
     tasks,
     runEvents: events,
     approvals,
+    sessions,
     trust: new ProjectTrustStore(paths),
     authority: new AuthorityStore(paths, { coordinator: "coordinator" }),
     budgets,
@@ -271,6 +336,7 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
     events,
     budgets,
     approvals,
+    sessions,
     service,
     started,
     approvedTurns,
@@ -301,7 +367,7 @@ function run(
   } satisfies Partial<SerializedRunRequest>;
 }
 
-function adapter(id: string): BackendAdapter {
+function adapter(id: string): BackendDefinition {
   return {
     id,
     metadata: {
@@ -340,8 +406,8 @@ function adapter(id: string): BackendAdapter {
     },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand: () => ["/usr/bin/true"],
-    parse: () => ({
+    prepareCommand: () => ["/usr/bin/true"],
+    decodeOutput: () => ({
       output: "",
       stderr: "",
       tokens: null,

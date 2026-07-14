@@ -165,7 +165,7 @@ console.log(JSON.stringify(await exec({
     ]);
     expect(exitCode, stderr).toBe(0);
     expect(JSON.parse(stdout)).toMatchObject({
-      ok: true,
+      status: "succeeded",
       backend: "package-fixture",
       output: "extension:detached manifest request",
     });
@@ -267,6 +267,8 @@ console.log(JSON.stringify(await exec({
     const publicClientPath = join(root, "public-client.mjs");
     writeFileSync(publicClientPath, `
 import { exec } from ${JSON.stringify(indexUrl)};
+const events = [];
+const chunks = [];
 const result = await exec({
   backend: "package-fixture",
   cwd: ${JSON.stringify(project)},
@@ -276,8 +278,10 @@ const result = await exec({
   containment: "unsafe",
   timeoutMs: 5_000,
   extensionConfigPath: ${JSON.stringify(configPath)},
+  onEvent(event) { events.push(event.kind); },
+  onStdoutChunk(chunk) { chunks.push(chunk); },
 });
-console.log(JSON.stringify(result));
+console.log(JSON.stringify({ result, events, chunks }));
 `, { mode: 0o600 });
     const publicRun = Bun.spawn([process.execPath, publicClientPath], {
       stdout: "pipe",
@@ -290,12 +294,19 @@ console.log(JSON.stringify(result));
       publicRun.exited,
     ]);
     expect(exitCode, stderr).toBe(0);
-    expect(JSON.parse(stdout)).toMatchObject({
-      ok: true,
+    const publicResult = JSON.parse(stdout) as {
+      result: { status: string; backend: string; output: string; containment: { unsafe: boolean } };
+      events: string[];
+      chunks: string[];
+    };
+    expect(publicResult.result).toMatchObject({
+      status: "succeeded",
       backend: "package-fixture",
       output: "extension:public extension request",
       containment: { unsafe: true },
     });
+    expect(publicResult.events).toEqual(expect.arrayContaining(["lifecycle", "stdout", "completion"]));
+    expect(publicResult.chunks).toEqual(["extension:public extension request"]);
 
     await expect(daemon.client.call<Job>("run.submit", {
       backend: "package-fixture",
@@ -316,6 +327,9 @@ console.log(JSON.stringify(result));
       extensionConfigPath: evilConfigPath,
     })).rejects.toMatchObject({ code: "EXTENSION_CONFIG_MISMATCH" });
     expect(existsSync(evilMarker)).toBe(false);
+    daemon.child.kill("SIGTERM");
+    await daemon.child.exited;
+    children.delete(daemon.child);
   }, 15_000);
 
   test("fails closed when embedded daemons request different process-global extension registries", async () => {
@@ -384,7 +398,7 @@ export default async function register(api) {
     cachedInputUsdPerMillion: 0.5,
     inputIncludesCached: true,
   });
-  api.registerAdapter({
+  api.registerBackendDefinition({
     id: "package-fixture",
     metadata: { id: "package-fixture", aliases: [], promptDelivery: "native", timeoutMs: 5_000, maxDepth: null, canRead: true, canWrite: false },
     capabilities: { write: false, streaming: false, structuredOutput: true, nativeResume: false, cancellation: true, tools: false, effort: false, brokerCompatible: false },
@@ -392,8 +406,8 @@ export default async function register(api) {
     probe: { versionCommand: ["/usr/bin/true"], helpCommand: ["/usr/bin/true"], requiredHelpFragments: [], timeoutMs: 1_000, maxOutputBytes: 1_024 },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand(options) { return ["/usr/bin/printf", \`extension:\${options.prompt}\`]; },
-    parse(stdout) { return { output: stdout, cost: null, tokens: null, error: null }; },
+    prepareCommand(options) { return ["/usr/bin/printf", \`extension:\${options.prompt}\`]; },
+    decodeOutput(stdout) { return { output: stdout, cost: null, tokens: null, error: null }; },
   });
 }
 `;

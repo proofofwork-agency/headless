@@ -694,6 +694,24 @@ describe("native command session drivers", () => {
     expect(executor.executions[1].argv).toEqual(expect.arrayContaining(["--agent", "review"]));
   });
 
+  test("Grok assembles current text/data deltas and end envelopes without retaining thoughts", async () => {
+    const executor = new FakeExecutor({
+      execute: async () => jsonl([
+        { type: "thought", data: "private chain" },
+        { type: "text", data: "GROK_" },
+        { type: "text", data: "SESSION_OK" },
+        { type: "end", stopReason: "EndTurn", sessionId: "grok-current", requestId: "request-1" },
+      ]),
+    });
+    const driver = new GrokSessionDriver({ executor, createId: ids("local", "turn-current") });
+    const handle = await driver.create({ cwd: "/repo" });
+
+    const turn = await driver.send(handle, "reply");
+
+    expect(turn).toMatchObject({ status: "completed", output: "GROK_SESSION_OK", nativeSessionId: "grok-current" });
+    expect(turn.output).not.toContain("private chain");
+  });
+
   test("Grok named sessions fail capability probing when --agent is unavailable", async () => {
     const driver = new GrokSessionDriver({
       executor: new FakeExecutor({

@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 describe("collaboration contracts", () => {
-  test("defaults native auth and fleet bounds while rejecting unknown or inconsistent data", () => {
+  test("defaults broker auth and fleet bounds while rejecting unknown or inconsistent data", () => {
     const agent = AgentProfileSchema.parse({
       id: "agent-one",
       backend: "codex",
@@ -46,7 +46,7 @@ describe("collaboration contracts", () => {
       updatedAt: 10,
     });
     expect(agent).toMatchObject({
-      authMode: "native-login",
+      authMode: "broker",
       approvalPolicy: "ask",
       enabled: true,
       maxConcurrentTurns: 1,
@@ -63,7 +63,7 @@ describe("collaboration contracts", () => {
       updatedAt: 10,
     });
     expect(fleet).toMatchObject({
-      authMode: "native-login",
+      authMode: "broker",
       maxActiveWorkers: 4,
       maxQueuedDelegations: 64,
       maxDeliberationRounds: 8,
@@ -76,7 +76,7 @@ describe("collaboration contracts", () => {
     }).success).toBe(false);
     expect(FleetProfileSchema.safeParse({
       ...fleet,
-      coordinator: { kind: "agent", agentId: "missing" },
+      synthesizer: { kind: "agent", agentId: "missing" },
     }).success).toBe(false);
   });
 
@@ -130,7 +130,7 @@ describe("collaboration contracts", () => {
       fleetProfileId: "fleet-one",
       objective: "Implement collaboration.",
       state: "active",
-      coordinator: { kind: "automatic" },
+      synthesizer: { kind: "automatic" },
       deadlineAt: 20,
       createdAt: 10,
       updatedAt: 10,

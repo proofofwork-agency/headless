@@ -85,7 +85,6 @@ function createFixture() {
   const profile = fleets.create({
     id: "fleet-main",
     name: "Autonomous fleet",
-    coordinator: { kind: "agent", agentId: "leader" },
     agents: [{ id: "leader", backend: "codex", name: "Leader" }],
     idleAutonomy: "suggest",
   });
@@ -98,8 +97,8 @@ function createFixture() {
     objective: "Keep autonomous work moving.",
     authMode: "native-login",
     approvalPolicy: "auto",
-    coordinator: { kind: "agent", agentId: "leader" },
-    leaderAgentId: "leader",
+    synthesizer: { kind: "agent", agentId: "leader" },
+    synthesizerAgentId: "leader",
     autonomous: true,
     deadlineAt: Date.now() + 60_000,
   });

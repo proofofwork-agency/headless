@@ -2,10 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerAdapter, unregisterAdapter, type BackendAdapter } from "../src/backends/registry";
+import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
 import { registerProvider, unregisterProvider } from "../src/broker/providers";
 import type { Job } from "../src/contracts/durable";
+import type { ApprovalRequest } from "../src/contracts/collaboration";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { BudgetStore } from "../src/runtime/budget-store";
@@ -28,7 +29,7 @@ afterEach(async () => {
   while (servers.length) servers.pop()!.stop(true);
   if (pricingRegistered) unregisterPricing(PRICING_ID);
   if (providerRegistered) unregisterProvider(PROVIDER_ID);
-  if (adapterRegistered) unregisterAdapter(ADAPTER_ID);
+  if (adapterRegistered) unregisterBackendDefinition(ADAPTER_ID);
   pricingRegistered = false;
   providerRegistered = false;
   adapterRegistered = false;
@@ -41,27 +42,13 @@ afterEach(async () => {
 describe("daemon cost budget admission", () => {
   test("admits a priced run, attributes actual cost, and charges the broker bound once", async () => {
     const fixture = await setupFixture(true);
-    await fixture.client.call("auth.provisionIntegration", { name: "cost-client" });
-    await fixture.client.call("authority.grant.add", {
-      principal: "integration:cost-client",
-      operations: ["run"],
-      backends: [ADAPTER_ID],
-      expiresAt: Date.now() + 60_000,
-      maxCostUsd: 0.01,
-    });
     await fixture.client.call("budget.upsert", {
       id: "priced-cap",
       provider: PROVIDER_ID,
       maxCostUsd: 0.01,
     });
-    const integration = new HeadlessDaemonClient({
-      projectRoot: fixture.project,
-      state: fixture.state,
-      credential: { integration: "cost-client" },
-    });
-
-    const submitted = await integration.call<Job>("run.submit", request("priced-model"));
-    const completed = await integration.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 });
+    const submitted = await fixture.client.call<Job>("run.submit", request("priced-model"));
+    const completed = await fixture.client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 });
 
     expect(completed.state).toBe("succeeded");
     expect(completed.result?.cost).toMatchObject({
@@ -111,27 +98,49 @@ describe("daemon cost budget admission", () => {
     expect(fixture.upstreamCalls()).toBe(0);
   });
 
-  test("enforces a scoped grant cost limit against the concrete broker request", async () => {
+  test("requires explicit per-run approval for unknown broker pricing without a cost budget", async () => {
+    const fixture = await setupFixture(false);
+    const submitted = await fixture.client.call<Job>("run.submit", request("unpriced-model"));
+
+    expect(submitted).toMatchObject({ state: "queued", result: null });
+    expect(fixture.upstreamCalls()).toBe(0);
+    const approvals = await fixture.client.call<ApprovalRequest[]>("approval.list", { status: "pending" });
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({
+      kind: "unpriced_broker_run",
+      details: {
+        jobId: submitted.id,
+        maxRequests: 8,
+        maxInputTokens: 200_000,
+        maxOutputTokens: 32_000,
+        cost: "unknown",
+      },
+    });
+
+    await fixture.client.call("approval.resolve", {
+      approvalId: approvals[0]!.id,
+      decision: "approved",
+      resolution: "Allow this one bounded unpriced test run.",
+    });
+    const completed = await fixture.client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 });
+    expect(completed.state).toBe("succeeded");
+    expect(completed.result?.cost.amountUsd).toBeNull();
+    expect(fixture.upstreamCalls()).toBe(1);
+  });
+
+  test("enforces a durable cost limit against the concrete broker request", async () => {
     const fixture = await setupFixture(true, 5_000);
-    await fixture.client.call("auth.provisionIntegration", { name: "grant-client" });
-    await fixture.client.call("authority.grant.add", {
-      principal: "integration:grant-client",
-      operations: ["run"],
-      backends: [ADAPTER_ID],
-      expiresAt: Date.now() + 60_000,
+    await fixture.client.call("budget.upsert", {
+      id: "concrete-cost-cap",
+      provider: PROVIDER_ID,
       // The stable 4096-token admission estimate fits, while the worker's
       // concrete 5000-token provider request must be stopped before egress.
       maxCostUsd: 0.0045,
     });
-    const integration = new HeadlessDaemonClient({
-      projectRoot: fixture.project,
-      state: fixture.state,
-      credential: { integration: "grant-client" },
-    });
 
-    const submitted = await integration.call<Job>("run.submit", request("priced-model"));
+    const submitted = await fixture.client.call<Job>("run.submit", request("priced-model"));
     expect(submitted.result).toBeNull();
-    const completed = await integration.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 });
+    const completed = await fixture.client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 });
 
     expect(completed.state).toBe("failed");
     expect(completed.result?.cost.amountUsd).toBeNull();
@@ -220,7 +229,7 @@ async function setupFixture(withPricing: boolean, workerMaxOutputTokens = 10) {
     });
     pricingRegistered = true;
   }
-  registerAdapter(fixtureAdapter());
+  registerBackendDefinition(fixtureAdapter());
   adapterRegistered = true;
 
   const executable = join(bin, "cost-runner");
@@ -267,7 +276,7 @@ function request(model: string) {
   };
 }
 
-function fixtureAdapter(): BackendAdapter {
+function fixtureAdapter(): BackendDefinition {
   return {
     id: ADAPTER_ID,
     metadata: { id: ADAPTER_ID, aliases: [], promptDelivery: "argv", timeoutMs: 10_000, maxDepth: null, canRead: true, canWrite: false },
@@ -276,7 +285,7 @@ function fixtureAdapter(): BackendAdapter {
     probe: { versionCommand: ["/usr/bin/true"], helpCommand: ["/usr/bin/true"], requiredHelpFragments: [], timeoutMs: 1_000, maxOutputBytes: 1_024 },
     stdinPrompt: false,
     credentialPrefixes: ["COST_TEST_KEY"],
-    buildCommand: (options) => ["cost-runner", options.model?.replace(`${PROVIDER_ID}/`, "") ?? "", options.prompt],
-    parse: parseOpenCodeJsonl,
+    prepareCommand: (options) => ["cost-runner", options.model?.replace(`${PROVIDER_ID}/`, "") ?? "", options.prompt],
+    decodeOutput: parseOpenCodeJsonl,
   };
 }

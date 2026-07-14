@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { BackendAdapter } from "../src/backends/registry";
-import { registerAdapter, unregisterAdapter } from "../src/backends/registry";
+import type { BackendDefinition } from "../src/backends/registry";
+import { registerBackendDefinition, unregisterBackendDefinition } from "../src/backends/registry";
 import type { JsonParseResult } from "../src/backends/json";
 import { normalizeAdapterResult } from "../src/backends/result-normalization";
 import { executeBoundedProbe } from "../src/backends/probe";
@@ -31,7 +31,7 @@ const daemons: HeadlessDaemon[] = [];
 afterEach(async () => {
   for (const daemon of daemons.splice(0)) await daemon.stop().catch(() => {});
   clearRuntimeDiagnostics();
-  while (adapters.length) unregisterAdapter(adapters.pop()!);
+  while (adapters.length) unregisterBackendDefinition(adapters.pop()!);
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -75,7 +75,7 @@ describe("runtime fault classification", () => {
   test("isolates a throwing stdout callback and increments returned diagnostics", async () => {
     const root = fixture("headless-callback-audit-");
     const adapter = fixtureAdapter("callback-diagnostic-fixture", () => ["/usr/bin/printf", "callback-output"]);
-    registerAdapter(adapter);
+    registerBackendDefinition(adapter);
     adapters.push(adapter.id);
 
     const result = await runHeadless({
@@ -156,7 +156,7 @@ describe("runtime fault classification", () => {
     const runtime = `/tmp/hre-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
     roots.push(runtime);
     const adapter = fixtureAdapter("run-execution-cleanup-fixture", () => ["/usr/bin/printf", "run-complete"]);
-    registerAdapter(adapter);
+    registerBackendDefinition(adapter);
     adapters.push(adapter.id);
 
     const state = {
@@ -199,7 +199,7 @@ function fixture(prefix: string) {
   return path;
 }
 
-function fixtureAdapter(id: string, buildCommand: () => string[]): BackendAdapter {
+function fixtureAdapter(id: string, prepareCommand: () => string[]): BackendDefinition {
   return {
     id,
     metadata: { id, aliases: [], promptDelivery: "native", timeoutMs: 1_000, maxDepth: null, canRead: true, canWrite: false },
@@ -208,8 +208,8 @@ function fixtureAdapter(id: string, buildCommand: () => string[]): BackendAdapte
     probe: { versionCommand: ["true"], helpCommand: ["true"], requiredHelpFragments: [], timeoutMs: 1_000, maxOutputBytes: 1_024 },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand,
-    parse: (stdout) => ({ output: stdout, cost: null, tokens: null, error: null }),
+    prepareCommand,
+    decodeOutput: (stdout) => ({ output: stdout, cost: null, tokens: null, error: null }),
   };
 }
 

@@ -15,10 +15,10 @@ afterEach(() => {
 });
 
 describe("native-login control plane", () => {
-  test("defaults runs to native login with optional model and explicit approval policy", () => {
+  test("defaults runs to broker mode with optional model and explicit approval policy", () => {
     const request = RunRequestSchema.parse({ backend: "codex", prompt: "inspect", projectRoot: process.cwd() });
     expect(request).toMatchObject({
-      authMode: "native-login",
+      authMode: "broker",
       approvalPolicy: "ask",
     });
     expect(request.model).toBeUndefined();
@@ -57,13 +57,30 @@ describe("native-login control plane", () => {
     expect(store.status()).toMatchObject({ trusted: false, nativeLoginAllowed: false, bypassAllowed: false });
     expect(existsSync(paths.projectTrustPath)).toBe(false);
 
-    const granted = store.grant({ principal: "coordinator", nativeLoginAllowed: true, bypassAllowed: true });
-    expect(granted).toMatchObject({ trusted: true, trustedBy: "coordinator", nativeLoginAllowed: true, bypassAllowed: true });
+    expect(() => store.grant({ principal: "coordinator", nativeLoginAllowed: true })).toThrow("explicit acknowledgement");
+    const granted = store.grant({
+      principal: "coordinator",
+      nativeLoginAllowed: true,
+      nativeDirectUnrestrictedAcknowledged: true,
+      bypassAllowed: true,
+    });
+    expect(granted).toMatchObject({
+      trusted: true,
+      trustedBy: "coordinator",
+      nativeLoginAllowed: true,
+      nativeDirectUnrestrictedAcknowledged: true,
+      bypassAllowed: true,
+    });
     expect(statSync(paths.projectTrustPath).mode & 0o777).toBe(0o600);
     expect(store.assertNativeLoginAllowed("bypass")).toMatchObject({ trusted: true });
 
-    expect(store.revoke()).toMatchObject({ trusted: false, nativeLoginAllowed: false, bypassAllowed: false });
-    expect(() => store.assertNativeLoginAllowed("ask")).toThrow("one-time project trust");
+    expect(store.revoke()).toMatchObject({
+      trusted: false,
+      nativeLoginAllowed: false,
+      nativeDirectUnrestrictedAcknowledged: false,
+      bypassAllowed: false,
+    });
+    expect(() => store.assertNativeLoginAllowed("ask")).toThrow("explicit acknowledgement");
   });
 
   test("keeps route schema, scope, and handler metadata exhaustive and rejects client roots", () => {
@@ -79,10 +96,10 @@ describe("native-login control plane", () => {
       prompt: "inspect",
       projectRoot: "/tmp/client-controlled",
     })).toThrow();
-    expect(parseDaemonRouteParams("run.submit", { backend: "codex", prompt: "inspect" })).toMatchObject({
-      authMode: "native-login",
-      approvalPolicy: "ask",
-    });
+    const submitted = parseDaemonRouteParams("run.submit", { backend: "codex", prompt: "inspect" });
+    expect(submitted).toMatchObject({ backend: "codex", prompt: "inspect" });
+    expect(submitted.authMode).toBeUndefined();
+    expect(submitted.approvalPolicy).toBeUndefined();
   });
 });
 

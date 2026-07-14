@@ -43,4 +43,12 @@ describe("strict bounded goal plans", () => {
     }
   });
 
+  test("accepts one valid envelope when a provider replays the same planner header", () => {
+    const envelope = `${GOAL_PLAN_HEADER}\n${JSON.stringify({ delegations: [{ id: "build", task: "Build the game.", capabilities: [] }] })}`;
+    expect(parseGoalPlan(`${envelope}\n${envelope}`, "fallback")).toMatchObject({
+      source: "planner",
+      delegations: [{ id: "build", task: "Build the game.", capabilities: [] }],
+    });
+  });
+
 });

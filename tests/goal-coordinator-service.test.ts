@@ -19,7 +19,7 @@ afterEach(() => {
 describe("adaptive durable goal coordinator", () => {
   test("selects a leader, delivers actual output to a reviewer, revises, gates, and persists", async () => {
     const fixture = createFixture();
-    const prompts: Array<{ agent: string; role: string; prompt: string }> = [];
+    const prompts: Array<{ agent: string; role: string; prompt: string; timeoutMs: number }> = [];
     let job = 0;
     let id = 0;
     const service = new GoalCoordinatorService({
@@ -28,8 +28,8 @@ describe("adaptive durable goal coordinator", () => {
       id: () => `id-${++id}`,
       availability: () => healthy(),
       cancelJob: () => {},
-      executeTurn: ({ agent, role, prompt }) => {
-        prompts.push({ agent: agent.id, role, prompt });
+      executeTurn: ({ agent, role, prompt, timeoutMs }) => {
+        prompts.push({ agent: agent.id, role, prompt, timeoutMs });
         const jobId = `job-${++job}`;
         const candidateId = /Your second line must be exactly "EVIDENCE: ([^"]+)"\./.exec(prompt)?.[1];
         const output = role === "planning"
@@ -60,6 +60,7 @@ describe("adaptive durable goal coordinator", () => {
     expect(record.goal.state).toBe("succeeded");
     expect(record.turns.map((turn) => turn.agentId)).toEqual(["leader", "reviewer", "leader", "reviewer", "leader", "reviewer"]);
     expect(prompts.map((entry) => entry.role)).toEqual(["planning", "worker", "candidate", "review", "revision", "review"]);
+    expect(prompts.map((entry) => entry.timeoutMs)).toEqual([180_000, 180_000, 900_000, 180_000, 900_000, 180_000]);
     expect(record.turns.map((turn) => turn.artifactIds)).toEqual([
       ["job-1", "evidence-1"],
       ["job-2", "evidence-2"],
@@ -146,6 +147,125 @@ describe("adaptive durable goal coordinator", () => {
       ["job-3", "evidence-3"],
       ["job-5", "evidence-5"],
     ]);
+  });
+
+  test("fails read-only planning over to a distinct backend without changing the sticky write leader", async () => {
+    const fixture = createFixture({
+      maxAttemptsPerDelegation: 2,
+      agents: [
+        { id: "leader", backend: "codex", name: "Leader", priority: 10 },
+        { id: "planner", backend: "opencode", name: "Planner", priority: 5 },
+      ],
+    });
+    const calls: Array<{ agent: string; role: string }> = [];
+    let job = 0;
+    const service = new GoalCoordinatorService({
+      ...fixture,
+      now: () => 1_000,
+      availability: () => healthy(),
+      cancelJob: () => {},
+      executeTurn: ({ agent, role, prompt }) => {
+        calls.push({ agent: agent.id, role });
+        const jobId = `planning-failover-${++job}`;
+        const candidateId = /Your second line must be exactly "EVIDENCE: ([^"]+)"\./.exec(prompt)?.[1];
+        const output = role === "planning"
+          ? agent.id === "leader" ? "provider disconnected" : plan([{ id: "inspect", task: "Inspect the fixture." }])
+          : role === "worker" ? "The dependency-only fixture needs a complete app implementation."
+            : role === "candidate" ? "verified candidate"
+              : `VERDICT: APPROVE\nEVIDENCE: ${candidateId}\nThe candidate is grounded in the worker evidence and ready.`;
+        const status = role === "planning" && agent.id === "leader" ? "failed" : "succeeded";
+        return { jobId, sessionId: `session-${job}`, completion: Promise.resolve(result(output, status, jobId)) };
+      },
+    });
+
+    const started = service.start({
+      principal: "owner",
+      objective: "Recover planning without replacing the leader.",
+      synthesizer: { kind: "agent", agentId: "leader" },
+      mode: "write",
+    });
+    await service.wait(started.goal.id);
+
+    const record = service.status(started.goal.id, "owner");
+    expect(record.goal.synthesizerAgentId).toBe("leader");
+    expect(calls.filter((call) => call.role === "planning")).toEqual([
+      { agent: "leader", role: "planning" },
+      { agent: "leader", role: "planning" },
+      { agent: "planner", role: "planning" },
+    ]);
+    expect(record.turns.some((turn) => turn.agentId === "planner" && turn.state === "succeeded")).toBe(true);
+  });
+
+  test("recovers candidate execution on a write-ready backend without changing the sticky leader or allowing self-review", async () => {
+    const fixture = createFixture({
+      maxAttemptsPerDelegation: 2,
+      agents: [
+        { id: "leader", backend: "codex", name: "Leader", priority: 10 },
+        { id: "recovery", backend: "opencode", name: "Recovery", priority: 5 },
+        { id: "reviewer", backend: "grok-build", name: "Reviewer", priority: 1 },
+      ],
+    });
+    const calls: Array<{ agent: string; role: string }> = [];
+    let job = 0;
+    const service = new GoalCoordinatorService({
+      ...fixture,
+      now: () => 1_000,
+      availability: () => healthy(),
+      cancelJob: () => {},
+      integrateCandidate: async ({ candidateId }) => ({
+        merged: true,
+        resultingCommit: "b".repeat(40),
+        summary: "Recovered candidate integrated.",
+        artifactIds: [candidateId],
+      }),
+      executeTurn: ({ agent, role, prompt }) => {
+        calls.push({ agent: agent.id, role });
+        const jobId = `candidate-failover-${++job}`;
+        const candidateId = /Your second line must be exactly "EVIDENCE: ([^"]+)"\./.exec(prompt)?.[1];
+        if (role === "planning") {
+          return { jobId, sessionId: `session-${job}`, completion: Promise.resolve(result(plan([{ id: "inspect", task: "Inspect the fixture." }]), "succeeded", jobId)) };
+        }
+        if (role === "candidate" && agent.id === "leader") {
+          return {
+            jobId,
+            sessionId: `session-${job}`,
+            completion: Promise.resolve({
+              ...result("provider disconnected", "failed", jobId),
+              error: { code: "PROCESS_ERROR" as const, message: "provider disconnected", retryable: true },
+            }),
+          };
+        }
+        const output = role === "worker"
+          ? "Grounded fixture findings."
+          : role === "candidate"
+            ? "Recovered tested candidate."
+            : `VERDICT: APPROVE\nEVIDENCE: ${candidateId}\nIndependent candidate review passed.`;
+        return { jobId, sessionId: `session-${job}`, completion: Promise.resolve(result(output, "succeeded", jobId)) };
+      },
+    });
+
+    const started = service.start({
+      principal: "owner",
+      objective: "Recover candidate execution without transferring leadership.",
+      synthesizer: { kind: "agent", agentId: "leader" },
+      mode: "write",
+    });
+    await service.wait(started.goal.id);
+
+    const record = service.status(started.goal.id, "owner");
+    expect(record.goal.state).toBe("succeeded");
+    expect(record.goal.synthesizerAgentId).toBe("leader");
+    expect(calls.filter((call) => call.role === "candidate")).toEqual([
+      { agent: "leader", role: "candidate" },
+      { agent: "leader", role: "candidate" },
+      { agent: "recovery", role: "candidate" },
+    ]);
+    expect(calls.filter((call) => call.role === "review")).toEqual([{ agent: "reviewer", role: "review" }]);
+    expect(record.result?.artifactIds).toContain(record.candidateDecisions[0]?.candidateId ?? "");
+    expect(fixture.mailbox.snapshot().messages).toContainEqual(expect.objectContaining({
+      kind: "lifecycle",
+      content: expect.stringContaining("Candidate execution recovered on recovery (opencode); leader remains the sticky goal leader"),
+    }));
   });
 
   test("blocks prompt echoes instead of treating them as attributable review consensus", async () => {
@@ -246,6 +366,8 @@ describe("adaptive durable goal coordinator", () => {
     expect(record.goal.state).toBe("succeeded");
     expect(reviewerPrompt.length).toBeLessThanOrEqual(32_768);
     expect(Buffer.byteLength(reviewerPrompt)).toBeLessThanOrEqual(65_536);
+    expect(reviewerPrompt).toContain("read-only workspace therefore remains unchanged by design");
+    expect(reviewerPrompt).toContain("missing raw terminal logs alone is not a reason to reject");
     expect(reviewerPrompt).toContain("PATCH-START");
     expect(reviewerPrompt).toContain("[REDACTED_OPENAI_KEY]");
     expect(reviewerPrompt).not.toContain("sk-abcdefghijklmnop");
@@ -267,7 +389,7 @@ describe("adaptive durable goal coordinator", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(() => service.status(started.record.goal.id, "intruder")).toThrow("another authenticated principal");
-    expect(service.transferLeader(started.record.goal.id, "reviewer", "admin").leaderAgentId).toBe("reviewer");
+    expect(service.transferSynthesizer(started.record.goal.id, "reviewer", "admin").synthesizerAgentId).toBe("reviewer");
     expect(service.cancel(started.record.goal.id, "owner").state).toBe("cancelled");
     expect(cancelled).toEqual(["job-active"]);
     resolveTurn(result("late", "cancelled"));
@@ -287,27 +409,51 @@ describe("adaptive durable goal coordinator", () => {
     expect(fixture.goals.list()).toEqual([]);
   });
 
+  test("excludes the foreground lead backend from automatic synthesis but permits an explicit same-provider worker", () => {
+    const fixture = createFixture({ agents: [
+      { id: "foreground-provider-worker", backend: "codex", name: "Codex worker", priority: 20 },
+      { id: "automatic-worker", backend: "opencode", name: "OpenCode worker", priority: 10 },
+    ] });
+    const completion = new Promise<never>(() => {});
+    const service = new GoalCoordinatorService({
+      ...fixture,
+      activeLeadBackend: () => "codex",
+      availability: () => healthy(),
+      cancelJob: () => {},
+      executeTurn: () => ({ jobId: "routing", sessionId: "routing", completion }),
+    });
+
+    expect(service.start({ principal: "owner", objective: "Route automatically." }).goal.synthesizerAgentId).toBe("automatic-worker");
+    expect(service.start({
+      principal: "owner",
+      objective: "Use an explicit separate worker.",
+      synthesizer: { kind: "agent", agentId: "foreground-provider-worker" },
+    }).goal.synthesizerAgentId).toBe("foreground-provider-worker");
+    service.dispose();
+  });
+
   test("defaults goal security controls from its fleet and persists explicit per-goal overrides", () => {
     const fixture = createFixture();
+    const completion = new Promise<never>(() => {});
     const service = new GoalCoordinatorService({
       ...fixture,
       now: () => 1_000,
       availability: () => healthy(),
       cancelJob: () => {},
-      executeTurn: () => { throw new Error("A human-coordinated goal must not start a worker turn."); },
+      executeTurn: () => ({ jobId: "job-security", sessionId: "session-security", completion }),
     });
 
     const defaults = service.start({
       principal: "owner",
       objective: "Use fleet defaults.",
-      coordinator: { kind: "human" },
+      synthesizer: { kind: "automatic" },
     });
-    expect(defaults.goal).toMatchObject({ authMode: "native-login", approvalPolicy: "ask" });
+    expect(defaults.goal).toMatchObject({ authMode: "broker", approvalPolicy: "ask" });
 
     const overridden = service.start({
       principal: "owner",
       objective: "Use explicit controls.",
-      coordinator: { kind: "human" },
+      synthesizer: { kind: "automatic" },
       authMode: "broker",
       approvalPolicy: "bypass",
     });
@@ -316,6 +462,7 @@ describe("adaptive durable goal coordinator", () => {
       authMode: "broker",
       approvalPolicy: "bypass",
     });
+    service.dispose();
   });
 
   test("turns provider retry-after evidence into bounded durable delegation attempts", async () => {
@@ -653,7 +800,7 @@ describe("adaptive durable goal coordinator", () => {
     const started = service.start({ principal: "owner", objective: "Survive leader health loss." });
     await service.wait(started.goal.id);
     const record = service.status(started.goal.id, "owner");
-    expect(record.goal).toMatchObject({ state: "succeeded", leaderAgentId: "backup" });
+    expect(record.goal).toMatchObject({ state: "succeeded", synthesizerAgentId: "backup" });
     expect(roles[0]).toEqual({ agentId: "leader", role: "planning" });
     expect(roles.find((entry) => entry.role === "candidate")).toEqual({ agentId: "backup", role: "candidate" });
     expect(record.transitions.some((transition) => transition.reason?.includes("Health-based failover"))).toBe(true);
@@ -661,6 +808,75 @@ describe("adaptive durable goal coordinator", () => {
       recipientId: "backup",
       kind: "lifecycle",
       content: expect.stringContaining("Sticky leadership transferred"),
+    }));
+  });
+
+  test("reassigns a prematurely inferred worker delegation to a distinct healthy backend and preserves failure evidence", async () => {
+    const fixture = createFixture({
+      maxAttemptsPerDelegation: 1,
+      agents: [
+        { id: "leader", backend: "codex", name: "Leader", priority: 10 },
+        { id: "worker-a", backend: "claude-code", name: "Worker A", priority: 5 },
+        { id: "worker-b", backend: "opencode", name: "Worker B", priority: 4 },
+      ],
+    });
+    const workerCalls: string[] = [];
+    let job = 0;
+    const service = new GoalCoordinatorService({
+      ...fixture,
+      now: () => 1_000,
+      availability: () => healthy(),
+      cancelJob: () => {},
+      executeTurn: ({ agent, role, prompt }) => {
+        const jobId = `worker-failover-job-${++job}`;
+        if (role === "planning") {
+          return { jobId, sessionId: "plan-session", completion: Promise.resolve(result(plan([{ id: "build", task: "Build one verified unit." }]), "succeeded", jobId)) };
+        }
+        if (role === "worker") {
+          workerCalls.push(agent.id);
+          const completion = agent.id === "worker-a"
+            ? {
+                ...result("I'll inspect the fixture before reporting concrete evidence.", "succeeded", jobId),
+                diagnostics: {
+                  format: "native-session:opencode-session",
+                  malformedEvents: 0,
+                  ignoredEvents: 0,
+                  messages: ["Completion was inferred from stable backend lifecycle evidence."],
+                },
+              }
+            : result(`Recovered worker evidence with concrete file findings and verification. ${"bounded evidence ".repeat(40)}`, "timed_out", jobId);
+          return { jobId, sessionId: `${agent.id}-session`, completion: Promise.resolve(completion) };
+        }
+        if (role === "candidate") {
+          return { jobId, sessionId: "candidate-session", completion: Promise.resolve(result("candidate from recovered evidence", "succeeded", jobId)) };
+        }
+        const candidateId = /Your second line must be exactly "EVIDENCE: ([^"]+)"\./.exec(prompt)?.[1];
+        return {
+          jobId,
+          sessionId: `${agent.id}-review-session`,
+          completion: Promise.resolve(result(`VERDICT: APPROVE\nEVIDENCE: ${candidateId}\nRecovered evidence is concrete and completes the planned task.`, "succeeded", jobId)),
+        };
+      },
+    });
+
+    const started = service.start({ principal: "owner", objective: "Survive one worker provider failure." });
+    await service.wait(started.goal.id);
+    const record = service.status(started.goal.id, "owner");
+    expect(record.goal.state).toBe("succeeded");
+    expect(workerCalls).toEqual(["worker-a", "worker-b"]);
+    expect(record.turns).toContainEqual(expect.objectContaining({
+      agentId: "worker-a",
+      state: "failed",
+      output: expect.stringContaining("planning preamble without concrete findings"),
+    }));
+    expect(record.turns).toContainEqual(expect.objectContaining({
+      agentId: "worker-b",
+      state: "succeeded",
+      output: expect.stringContaining("preserving the bounded report for synthesis"),
+    }));
+    expect(fixture.mailbox.snapshot().messages).toContainEqual(expect.objectContaining({
+      kind: "lifecycle",
+      content: expect.stringContaining("recovered on worker-b (opencode)"),
     }));
   });
 
@@ -713,6 +929,7 @@ describe("adaptive durable goal coordinator", () => {
 
 function createFixture(options: {
   maxActiveWorkers?: number;
+  maxAttemptsPerDelegation?: number;
   agents?: Array<{ id: string; backend: string; name: string; priority?: number }>;
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "headless-goal-service-"));
@@ -727,8 +944,8 @@ function createFixture(options: {
   const fleets = new FleetProfileStore(paths, { now: () => 900, id: () => "fleet-main" });
   fleets.create({
     name: "Main",
-    coordinator: { kind: "automatic" },
     maxActiveWorkers: options.maxActiveWorkers,
+    maxAttemptsPerDelegation: options.maxAttemptsPerDelegation,
     agents: options.agents ?? [
       { id: "leader", backend: "codex", name: "Leader", priority: 10 },
       { id: "reviewer", backend: "claude-code", name: "Reviewer" },
@@ -774,7 +991,7 @@ function result(
       probe: "fake",
       isolatedHome: true,
       credentialsIsolated: true,
-      network: "provider-direct",
+      network: "native-direct-unrestricted",
       credentialAccess: "backend-native",
       unsafe: false,
     },

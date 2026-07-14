@@ -8,7 +8,7 @@ import { HeadlessDaemon } from "../src/daemon/server";
 import {
   __handleCallToolForTest,
   mcpToolDefinitions,
-  sendChannelPush,
+  mcpToolsForScopes,
   server,
   startMcpServer,
 } from "../src/mcp/server";
@@ -30,8 +30,6 @@ const MCP_EXPECTED_TOOLS = [
   "headless_task_state",
   "headless_propose_final",
   "headless_ask_for_work",
-  "ask_for_more_work",
-  "ask_for_work",
   "ask_for_backup",
   "headless_record_task_claim",
   "headless_record_consensus_vote",
@@ -59,6 +57,18 @@ describe("MCP server surface", () => {
     const plugin = await openCodePluginServer({} as never);
     expect(names).toEqual(Object.keys(plugin.tool ?? {}).sort());
   });
+
+  test("advertises only tools and actions available to the authenticated scope set", () => {
+    const runOnly = mcpToolsForScopes(["run"]);
+    expect(runOnly.map((tool) => tool.name)).toContain("headless_run");
+    expect(runOnly.map((tool) => tool.name)).not.toContain("headless_append_note");
+    const schemas = Object.fromEntries(mcpToolDefinitions.map((tool) => [tool.name, JSON.stringify(tool.inputSchema)]));
+    expect(schemas.headless_project_trust).toContain("status");
+    expect(schemas.headless_project_trust).not.toContain("grant");
+    expect(schemas.headless_approval).not.toContain("resolve");
+    expect(schemas.headless_candidate).not.toContain("integrate");
+    expect(schemas.headless_collaboration).not.toContain("transferSynthesizer");
+  });
 });
 
 describe("MCP authenticated daemon integration", () => {
@@ -79,11 +89,11 @@ describe("MCP authenticated daemon integration", () => {
 
   test("uses a scoped MCP principal and ignores client identity claims", async () => {
     const response = await callTool("send_message", {
-      from: "coordinator",
+      from: "spoofed-lead",
       to: "reviewer",
       content: "identity-bound message",
-      source: "coordinator",
-      actor: "coordinator",
+      source: "spoofed-lead",
+      actor: "spoofed-lead",
       sessionId: "mcp-attribution",
     });
 
@@ -91,10 +101,10 @@ describe("MCP authenticated daemon integration", () => {
 
     const integration = await connectOrStartDaemon({
       projectRoot: fixture.project,
-      credential: { integration: "mcp" },
+      credential: { integration: "lead-codex-g1" },
     });
     const ping = await integration.call<{ principal: string }>("ping");
-    expect(ping.principal).toBe("integration:mcp");
+    expect(ping.principal).toBe("integration:lead-codex-g1");
     await expect(integration.call("auth.list")).rejects.toMatchObject({ code: "POLICY_DENIED" });
     await expect(integration.call("ledger.event", {
       type: "finality_decision",
@@ -109,18 +119,23 @@ describe("MCP authenticated daemon integration", () => {
     });
     const message = context.entries.find((entry) => entry.content === "identity-bound message");
 
-    expect(message?.source).toBe("integration:mcp");
-    expect(message?.message?.from).toBe("integration:mcp");
+    expect(message?.source).toBe("integration:lead-codex-g1");
+    expect(message?.message?.from).toBe("integration:lead-codex-g1");
     expect(message?.source).not.toBe("coordinator");
   });
 
-  test("persists a redacted channel message and drains it through get_messages", async () => {
+  test("persists a redacted durable message and drains it without a host-channel fallback", async () => {
     const chatId = "mcp-redaction";
     const secret = "sk-1234567890abcdefghijkl";
 
-    await sendChannelPush(`channel secret ${secret}`, "spoofed-coordinator", {
-      sessionId: chatId,
-      actor: "coordinator",
+    await callTool("headless_append_note", { text: "attach lead", sessionId: chatId });
+    const integration = await connectOrStartDaemon({
+      projectRoot: fixture.project,
+      credential: { integration: "lead-codex-g1" },
+    });
+    await integration.call("messages.push", {
+      chatId,
+      content: `durable message ${secret}`,
     });
 
     const pulled = await callTool("get_messages", { sessionId: chatId, limit: 10 });
@@ -137,9 +152,9 @@ describe("MCP authenticated daemon integration", () => {
       limit: 50,
       sessionId: chatId,
     });
-    const queued = context.entries.find((entry) => entry.type === "message" && entry.content?.includes("channel secret"));
-    expect(queued?.source).toBe("integration:mcp");
-    expect(queued?.message?.from).toBe("integration:mcp");
+    const queued = context.entries.find((entry) => entry.type === "message" && entry.content?.includes("durable message"));
+    expect(queued?.source).toBe("integration:lead-codex-g1");
+    expect(queued?.message?.from).toBe("integration:lead-codex-g1");
     expect(JSON.stringify(queued)).not.toContain(secret);
   });
 
@@ -168,7 +183,7 @@ describe("MCP authenticated daemon integration", () => {
 
     const context = JSON.parse(read.content[0]?.text ?? "{}") as RawContext;
     const persisted = context.entries.find((entry) => entry.content === "daemon-owned MCP note");
-    expect(persisted?.source).toBe("integration:mcp");
+    expect(persisted?.source).toBe("integration:lead-codex-g1");
     expect(context.entries.some((entry) => entry.artifact?.title === "MCP boundary")).toBe(true);
   });
 });
@@ -195,7 +210,7 @@ type DaemonFixture = {
   project: string;
   daemon: HeadlessDaemon;
   rootClient: HeadlessDaemonClient;
-  previousEnv: Record<"HEADLESS_PROJECT_ROOT" | "HEADLESS_STATE_HOME" | "HEADLESS_RUNTIME_HOME", string | undefined>;
+  previousEnv: Record<"HEADLESS_PROJECT_ROOT" | "HEADLESS_STATE_HOME" | "HEADLESS_RUNTIME_HOME" | "HEADLESS_LEAD_HOST", string | undefined>;
 };
 
 async function startDaemonFixture(): Promise<DaemonFixture> {
@@ -207,19 +222,23 @@ async function startDaemonFixture(): Promise<DaemonFixture> {
     HEADLESS_PROJECT_ROOT: process.env.HEADLESS_PROJECT_ROOT,
     HEADLESS_STATE_HOME: process.env.HEADLESS_STATE_HOME,
     HEADLESS_RUNTIME_HOME: process.env.HEADLESS_RUNTIME_HOME,
+    HEADLESS_LEAD_HOST: process.env.HEADLESS_LEAD_HOST,
   };
   process.env.HEADLESS_PROJECT_ROOT = project;
   process.env.HEADLESS_STATE_HOME = join(root, "state");
   process.env.HEADLESS_RUNTIME_HOME = runtime;
+  process.env.HEADLESS_LEAD_HOST = "codex";
 
-  const daemon = new HeadlessDaemon({ projectRoot: project, principal: "coordinator" });
+  const daemon = new HeadlessDaemon({ projectRoot: project, principal: "owner" });
   await daemon.start();
+  const rootClient = new HeadlessDaemonClient({ projectRoot: project });
+  await rootClient.call("lead.use", { host: "codex" });
   return {
     root,
     runtime,
     project,
     daemon,
-    rootClient: new HeadlessDaemonClient({ projectRoot: project }),
+    rootClient,
     previousEnv,
   };
 }

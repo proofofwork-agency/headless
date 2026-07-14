@@ -275,8 +275,8 @@ function createFixture(options: { maxActive: number; maxQueued: number }) {
     objective: `Execute ${name}.`,
     authMode: "native-login",
     approvalPolicy: "ask",
-    coordinator: { kind: "automatic" },
-    leaderAgentId: "leader",
+    synthesizer: { kind: "automatic" },
+    synthesizerAgentId: "leader",
     autonomous: false,
     deadlineAt,
   }).goal;

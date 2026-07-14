@@ -27,6 +27,11 @@ describe("dated model pricing", () => {
     add("new", { effectiveFrom: 2_000 });
     expect(resolvePricing("test-provider", "test-model", 1_999)?.id).toBe("old");
     expect(resolvePricing("test-provider", "test-model", 2_000)?.id).toBe("new");
+    expect(resolvePricing("test-provider", "test-model", 2_000)).toMatchObject({
+      id: "new",
+      source: "operator-supplied",
+      effectiveFrom: 2_000,
+    });
   });
 
   test("prices cached input separately without double-counting token totals", () => {

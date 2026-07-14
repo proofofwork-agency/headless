@@ -502,7 +502,6 @@ function setup(options: {
     name: "Idle fleet",
     authMode: "native-login",
     approvalPolicy: options.fleetApprovalPolicy ?? options.approvalPolicy ?? "auto",
-    coordinator: { kind: "agent", agentId: "leader" },
     agents: [
       agent("leader", options.fleetApprovalPolicy ?? options.approvalPolicy ?? "auto"),
       agent("idle-agent", options.fleetApprovalPolicy ?? options.approvalPolicy ?? "auto"),
@@ -523,8 +522,8 @@ function setup(options: {
     objective: "Complete the active autonomous goal.",
     authMode: options.goalAuthMode ?? "native-login",
     approvalPolicy: options.goalApprovalPolicy ?? options.approvalPolicy ?? "auto",
-    coordinator: { kind: "agent", agentId: "leader" },
-    leaderAgentId: "leader",
+    synthesizer: { kind: "agent", agentId: "leader" },
+    synthesizerAgentId: "leader",
     autonomous: options.autonomous,
     deadlineAt: options.deadlineAt ?? 1_000_000,
   });

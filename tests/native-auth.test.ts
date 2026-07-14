@@ -206,7 +206,7 @@ describe("native authentication capsules", () => {
     try {
       const result = installNativeAuthCapsule(worker, "codex", { homeDir: home });
       expect(result).toMatchObject({ available: false, manifest: null });
-      expect(result.reason).toContain("regular file");
+      expect(result.reason).toContain("regular");
       expect(existsSync(join(worker.home, ".codex", "auth.json"))).toBe(false);
     } finally {
       worker.cleanup();

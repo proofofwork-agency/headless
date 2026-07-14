@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
-import { backendAdapters } from "../src/backends/registry";
+import { delimiter, join, relative } from "node:path";
+import { backendDefinitions } from "../src/backends/registry";
 import { maybeWrapWithSandbox, runHeadless } from "../src/runner/simple";
-import { grokProjectControlPaths, installGrokIsolation } from "../src/runtime/grok-isolation";
+import { grokProjectControlPaths, installGrokIsolation, managedGrokExecutable } from "../src/runtime/grok-isolation";
 import { createWorkerEnvironment } from "../src/runtime/worker-environment";
 
 const roots: string[] = [];
@@ -43,11 +43,19 @@ describe("Grok isolated startup", () => {
         GROK_CURSOR_AGENTS_ENABLED: "0",
         GROK_CURSOR_MCPS_ENABLED: "0",
         GROK_CURSOR_HOOKS_ENABLED: "0",
+        GROK_CURSOR_SESSIONS_ENABLED: "0",
         GROK_CLAUDE_SKILLS_ENABLED: "0",
         GROK_CLAUDE_RULES_ENABLED: "0",
         GROK_CLAUDE_AGENTS_ENABLED: "0",
         GROK_CLAUDE_MCPS_ENABLED: "0",
         GROK_CLAUDE_HOOKS_ENABLED: "0",
+        GROK_CLAUDE_SESSIONS_ENABLED: "0",
+        GROK_CODEX_SKILLS_ENABLED: "0",
+        GROK_CODEX_RULES_ENABLED: "0",
+        GROK_CODEX_AGENTS_ENABLED: "0",
+        GROK_CODEX_MCPS_ENABLED: "0",
+        GROK_CODEX_HOOKS_ENABLED: "0",
+        GROK_CODEX_SESSIONS_ENABLED: "0",
       });
       expect(statSync(installed.configPath).mode & 0o777).toBe(0o600);
       const config = readFileSync(installed.configPath, "utf8");
@@ -55,6 +63,28 @@ describe("Grok isolated startup", () => {
       expect(config).toContain("remote_fetch = false");
       expect(config).toContain("[compat.cursor]");
       expect(config).toContain("[compat.claude]");
+      expect(config).toContain("[compat.codex]");
+    } finally {
+      worker.cleanup();
+    }
+  });
+
+  test("recovers the managed Grok binary when a daemon inherited PATH before installation", () => {
+    const root = fixture("headless-grok-managed-path-");
+    const home = join(root, "home");
+    const downloads = join(home, ".grok", "downloads");
+    const bin = join(home, ".grok", "bin");
+    mkdirSync(downloads, { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    const target = join(downloads, "grok-test");
+    writeFileSync(target, "#!/bin/sh\n", { mode: 0o700 });
+    symlinkSync("../downloads/grok-test", join(bin, "grok"));
+    const worker = createWorkerEnvironment({ baseDir: root, sourceEnv: { PATH: "/usr/bin" } });
+    try {
+      const installed = installGrokIsolation(worker, { homeDir: home });
+      expect(installed.executable).toBe(join(home, ".grok", "bin", "grok"));
+      expect(worker.env.PATH?.split(delimiter)[0]).toBe(bin);
+      expect(managedGrokExecutable(home)).toEqual({ command: join(bin, "grok"), bin });
     } finally {
       worker.cleanup();
     }
@@ -116,7 +146,7 @@ describe("Grok isolated startup", () => {
     const wrapped = maybeWrapWithSandbox(
       [grokBinary!, "inspect", "--json"],
       { backend: "grok-build", prompt: "inspect", cwd: project, containment: "required", authMode: "broker" },
-      backendAdapters["grok-build"],
+      backendDefinitions["grok-build"],
       project,
       undefined,
       worker,
@@ -146,7 +176,10 @@ describe("Grok isolated startup", () => {
       expect(inspected.lspServers).toEqual([]);
       expect(inspected.permissions).toMatchObject({ sources: [], loaded: 0 });
       expect(inspected.agents.every((agent) => agent.source.type !== "project")).toBe(true);
-      expect(inspected.externalCompat.cells.every((cell) => cell.enabled === false && cell.source === "env")).toBe(true);
+      expect(
+        inspected.externalCompat.cells.every((cell) => cell.enabled === false && cell.source === "env"),
+        JSON.stringify(inspected.externalCompat.cells),
+      ).toBe(true);
       expect(inspected.configSources.layers.filter((layer) => layer.role === "project").every((layer) => layer.note === "parse error")).toBe(true);
       for (const marker of markerPaths(root)) expect(existsSync(marker)).toBe(false);
     } finally {

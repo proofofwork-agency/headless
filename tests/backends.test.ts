@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { normalizeBackend, SUPPORTED_BACKENDS, backendChoices } from "../src/backends/ids";
-import { backendAdapters, buildBackendEnv } from "../src/backends/registry";
+import { backendDefinitions, buildBackendEnv } from "../src/backends/registry";
 import { buildGrokCommand, parseGrokJsonl } from "../src/backends/grok";
 import { GROK_HEADLESS_SYSTEM_PROMPT, GROK_READ_TOOLS, GROK_WRITE_TOOLS } from "../src/runtime/grok-isolation";
 import { parseClaudeStreamJson, parseCodexJson, parseGenericAgentJson, tokenCount } from "../src/backends/json";

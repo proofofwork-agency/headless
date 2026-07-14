@@ -28,7 +28,7 @@ describe("durable fleet profile store", () => {
     expect(first).toMatchObject({
       id: "fleet-1",
       projectId: paths.projectId,
-      authMode: "native-login",
+      authMode: "broker",
       approvalPolicy: "ask",
       maxActiveWorkers: 4,
       maxQueuedDelegations: 64,
@@ -36,14 +36,13 @@ describe("durable fleet profile store", () => {
       maxAttemptsPerDelegation: 2,
       goalTimeoutMs: 3_600_000,
     });
-    expect(first.agents[0]).toMatchObject({ authMode: "native-login", createdAt: 100 });
+    expect(first.agents[0]).toMatchObject({ authMode: "broker", createdAt: 100 });
     expect(first.agents[0]?.model).toBeUndefined();
     expect(store.getActive()?.id).toBe(first.id);
 
     now = 110;
     const second = store.create({
       name: "Review fleet",
-      coordinator: { kind: "agent", agentId: "claude" },
       agents: [{ id: "claude", backend: "claude", name: "Claude", priority: 10 }],
     });
     expect(store.setActive(second.id)?.id).toBe(second.id);
@@ -76,7 +75,7 @@ describe("durable goal store", () => {
       principal: "owner",
       fleetProfileId: "fleet-one",
       objective: "Continue a goal persisted before write goals existed.",
-      coordinator: { kind: "automatic" },
+      synthesizer: { kind: "automatic" },
       deadlineAt: 10_000,
     });
 
@@ -96,11 +95,11 @@ describe("durable goal store", () => {
       principal: "owner",
       fleetProfileId: "fleet-one",
       objective: "Implement the collaborative fleet.",
-      coordinator: { kind: "automatic" },
+      synthesizer: { kind: "automatic" },
       autonomous: true,
       deadlineAt: 10_000,
     });
-    expect(created.goal).toMatchObject({ id: "goal-one", projectId: paths.projectId, mode: "read-only", state: "queued", authMode: "native-login" });
+    expect(created.goal).toMatchObject({ id: "goal-one", projectId: paths.projectId, mode: "read-only", state: "queued", authMode: "broker" });
     now = 110;
     expect(store.transition("goal-one", "planning", "owner", "Plan work.").state).toBe("planning");
     now = 120;
@@ -147,7 +146,7 @@ describe("durable goal store", () => {
       principal: "owner",
       fleetProfileId: "fleet-one",
       objective: "Cancelable work.",
-      coordinator: { kind: "human" },
+      synthesizer: { kind: "automatic" },
       deadlineAt: 1_000,
     }).goal;
     store.transition(goal.id, "active", "owner");
@@ -165,7 +164,7 @@ describe("durable goal store", () => {
       principal: "owner",
       fleetProfileId: "fleet-one",
       objective: "Bound work.",
-      coordinator: { kind: "automatic" },
+      synthesizer: { kind: "automatic" },
       deadlineAt: 1_000,
     });
     expect(() => store.addReview("goal-one", { ...reviewEvidence(), collaborationId: "other-goal" })).toThrow("different goal");

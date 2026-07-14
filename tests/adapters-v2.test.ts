@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
-  getAdapter,
-  listAdapters,
-  registerAdapter,
-  unregisterAdapter,
-  type BackendAdapter,
+  getBackendDefinition,
+  listBackendDefinitions,
+  registerBackendDefinition,
+  unregisterBackendDefinition,
+  type BackendDefinition,
 } from "../src/backends/registry";
 import { parseGrokJsonl } from "../src/backends/grok";
 import {
@@ -16,6 +16,19 @@ import {
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
 
 describe("v0.2 adapter parser fixtures", () => {
+  test("parses current Grok text deltas without exposing thought deltas", () => {
+    const parsed = parseGrokJsonl([
+      JSON.stringify({ type: "thought", data: "private reasoning" }),
+      JSON.stringify({ type: "text", data: "GROK_" }),
+      JSON.stringify({ type: "text", data: "HEADLESS_OK" }),
+      JSON.stringify({ type: "end", stopReason: "EndTurn", sessionId: "session-1" }),
+    ].join("\n"));
+
+    expect(parsed.output).toBe("GROK_HEADLESS_OK");
+    expect(parsed.output).not.toContain("private reasoning");
+    expect(parsed.diagnostics.malformedEvents).toBe(0);
+  });
+
   test("preserves identical provider deltas when they have no stable event id", () => {
     const fixture = [
       JSON.stringify({ type: "response.output_text.delta", delta: "same" }),
@@ -102,7 +115,7 @@ describe("v0.2 adapter parser fixtures", () => {
 describe("v0.2 adapter registry", () => {
   test("publishes honest capability metadata for every built-in", () => {
     for (const id of ["opencode", "claude-code", "codex", "grok-build"]) {
-      const adapter = getAdapter(id);
+      const adapter = getBackendDefinition(id);
       expect(adapter).toBeDefined();
       expect(adapter?.capabilities.structuredOutput).toBe(true);
       expect(adapter?.capabilities.write).toBe(adapter?.metadata.canWrite);
@@ -113,25 +126,25 @@ describe("v0.2 adapter registry", () => {
     const first = fixtureAdapter("fixture-provider");
     const replacement = { ...first, stdinPrompt: true };
 
-    registerAdapter(first);
-    expect(getAdapter(first.id)).toBe(first);
-    expect(listAdapters().map((adapter) => adapter.id)).toContain(first.id);
-    expect(() => registerAdapter(first)).toThrow("already registered");
-    expect(registerAdapter(replacement, { replace: true })).toBe(replacement);
-    expect(getAdapter(first.id)).toBe(replacement);
-    expect(unregisterAdapter(first.id)).toBe(true);
-    expect(getAdapter(first.id)).toBeUndefined();
+    registerBackendDefinition(first);
+    expect(getBackendDefinition(first.id)).toBe(first);
+    expect(listBackendDefinitions().map((adapter) => adapter.id)).toContain(first.id);
+    expect(() => registerBackendDefinition(first)).toThrow("already registered");
+    expect(registerBackendDefinition(replacement, { replace: true })).toBe(replacement);
+    expect(getBackendDefinition(first.id)).toBe(replacement);
+    expect(unregisterBackendDefinition(first.id)).toBe(true);
+    expect(getBackendDefinition(first.id)).toBeUndefined();
   });
 
   test("does not allow extensions to replace or unregister built-ins", () => {
-    const opencode = getAdapter("opencode")!;
-    expect(() => registerAdapter(opencode, { replace: true })).toThrow("built-in");
-    expect(unregisterAdapter("opencode")).toBe(false);
-    expect(getAdapter("opencode")).toBe(opencode);
+    const opencode = getBackendDefinition("opencode")!;
+    expect(() => registerBackendDefinition(opencode, { replace: true })).toThrow("built-in");
+    expect(unregisterBackendDefinition("opencode")).toBe(false);
+    expect(getBackendDefinition("opencode")).toBe(opencode);
   });
 });
 
-function fixtureAdapter(id: string): BackendAdapter {
+function fixtureAdapter(id: string): BackendDefinition {
   return {
     id,
     metadata: {
@@ -170,7 +183,7 @@ function fixtureAdapter(id: string): BackendAdapter {
     },
     stdinPrompt: true,
     credentialPrefixes: [],
-    buildCommand: () => ["fixture"],
-    parse: (stdout) => ({ output: stdout, cost: null, tokens: null, error: null }),
+    prepareCommand: () => ["fixture"],
+    decodeOutput: (stdout) => ({ output: stdout, cost: null, tokens: null, error: null }),
   };
 }

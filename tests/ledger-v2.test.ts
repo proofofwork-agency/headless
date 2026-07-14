@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -9,6 +9,7 @@ import {
   importV1Ledger,
   LedgerV2,
   LedgerV2IntegrityError,
+  repairLedgerPartialTail,
 } from "../src/runtime/ledger-v2";
 import { getReadContext, getTaskState } from "../src/runtime/ledger-api";
 import { appendEvent, getOrCreateSession } from "../src/runtime/session";
@@ -29,6 +30,27 @@ function fixture(principal = "test-principal") {
     readModelPath: join(root, "read-model.json"),
     ledger: new LedgerV2({ ledgerPath: join(root, "ledger.jsonl"), readModelPath: join(root, "read-model.json"), projectId, principal }),
   };
+}
+
+function verifiedLedgerLines(projectId: string, count: number) {
+  let previousHash: string | null = null;
+  return Array.from({ length: count }, (_, index) => {
+    const withoutHash = {
+      version: 2 as const,
+      sequence: index + 1,
+      timestamp: Date.now(),
+      projectId,
+      principal: "test-principal",
+      eventId: crypto.randomUUID(),
+      previousHash,
+      integrity: { algorithm: "sha256" as const, keyId: null },
+      type: "entry",
+      payload: { index },
+    };
+    const record = { ...withoutHash, hash: createHash("sha256").update(JSON.stringify(withoutHash)).digest("hex") };
+    previousHash = record.hash;
+    return JSON.stringify(record);
+  });
 }
 
 describe("ledger v2", () => {
@@ -136,6 +158,92 @@ describe("ledger v2", () => {
     expect(() => reader.readAll()).toThrow(LedgerV2IntegrityError);
   });
 
+  test("verifies each mixed SHA/HMAC record with its declared key and rotates without downgrade", () => {
+    const { ledger, ledgerPath, readModelPath, projectId, root } = fixture();
+    ledger.append("sha", { value: 1 });
+    const firstKey = "first-ledger-key-material-0001";
+    const secondKey = "second-ledger-key-material-0002";
+    const hmac = new LedgerV2({
+      ledgerPath,
+      readModelPath: join(root, "hmac-read-model.json"),
+      projectId,
+      principal: "test-principal",
+      hmacKeyring: { first: firstKey },
+      activeHmacKeyId: "first",
+    });
+    hmac.append("hmac-one", { value: 2 });
+    const rotated = new LedgerV2({
+      ledgerPath,
+      readModelPath: join(root, "rotated-read-model.json"),
+      projectId,
+      principal: "test-principal",
+      hmacKeyring: { first: firstKey, second: secondKey },
+      activeHmacKeyId: "second",
+    });
+    rotated.append("hmac-two", { value: 3 });
+
+    expect(rotated.readAll().map((record) => record.integrity)).toEqual([
+      { algorithm: "sha256", keyId: null },
+      { algorithm: "hmac-sha256", keyId: "first" },
+      { algorithm: "hmac-sha256", keyId: "second" },
+    ]);
+    expect(() => new LedgerV2({
+      ledgerPath,
+      readModelPath: join(root, "missing-key-read-model.json"),
+      projectId,
+      principal: "test-principal",
+      hmacKeyring: { second: secondKey },
+    })).toThrow(/unknown key id first/i);
+    const verifierOnly = new LedgerV2({
+      ledgerPath,
+      readModelPath: join(root, "verifier-read-model.json"),
+      projectId,
+      principal: "test-principal",
+      hmacKeyring: { first: firstKey, second: secondKey },
+    });
+    expect(verifierOnly.readAll()).toHaveLength(3);
+    expect(() => verifierOnly.append("downgrade", { value: 4 })).toThrow(/Refusing to append an unsigned SHA record/i);
+  });
+
+  test("backs up and repairs only a verified partial tail, then records recovery", () => {
+    const { ledger, ledgerPath, readModelPath, projectId, root } = fixture();
+    ledger.append("one", { value: 1 });
+    const verified = readFileSync(ledgerPath);
+    writeFileSync(ledgerPath, "{\"partial\":", { flag: "a" });
+    const damaged = readFileSync(ledgerPath);
+    const backupPath = join(root, "ledger.partial.bak");
+
+    const repaired = repairLedgerPartialTail({
+      ledgerPath,
+      readModelPath,
+      projectId,
+      principal: "test-principal",
+      backupPath,
+    });
+
+    expect(repaired).toMatchObject({ backupPath, truncatedBytes: damaged.length - verified.length });
+    expect(readFileSync(backupPath)).toEqual(damaged);
+    const reopened = new LedgerV2({ ledgerPath, readModelPath, projectId, principal: "test-principal" });
+    expect(reopened.readAll().map((record) => record.type)).toEqual(["one", "ledger_tail_repaired"]);
+    expect(reopened.snapshot().partialLineBytes).toBe(0);
+  });
+
+  test("refuses partial-tail repair when the complete prefix is corrupt", () => {
+    const { ledger, ledgerPath, readModelPath, projectId, root } = fixture();
+    ledger.append("one", { value: 1 });
+    writeFileSync(ledgerPath, "{not-json}\n{partial", { flag: "a" });
+    const backupPath = join(root, "must-not-exist.bak");
+
+    expect(() => repairLedgerPartialTail({
+      ledgerPath,
+      readModelPath,
+      projectId,
+      principal: "test-principal",
+      backupPath,
+    })).toThrow(/Invalid v2 ledger record/i);
+    expect(existsSync(backupPath)).toBe(false);
+  });
+
   test("does not remove an old lock owned by a verified live process", () => {
     const { ledgerPath } = fixture();
     const lockPath = `${ledgerPath}.lock`;
@@ -171,8 +279,11 @@ describe("ledger v2", () => {
   });
 
   test("loads a bounded persisted projection and preserves full read semantics", () => {
-    const { ledger, ledgerPath, readModelPath, projectId } = fixture();
-    for (let index = 0; index < 1_025; index += 1) ledger.append("entry", { index });
+    const { ledgerPath, readModelPath, projectId } = fixture();
+    const lines = verifiedLedgerLines(projectId, 1_025);
+    writeFileSync(ledgerPath, `${lines.slice(0, 1_024).join("\n")}\n`, { mode: 0o600 });
+    new LedgerV2({ ledgerPath, readModelPath, projectId, principal: "test-principal" });
+    writeFileSync(ledgerPath, `${lines[1_024]}\n`, { flag: "a" });
 
     const persisted = JSON.parse(readFileSync(readModelPath, "utf8")) as {
       lastSequence: number;
@@ -189,7 +300,9 @@ describe("ledger v2", () => {
     expect(persisted.seenEventIds.length).toBeLessThanOrEqual(4_096);
     expect(persisted.prefixSha256).toMatch(/^[a-f0-9]{64}$/);
 
+    const startedAt = performance.now();
     const reopened = new LedgerV2({ ledgerPath, readModelPath, projectId, principal: "test-principal" });
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
     expect(reopened.snapshot()).toMatchObject({ sequence: 1_025, eventCount: 1_025 });
     expect(reopened.readRecent(2).map((record) => record.payload.index)).toEqual([1_023, 1_024]);
     expect(reopened.readAll()).toHaveLength(1_025);

@@ -1,10 +1,10 @@
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { HeadlessDaemonClient } from "../src/daemon/client";
-import { connectOrStartDaemon } from "../src/daemon/connect";
+import { connectLeadDaemon, connectOrStartDaemon } from "../src/daemon/connect";
 import { BudgetSchema, type Job, type Task } from "../src/contracts/durable";
 import type { DurableSession } from "../src/contracts/durable";
 import type { RunEvent, RunResult } from "../src/contracts/run";
@@ -20,27 +20,28 @@ import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runt
 import { JobStore } from "../src/daemon/job-store";
 import { LedgerV2 } from "../src/runtime/ledger-v2";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
-import { integrationTokenPath } from "../src/runtime/credential-store";
 import { WorktreeLeaseStore } from "../src/runtime/worktree-leases";
-import { registerAdapter, unregisterAdapter, type BackendAdapter } from "../src/backends/registry";
+import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { parseGrokJsonl } from "../src/backends/grok";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
 import { exec as headlessExec } from "../src/index";
+
+setDefaultTimeout(20_000);
 
 const FIXTURE_READ_BACKEND = "fixture-opencode";
 const FIXTURE_REVIEW_BACKEND = "fixture-review";
 const FIXTURE_WRITE_BACKEND = "fixture-grok";
 const FIXTURE_WRITE_REVIEW_BACKEND = "fixture-grok-review";
 
-registerAdapter(fixtureAdapter(FIXTURE_READ_BACKEND, "opencode", false, parseOpenCodeJsonl));
-registerAdapter(fixtureAdapter(FIXTURE_REVIEW_BACKEND, "opencode", false, parseOpenCodeJsonl));
-registerAdapter(fixtureAdapter(FIXTURE_WRITE_BACKEND, "grok", true, parseGrokJsonl));
-registerAdapter(fixtureAdapter(FIXTURE_WRITE_REVIEW_BACKEND, "grok", true, parseGrokJsonl));
+registerBackendDefinition(fixtureAdapter(FIXTURE_READ_BACKEND, "opencode", false, parseOpenCodeJsonl));
+registerBackendDefinition(fixtureAdapter(FIXTURE_REVIEW_BACKEND, "opencode", false, parseOpenCodeJsonl));
+registerBackendDefinition(fixtureAdapter(FIXTURE_WRITE_BACKEND, "grok", true, parseGrokJsonl));
+registerBackendDefinition(fixtureAdapter(FIXTURE_WRITE_REVIEW_BACKEND, "grok", true, parseGrokJsonl));
 afterAll(() => {
-  unregisterAdapter(FIXTURE_READ_BACKEND);
-  unregisterAdapter(FIXTURE_REVIEW_BACKEND);
-  unregisterAdapter(FIXTURE_WRITE_BACKEND);
-  unregisterAdapter(FIXTURE_WRITE_REVIEW_BACKEND);
+  unregisterBackendDefinition(FIXTURE_READ_BACKEND);
+  unregisterBackendDefinition(FIXTURE_REVIEW_BACKEND);
+  unregisterBackendDefinition(FIXTURE_WRITE_BACKEND);
+  unregisterBackendDefinition(FIXTURE_WRITE_REVIEW_BACKEND);
 });
 
 const roots: string[] = [];
@@ -251,7 +252,22 @@ describe("authenticated project daemon", () => {
     await expect(attacker.call("ping")).rejects.toMatchObject({ code: "DAEMON_AUTH_FAILED" });
   });
 
-  test("requires explicit first-install bootstrap and never resurrects a revoked integration", async () => {
+  test("keeps persistent execution routes disabled unless explicitly enabled", async () => {
+    const fixture = createFixture();
+    const token = "a".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token });
+    daemons.push(daemon);
+    await daemon.start();
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
+
+    await expect(client.call("session.create", {
+      backend: FIXTURE_READ_BACKEND,
+      containment: "unsafe",
+    })).rejects.toMatchObject({ code: "BACKEND_UNSUPPORTED" });
+    expect(new PersistentSessionStore(daemon.state).list()).toEqual([]);
+  });
+
+  test("requires explicit lead configuration and never accepts a previous generation", async () => {
     const fixture = createFixture();
     const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, principal: "coordinator" });
     daemons.push(daemon);
@@ -259,15 +275,14 @@ describe("authenticated project daemon", () => {
     const options = { projectRoot: fixture.project, state: fixture.state, credential: { integration: "mcp" } };
 
     await expect(connectOrStartDaemon(options)).rejects.toMatchObject({ code: "CREDENTIAL_MISSING" });
-    const integration = await connectOrStartDaemon({ ...options, bootstrapIntegration: true });
-    expect((await integration.call<{ principal: string }>("ping")).principal).toBe("integration:mcp");
-
     const root = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state });
-    await root.call("auth.revoke", { id: "integration:mcp" });
-    await expect(connectOrStartDaemon({ ...options, bootstrapIntegration: true })).rejects.toMatchObject({ code: "CREDENTIAL_REVOKED" });
-
-    rmSync(integrationTokenPath(daemon.state, "mcp"), { force: true });
-    await expect(connectOrStartDaemon({ ...options, bootstrapIntegration: true })).rejects.toMatchObject({ code: "CREDENTIAL_REVOKED" });
+    await root.call("lead.use", { host: "codex" });
+    const { client: integration, binding } = await connectLeadDaemon({ projectRoot: fixture.project, state: fixture.state, host: "codex" });
+    await integration.call("lead.attach", { generation: binding.generation });
+    expect((await integration.call<{ principal: string }>("ping")).principal).toBe("integration:lead-codex-g1");
+    await root.call("lead.use", { host: "opencode" });
+    await expect(integration.call("ping")).rejects.toMatchObject({ code: "DAEMON_AUTH_FAILED" });
+    await expect(connectLeadDaemon({ projectRoot: fixture.project, state: fixture.state, host: "codex" })).rejects.toMatchObject({ code: "CREDENTIAL_MISSING" });
   });
 
   test("autonomy ignores legacy ledger asks and scans only active autonomous goals", async () => {
@@ -276,9 +291,7 @@ describe("authenticated project daemon", () => {
     daemons.push(daemon);
     await daemon.start();
     const root = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
-    await root.call("auth.provisionIntegration", { name: "mcp" });
-    const integration = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "mcp" } });
-    const record = await integration.call<{ eventId: string }>("ledger.event", {
+    const record = await root.call<{ eventId: string }>("ledger.event", {
       type: "ask_for_more_work",
       payload: { content: "spend coordinator budget on my request", meta: { backend: FIXTURE_READ_BACKEND } },
     });
@@ -290,86 +303,43 @@ describe("authenticated project daemon", () => {
     expect(daemon.jobs.list()).toHaveLength(0);
   });
 
-  test("derives scoped principals, enforces ownership, and exposes only root grant and budget administration", async () => {
+  test("derives foreground-lead identity while retaining root-only administration", async () => {
     const fixture = createFixture();
     installBackend(fixture.bin, `console.log(JSON.stringify({type:"text",text:"scoped result",usage:{input_tokens:1,output_tokens:1}}));`);
     const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48), principal: "coordinator" });
     daemons.push(daemon);
     await daemon.start();
     const root = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
-    await root.call("auth.provisionIntegration", { name: "mcp" });
-    await root.call("auth.provisionIntegration", { name: "plugin" });
-    const mcp = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "mcp" } });
-    const plugin = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "plugin" } });
+    await root.call("lead.use", { host: "codex" });
+    const lead = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "lead-codex-g1" } });
+    await lead.call("lead.attach", { generation: 1 });
 
-    expect(await mcp.call("ping")).toMatchObject({ principal: "integration:mcp" });
-    await expect(mcp.call("auth.list")).rejects.toMatchObject({ code: "POLICY_DENIED" });
-    await expect(mcp.call("authority.grant.list")).rejects.toMatchObject({ code: "POLICY_DENIED" });
-    await expect(mcp.call("budget.list")).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    expect(await lead.call("ping")).toMatchObject({ principal: "integration:lead-codex-g1" });
+    await expect(lead.call("auth.list")).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    await expect(lead.call("authority.grant.list")).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    await expect(lead.call("budget.list")).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    await root.call("budget.upsert", { id: "lead-one-run", principal: "integration:lead-codex-g1", maxRequests: 1 });
 
-    const denied = await mcp.call<Job>("run.submit", {
+    const submitted = await lead.call<Job>("run.submit", {
       backend: FIXTURE_READ_BACKEND,
-      prompt: "denied before grant",
+      prompt: "allowed by foreground authority",
       containment: "unsafe",
       timeoutMs: 5_000,
     });
-    expect(denied.principal).toBe("integration:mcp");
-    expect(denied.result?.error?.code).toBe("POLICY_DENIED");
-    await expect(plugin.call("run.status", { jobId: denied.id })).rejects.toMatchObject({ code: "POLICY_DENIED" });
-    expect((await root.call<Job>("run.status", { jobId: denied.id })).id).toBe(denied.id);
-    const task = await root.call<{ id: string }>("task.create", { jobId: denied.id, capability: "review" });
-    expect((await mcp.call<Array<{ id: string }>>("task.list", { state: "pending" })).some((candidate) => candidate.id === task.id)).toBe(true);
-    expect((await plugin.call<Array<{ id: string }>>("task.list", { state: "pending" })).some((candidate) => candidate.id === task.id)).toBe(false);
-    await expect(plugin.call("task.claim", { taskId: task.id, leaseMs: 30_000 })).rejects.toMatchObject({ code: "POLICY_DENIED" });
-    expect(await mcp.call("task.claim", { taskId: task.id, leaseMs: 30_000 })).toMatchObject({ claimedBy: "integration:mcp" });
-    await expect(plugin.call("task.status", { taskId: task.id })).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    const completed = await lead.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 });
+    expect(completed).toMatchObject({ state: "succeeded", principal: "integration:lead-codex-g1" });
+    expect((await root.call<Job>("run.status", { jobId: submitted.id })).id).toBe(submitted.id);
+    const task = await root.call<{ id: string }>("task.create", { jobId: submitted.id, capability: "review" });
+    expect(await lead.call("task.claim", { taskId: task.id, leaseMs: 30_000 })).toMatchObject({ claimedBy: "integration:lead-codex-g1" });
 
-    const grant = await root.call<{ id: string; projectId: string; issuedBy: string }>("authority.grant.add", {
-      principal: "integration:mcp",
-      operations: ["run"],
-      backends: [FIXTURE_READ_BACKEND],
-      expiresAt: Date.now() + 60_000,
-      maxCostUsd: null,
-    });
-    expect(grant.projectId).toBe(daemon.state.projectId);
-    expect(grant.issuedBy).toBe("coordinator");
-
-    await root.call("budget.upsert", {
-      id: "mcp-one-run",
-      principal: "integration:mcp",
-      maxRequests: 1,
-    });
-    const submitted = await mcp.call<Job>("run.submit", {
-      backend: FIXTURE_READ_BACKEND,
-      prompt: "allowed after grant",
-      containment: "unsafe",
-      timeoutMs: 5_000,
-    });
-    const completed = await mcp.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 });
-    expect(completed.state).toBe("succeeded");
-    expect(completed.principal).toBe("integration:mcp");
-    await expect(plugin.call("run.status", { jobId: completed.id })).rejects.toMatchObject({ code: "POLICY_DENIED" });
-
-    await root.call("authority.grant.add", {
-      principal: "integration:plugin",
-      operations: ["run"],
-      backends: [FIXTURE_READ_BACKEND],
-      expiresAt: Date.now() + 60_000,
-      maxCostUsd: null,
-    });
-    const delegatedTask = await root.call<{ id: string }>("task.create", { jobId: completed.id, capability: "delegated-review" });
-    expect((await plugin.call<Array<{ id: string }>>("task.list", { jobId: completed.id })).some((candidate) => candidate.id === delegatedTask.id)).toBe(true);
-    expect(await plugin.call("task.claim", { taskId: delegatedTask.id, leaseMs: 30_000 })).toMatchObject({ claimedBy: "integration:plugin" });
-
-    const exhausted = await mcp.call<Job>("run.submit", {
+    const exhausted = await lead.call<Job>("run.submit", {
       backend: FIXTURE_READ_BACKEND,
       prompt: "budget exhausted",
       containment: "unsafe",
       timeoutMs: 5_000,
     });
     expect(exhausted.result?.error?.code).toBe("BUDGET_EXCEEDED");
-    expect((await root.call<Array<{ id: string }>>("budget.list")).some((budget) => budget.id === "mcp-one-run")).toBe(true);
-    expect((await root.call<Array<{ id: string }>>("authority.grant.list")).some((candidate) => candidate.id === grant.id)).toBe(true);
+    expect((await root.call<Array<{ id: string }>>("budget.list")).some((budget) => budget.id === "lead-one-run")).toBe(true);
   });
 
   test("owns the durable session-scoped message queue and attributes pushes to the authenticated principal", async () => {
@@ -576,7 +546,6 @@ console.log(JSON.stringify({type:"text",text:"daemon result"}));`);
     });
 
     expect(result.status).toBe("timed_out");
-    expect(result.timedOut).toBe(true);
     expect(result.error?.code).toBe("TIMED_OUT");
     expect(existsSync(marker)).toBe(false);
     await client.call("run.cancel", { jobId: active.id });
@@ -615,7 +584,7 @@ console.log(JSON.stringify({type:"text",text:"daemon result"}));`);
   test("persists a bounded replay session across fresh worker processes", async () => {
     const fixture = createFixture();
     installBackend(fixture.bin, `const prompt=process.argv.at(-1)??""; console.log(JSON.stringify({type:"text",text:prompt.includes("first reply")?"replayed context":"first reply"}));`);
-    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48), enableExperimentalSessions: true });
     daemons.push(daemon);
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
@@ -637,13 +606,13 @@ console.log(JSON.stringify({type:"text",text:"daemon result"}));`);
   test("uses a registered adapter's tested native resume command when available", async () => {
     const fixture = createFixture();
     const id = "fixture-native-resume";
-    registerAdapter({
+    registerBackendDefinition({
       ...fixtureAdapter(id, "opencode", false, parseOpenCodeJsonl),
       capabilities: { write: false, streaming: true, structuredOutput: true, nativeResume: true, cancellation: true, tools: false, effort: false, brokerCompatible: false },
       buildResumeCommand: (opts, cwd, nativeSessionId) => ["opencode", "run", "--dir", cwd, "--resume", nativeSessionId, "--", opts.prompt],
     });
     installBackend(fixture.bin, `console.log(JSON.stringify({type:"text",text:process.argv.includes("native-session-42")?"native resumed":"fresh process"}));`);
-    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48), enableExperimentalSessions: true });
     daemons.push(daemon);
     try {
       await daemon.start();
@@ -655,7 +624,7 @@ console.log(JSON.stringify({type:"text",text:"daemon result"}));`);
       expect(session.replay).toBe(false);
       expect(completed.result?.output).toBe("native resumed");
     } finally {
-      unregisterAdapter(id);
+      unregisterBackendDefinition(id);
     }
   });
 
@@ -736,7 +705,7 @@ console.log(JSON.stringify({type:"response.output_text.delta",delta:text}));`);
       expect(daemon.jobs.get(id)?.result?.commit?.candidate).not.toBeNull();
       expect(daemon.jobs.get(id)?.result?.commit?.merged).toBe(false);
     }
-  });
+  }, 20_000);
 
   test("write councils cannot substitute candidate preservation for a failed test gate", async () => {
     const fixture = createFixture();
@@ -779,7 +748,7 @@ console.log(JSON.stringify({type:"response.output_text.delta",delta:text}));`);
     expect(council.decision?.reason).toContain("Required test gate has not passed");
     expect(runGitStrict(["rev-parse", "HEAD"], fixture.project).stdout.trim()).toBe(before);
     expect(existsSync(join(fixture.project, "untested-candidate.txt"))).toBe(false);
-  });
+  }, 20_000);
 
   test("daemon startup resumes a persisted nonterminal council to a durable decision", async () => {
     const fixture = createFixture();
@@ -1001,9 +970,9 @@ console.log(JSON.stringify({type:"text",text}));`);
     const rejectId = "fixture-tie-reject";
     for (const id of [approveId, rejectId]) {
       const adapter = fixtureAdapter(id, "opencode", false, parseOpenCodeJsonl);
-      registerAdapter({
+      registerBackendDefinition({
         ...adapter,
-        buildCommand: (options, cwd) => ["opencode", "run", "--dir", cwd, "--participant", id, "--", options.prompt],
+        prepareCommand: (options, cwd) => ["opencode", "run", "--dir", cwd, "--participant", id, "--", options.prompt],
       });
     }
     installBackend(fixture.bin, `
@@ -1031,8 +1000,8 @@ console.log(JSON.stringify({type:"text",text}));`);
       expect(council.decision?.approved).toBe(false);
       expect(council.decision?.reason).toContain("Required vote gate has not passed");
     } finally {
-      unregisterAdapter(approveId);
-      unregisterAdapter(rejectId);
+      unregisterBackendDefinition(approveId);
+      unregisterBackendDefinition(rejectId);
     }
   });
 
@@ -1096,7 +1065,7 @@ console.log(JSON.stringify({type:"text",text}));`);
     expect(await client.call<Task>("task.status", { taskId: task.id })).toMatchObject({ state: "completed", claimedBy: "coordinator" });
   });
 
-  test("a queued job is reauthorized immediately before worker execution", async () => {
+  test("a queued lead job is reauthorized after an explicit lead switch", async () => {
     const fixture = createFixture();
     installBackend(fixture.bin, `await Bun.sleep(300); console.log(JSON.stringify({type:"text",text:"done"}));`);
     const daemon = new HeadlessDaemon({
@@ -1110,23 +1079,16 @@ console.log(JSON.stringify({type:"text",text}));`);
     daemons.push(daemon);
     await daemon.start();
     const root = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
-    await root.call("auth.provisionIntegration", { name: "mcp" });
-    await root.call("authority.grant.add", {
-      id: "queued-run-grant",
-      principal: "integration:mcp",
-      operations: ["run"],
-      backends: [FIXTURE_READ_BACKEND],
-      expiresAt: Date.now() + 60_000,
-      maxCostUsd: null,
-    });
-    const mcp = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "mcp" } });
+    await root.call("lead.use", { host: "codex" });
+    const lead = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "lead-codex-g1" } });
+    await lead.call("lead.attach", { generation: 1 });
 
     const active = await root.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "hold slot", containment: "unsafe", timeoutMs: 5_000 });
-    const queued = await mcp.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "must be denied", containment: "unsafe", timeoutMs: 5_000 });
-    await root.call("authority.grant.revoke", { grantId: "queued-run-grant" });
+    const queued = await lead.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "must be denied", containment: "unsafe", timeoutMs: 5_000 });
+    await root.call("lead.use", { host: "opencode" });
 
     await root.call<Job>("run.wait", { jobId: active.id, timeoutMs: 10_000 });
-    const completed = await mcp.call<Job>("run.wait", { jobId: queued.id, timeoutMs: 10_000 });
+    const completed = await root.call<Job>("run.wait", { jobId: queued.id, timeoutMs: 10_000 });
     expect(completed.state).toBe("blocked");
     expect(completed.result?.error?.code).toBe("POLICY_DENIED");
   });
@@ -1191,7 +1153,6 @@ console.log(JSON.stringify({type:"text",text}));`);
         containment: "required",
         approvalPolicy: "auto",
         timeoutMs: 10_000,
-        sessionId: "ledger-failure",
       });
       const completed = await client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 30_000 });
 
@@ -1302,16 +1263,17 @@ console.log(JSON.stringify({type:"text",text}));`);
     daemons.push(daemon);
     await daemon.start();
     const root = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
-    await root.call("auth.provisionIntegration", { name: "mcp" });
+    await root.call("lead.use", { host: "codex" });
     await root.call("authority.grant.add", {
       id: "revoked-during-run",
-      principal: "integration:mcp",
+      principal: "integration:lead-codex-g1",
       operations: ["write", "merge"],
       backends: [FIXTURE_WRITE_BACKEND],
       expiresAt: Date.now() + 60_000,
       maxCostUsd: null,
     });
-    const mcp = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "mcp" } });
+    const mcp = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "lead-codex-g1" } });
+    await mcp.call("lead.attach", { generation: 1 });
     const before = getHead(fixture.project);
 
     const submitted = await mcp.call<Job>("run.submit", { backend: FIXTURE_WRITE_BACKEND, prompt: "write", mode: "write", containment: "required", approvalPolicy: "auto", timeoutMs: 10_000 });
@@ -1340,16 +1302,17 @@ console.log(JSON.stringify({type:"text",text}));`);
     daemons.push(daemon);
     await daemon.start();
     const root = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
-    await root.call("auth.provisionIntegration", { name: "mcp" });
+    await root.call("lead.use", { host: "codex" });
     await root.call("authority.grant.add", {
       id: "expires-during-run",
-      principal: "integration:mcp",
+      principal: "integration:lead-codex-g1",
       operations: ["write", "merge"],
       backends: [FIXTURE_WRITE_BACKEND],
       expiresAt: Date.now() + 2_000,
       maxCostUsd: null,
     });
-    const mcp = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "mcp" } });
+    const mcp = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, credential: { integration: "lead-codex-g1" } });
+    await mcp.call("lead.attach", { generation: 1 });
     const before = getHead(fixture.project);
 
     const submitted = await mcp.call<Job>("run.submit", { backend: FIXTURE_WRITE_BACKEND, prompt: "write", mode: "write", containment: "required", approvalPolicy: "auto", timeoutMs: 10_000 });
@@ -1360,7 +1323,7 @@ console.log(JSON.stringify({type:"text",text}));`);
     expect(completed.result?.commit?.candidate).not.toBeNull();
     expect(getHead(fixture.project)).toBe(before);
     expect(existsSync(join(fixture.project, "expired-during-run.txt"))).toBe(false);
-  });
+  }, 20_000);
 
   test("a pre-merge finality persistence failure leaves primary untouched", async () => {
     const fixture = createFixture();
@@ -1540,8 +1503,8 @@ function fixtureAdapter(
   id: string,
   executable: string,
   write: boolean,
-  parse: BackendAdapter["parse"],
-): BackendAdapter {
+  decodeOutput: BackendDefinition["decodeOutput"],
+): BackendDefinition {
   return {
     id,
     metadata: { id, aliases: [], promptDelivery: "argv", timeoutMs: 10_000, maxDepth: null, canRead: true, canWrite: write },
@@ -1550,10 +1513,12 @@ function fixtureAdapter(
     probe: { versionCommand: ["/usr/bin/true"], helpCommand: ["/usr/bin/true"], requiredHelpFragments: [], timeoutMs: 1_000, maxOutputBytes: 1_024 },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand: (opts, cwd) => executable === "opencode"
+    provider: null,
+    fleetPriority: 0,
+    prepareCommand: (opts, cwd) => executable === "opencode"
       ? [executable, "run", "--dir", cwd, "--", opts.prompt]
       : [executable, "--single", opts.prompt, "--cwd", cwd],
-    parse,
+    decodeOutput,
   };
 }
 

@@ -25,8 +25,6 @@ const EXPECTED_TOOLS = [
   "headless_task_state",
   "headless_propose_final",
   "headless_ask_for_work",
-  "ask_for_more_work",
-  "ask_for_work",
   "ask_for_backup",
   "headless_record_task_claim",
   "headless_record_consensus_vote",
@@ -60,7 +58,7 @@ describe("OpenCode plugin loadability", () => {
       expect(jsonSchema.type).toBe("object");
       expect(jsonSchema.properties).toBeDefined();
       expect(jsonSchema).not.toHaveProperty("$defs");
-      const isFleetTool = ["ask_for_work", "ask_for_more_work", "ask_for_backup", "send_message", "wait_for_handoff", "get_messages", "council_deliberate"].includes(name);
+      const isFleetTool = ["ask_for_backup", "send_message", "wait_for_handoff", "get_messages", "council_deliberate"].includes(name);
       if (!isFleetTool) expect(name).toStartWith("headless_");
     }
 
@@ -107,16 +105,16 @@ describe("OpenCode plugin authenticated daemon integration", () => {
     const message = ledger.entries.find((entry) => entry.content === "plugin identity message");
 
     expect(existsSync(state.ledgerPath)).toBe(true);
-    expect(note?.source).toBe("integration:opencode-plugin");
-    expect(message?.source).toBe("integration:opencode-plugin");
-    expect(message?.message?.from).toBe("integration:opencode-plugin");
+    expect(note?.source).toBe("integration:lead-opencode-g1");
+    expect(message?.source).toBe("integration:lead-opencode-g1");
+    expect(message?.message?.from).toBe("integration:lead-opencode-g1");
 
     const integration = await connectOrStartDaemon({
       projectRoot: fixture.project,
-      credential: { integration: "opencode-plugin" },
+      credential: { integration: "lead-opencode-g1" },
     });
     const ping = await integration.call<{ principal: string }>("ping");
-    expect(ping.principal).toBe("integration:opencode-plugin");
+    expect(ping.principal).toBe("integration:lead-opencode-g1");
     await expect(integration.call("auth.list")).rejects.toMatchObject({ code: "POLICY_DENIED" });
   });
 
@@ -129,11 +127,11 @@ describe("OpenCode plugin authenticated daemon integration", () => {
     expect(append).toBeDefined();
     expect(getMessages).toBeDefined();
 
-    // The first plugin call provisions its stable, non-coordinator credential.
+    // The first plugin call attaches the configured foreground-lead credential.
     await append!.execute({ text: "provision plugin credential" }, context);
     const integration = new HeadlessDaemonClient({
       projectRoot: fixture.project,
-      credential: { integration: "opencode-plugin" },
+      credential: { integration: "lead-opencode-g1" },
     });
     const secret = "sk-1234567890abcdefghijkl";
     await integration.call("messages.push", {
@@ -157,8 +155,8 @@ describe("OpenCode plugin authenticated daemon integration", () => {
       sessionId: context.sessionID,
     });
     const queued = ledger.entries.find((entry) => entry.content?.includes("plugin queue"));
-    expect(queued?.source).toBe("integration:opencode-plugin");
-    expect(queued?.message?.from).toBe("integration:opencode-plugin");
+    expect(queued?.source).toBe("integration:lead-opencode-g1");
+    expect(queued?.message?.from).toBe("integration:lead-opencode-g1");
     expect(JSON.stringify(queued)).not.toContain(secret);
   });
 });
@@ -227,14 +225,16 @@ async function startDaemonFixture(): Promise<DaemonFixture> {
   process.env.HEADLESS_STATE_HOME = join(root, "state");
   process.env.HEADLESS_RUNTIME_HOME = runtime;
 
-  const daemon = new HeadlessDaemon({ projectRoot: project, principal: "coordinator" });
+  const daemon = new HeadlessDaemon({ projectRoot: project, principal: "owner" });
   await daemon.start();
+  const rootClient = new HeadlessDaemonClient({ projectRoot: project });
+  await rootClient.call("lead.use", { host: "opencode" });
   return {
     root,
     runtime,
     project,
     daemon,
-    rootClient: new HeadlessDaemonClient({ projectRoot: project }),
+    rootClient,
     previousEnv,
   };
 }

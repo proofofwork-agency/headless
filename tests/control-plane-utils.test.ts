@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeBoundedProbe } from "../src/backends/probe";
 import { classifyAdapterFailure } from "../src/backends/result-normalization";
-import type { BackendAdapter } from "../src/backends/registry";
+import type { BackendDefinition } from "../src/backends/registry";
 import { RunErrorCodeSchema, StructuredErrorSchema } from "../src/contracts/common";
 import { SessionSchema } from "../src/contracts/durable";
 import { resumableNativeSessionId } from "../src/daemon/run-execution-service";
@@ -130,7 +130,7 @@ describe("mode-compatible native resume", () => {
       createdAt: 1,
       updatedAt: 1,
     });
-    const resumable = { buildResumeCommand: () => ["fixture", "resume"] } as unknown as BackendAdapter;
+    const resumable = { buildResumeCommand: () => ["fixture", "resume"] } as unknown as BackendDefinition;
 
     expect(resumableNativeSessionId({ mode: "read-only" }, session, resumable)).toBe("native-read-thread");
     expect(resumableNativeSessionId({ mode: "write" }, session, resumable)).toBeUndefined();
@@ -201,7 +201,7 @@ describe("bounded probe process trees", () => {
       const root = temporaryDirectory("headless-probe-tree-");
       const marker = join(root, "escaped.txt");
       const pidFile = join(root, "descendant.pid");
-      const descendantCode = `await Bun.sleep(800); await Bun.write(${JSON.stringify(marker)}, "escaped")`;
+      const descendantCode = `await Bun.sleep(3000); await Bun.write(${JSON.stringify(marker)}, "escaped")`;
       const parentCode = [
         `const child = Bun.spawn([${JSON.stringify(process.execPath)}, "-e", ${JSON.stringify(descendantCode)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });`,
         `await Bun.write(${JSON.stringify(pidFile)}, String(child.pid));`,
@@ -210,17 +210,18 @@ describe("bounded probe process trees", () => {
 
       const result = await executeBoundedProbe(
         [process.execPath, "-e", parentCode],
-        { timeoutMs: 400, maxOutputBytes: 1_024 },
+        { timeoutMs: 2_000, maxOutputBytes: 1_024 },
         { cwd: root, env: process.env },
       );
       if (existsSync(pidFile)) descendantPids.push(Number(readFileSync(pidFile, "utf8")));
-      await Bun.sleep(1_000);
+      await Bun.sleep(3_500);
 
       expect(result.timedOut).toBe(true);
       expect(result.overflowed).toBe(false);
       expect(existsSync(pidFile)).toBe(true);
       expect(existsSync(marker)).toBe(false);
     },
+    10_000,
   );
 
   test.skipIf(process.platform !== "darwin" && process.platform !== "linux")(

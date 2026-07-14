@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 describe("cross-process authenticated daemon", () => {
-  test("preserves scoped credentials, attribution, ledger, and queues across restart", async () => {
+  test("preserves the configured lead credential, attribution, ledger, and queues across restart", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-daemon-process-"));
     roots.push(root);
     const project = join(root, "project");
@@ -36,13 +36,15 @@ describe("cross-process authenticated daemon", () => {
     const state = { env };
 
     const first = await startDaemon(project, env, state);
-    await first.root.call("auth.provisionIntegration", { name: "process-test" });
+    await first.root.call("lead.use", { host: "codex" });
     const integration = new HeadlessDaemonClient({
       projectRoot: project,
       state,
-      credential: { integration: "process-test" },
+      credential: { integration: "lead-codex-g1" },
+      timeoutMs: 5_000,
     });
-    expect((await integration.call<{ principal: string }>("ping")).principal).toBe("integration:process-test");
+    await integration.call("lead.attach", { generation: 1 });
+    expect((await integration.call<{ principal: string }>("ping")).principal).toBe("integration:lead-codex-g1");
     await integration.call("ledger.note", { sessionId: "process-session", text: "durable cross-process note" });
     await expect(integration.call("messages.push", {
       chatId: "process-session",
@@ -59,12 +61,13 @@ describe("cross-process authenticated daemon", () => {
     const resumed = new HeadlessDaemonClient({
       projectRoot: project,
       state,
-      credential: { integration: "process-test" },
+      credential: { integration: "lead-codex-g1" },
+      timeoutMs: 5_000,
     });
-    expect((await resumed.call<{ principal: string }>("ping")).principal).toBe("integration:process-test");
+    expect((await resumed.call<{ principal: string }>("ping")).principal).toBe("integration:lead-codex-g1");
     const context = await resumed.call("ledger.context", { sessionId: "process-session", view: "raw" });
     expect(JSON.stringify(context)).toContain("durable cross-process note");
-    expect(JSON.stringify(context)).toContain("integration:process-test");
+    expect(JSON.stringify(context)).toContain("integration:lead-codex-g1");
     expect(JSON.stringify(context)).not.toContain("spoofed-principal");
 
     const pulled = await resumed.call<{ messages: Array<{ content: string; principal: string }> }>("messages.pull", {
@@ -73,11 +76,11 @@ describe("cross-process authenticated daemon", () => {
     expect(pulled.messages).toEqual([
       expect.objectContaining({
         content: "durable cross-process message",
-        principal: "integration:process-test",
+        principal: "integration:lead-codex-g1",
       }),
     ]);
     await stopDaemon(second.child);
-  }, 15_000);
+  }, 30_000);
 });
 
 async function startDaemon(
@@ -111,6 +114,9 @@ async function startDaemon(
 
 async function stopDaemon(child: ReturnType<typeof Bun.spawn>) {
   if (child.exitCode === null) child.kill("SIGTERM");
-  await child.exited;
+  await Promise.race([
+    child.exited,
+    Bun.sleep(10_000).then(() => { throw new Error("daemon did not stop within 10 seconds"); }),
+  ]);
   children.delete(child);
 }

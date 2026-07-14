@@ -26,6 +26,7 @@ describe("daemon request authorization", () => {
     expect(requiredScope("task.claim")).toBe("task");
     expect(requiredScope("ledger.context")).toBe("ledger:read");
     expect(requiredScope("ledger.event")).toBe("ledger:write");
+    expect(requiredScope("ledger.repairTail")).toBe("admin");
     expect(requiredScope("messages.pull")).toBe("messages");
     expect(requiredScope("council.run")).toBe("council");
     expect(requiredScope("gate.run")).toBe("gate");

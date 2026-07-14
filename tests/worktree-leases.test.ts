@@ -15,6 +15,17 @@ afterEach(() => {
 const gitTest = runGitStrict(["--version"], process.cwd()).ok ? test : test.skip;
 
 describe("durable worktree leases", () => {
+  test("can separate executable checkouts from durable manifests", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-lease-roots-"));
+    roots.push(root);
+    const state = join(root, "state");
+    const checkoutBase = join(root, "checkouts");
+    const store = new WorktreeLeaseStore(state, "a".repeat(64), { checkoutBase });
+
+    expect(store.checkoutRoot).toBe(checkoutBase);
+    expect(store.manifestsRoot).toBe(join(state, "leases"));
+  });
+
   gitTest("keeps a live lease active and records terminal release", () => {
     const { repo, state, projectId } = fixture();
     const store = new WorktreeLeaseStore(state, projectId);

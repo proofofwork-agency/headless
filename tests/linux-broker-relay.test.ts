@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProviderBroker } from "../src/broker/server";
-import { registerAdapter, unregisterAdapter, type BackendAdapter } from "../src/backends/registry";
+import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { runHeadless } from "../src/runner/simple";
 
 const linuxTest = process.platform === "linux" ? test : test.skip;
@@ -48,7 +48,7 @@ console.log(JSON.stringify({ type: "text", text: JSON.stringify({ directDenied, 
     chmodSync(executable, 0o700);
     process.env.PATH = `${bin}:${originalPath}`;
 
-    const adapter: BackendAdapter = {
+    const adapter: BackendDefinition = {
       id: "linux-relay-fixture",
       metadata: { id: "linux-relay-fixture", aliases: [], promptDelivery: "native", timeoutMs: 10_000, maxDepth: null, canRead: true, canWrite: false },
       capabilities: { write: false, streaming: true, structuredOutput: true, nativeResume: false, cancellation: true, tools: false, effort: false, brokerCompatible: true },
@@ -56,14 +56,14 @@ console.log(JSON.stringify({ type: "text", text: JSON.stringify({ directDenied, 
       probe: { versionCommand: ["relay-fixture", "--version"], helpCommand: ["relay-fixture", "--help"], requiredHelpFragments: ["--relay-fixture"], minimumVersion: "1.0.0", timeoutMs: 2_000, maxOutputBytes: 4_096 },
       stdinPrompt: false,
       credentialPrefixes: [],
-      buildCommand: () => ["relay-fixture"],
+      prepareCommand: () => ["relay-fixture"],
       parse(stdout) {
         const event = JSON.parse(stdout.trim()) as { text: string };
         return { output: event.text, cost: null, tokens: null, error: null };
       },
     };
-    registerAdapter(adapter);
-    cleanup.push(() => unregisterAdapter(adapter.id));
+    registerBackendDefinition(adapter);
+    cleanup.push(() => unregisterBackendDefinition(adapter.id));
 
     const result = await runHeadless({
       backend: adapter.id,

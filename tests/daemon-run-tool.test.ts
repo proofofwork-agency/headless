@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerAdapter, unregisterAdapter, type BackendAdapter } from "../src/backends/registry";
+import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import type { Job } from "../src/contracts/durable";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
@@ -13,7 +13,7 @@ const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];
 
 afterEach(async () => {
-  unregisterAdapter(ADAPTER_ID);
+  unregisterBackendDefinition(ADAPTER_ID);
   for (const daemon of daemons.splice(0)) await daemon.stop().catch(() => {});
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -28,7 +28,7 @@ describe("daemon-owned worker cooperation", () => {
     roots.push(runtime);
     const state = { env: { ...process.env, HEADLESS_STATE_HOME: join(root, "state"), HEADLESS_RUNTIME_HOME: runtime } };
     let preparedPrompt = "";
-    registerAdapter(fixtureAdapter((prompt) => { preparedPrompt = prompt; }));
+    registerBackendDefinition(fixtureAdapter((prompt) => { preparedPrompt = prompt; }));
 
     const token = "d".repeat(48);
     const daemon = new HeadlessDaemon({ projectRoot: project, state, token, principal: "coordinator" });
@@ -67,7 +67,7 @@ describe("daemon-owned worker cooperation", () => {
   });
 });
 
-function fixtureAdapter(capturePrompt: (prompt: string) => void): BackendAdapter {
+function fixtureAdapter(capturePrompt: (prompt: string) => void): BackendDefinition {
   const script = String.raw`
 const calls = [
   ["task_status", "{}"],
@@ -93,11 +93,11 @@ console.log(JSON.stringify({ task: results[0], note: results[1], leaked: process
     probe: { versionCommand: ["bun", "--version"], helpCommand: ["bun", "--help"], requiredHelpFragments: ["Usage:"], timeoutMs: 2_000, maxOutputBytes: 262_144 },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand: (options) => {
+    prepareCommand: (options) => {
       capturePrompt(options.prompt);
       return ["bun", "-e", script];
     },
-    parse: (stdout) => ({ output: stdout.trim(), cost: null, tokens: null, error: null }),
+    decodeOutput: (stdout) => ({ output: stdout.trim(), cost: null, tokens: null, error: null }),
   };
 }
 

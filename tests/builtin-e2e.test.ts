@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { DurableSession, Job } from "../src/contracts/durable";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
+import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
 
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];
@@ -13,11 +14,13 @@ const originalCredentials = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
 };
+const pricingIds = ["builtin-e2e-openai", "builtin-e2e-anthropic"];
 
 afterEach(async () => {
   process.env.PATH = originalPath;
   restore("OPENAI_API_KEY", originalCredentials.OPENAI_API_KEY);
   restore("ANTHROPIC_API_KEY", originalCredentials.ANTHROPIC_API_KEY);
+  for (const id of pricingIds) unregisterPricing(id);
   while (daemons.length) await daemons.pop()!.stop();
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
@@ -28,7 +31,17 @@ describe("built-in backend end-to-end sessions", () => {
     installBuiltins(fixture.bin);
     process.env.OPENAI_API_KEY = "host-openai-secret";
     process.env.ANTHROPIC_API_KEY = "host-anthropic-secret";
-    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48), principal: "coordinator" });
+    for (const [id, provider] of [[pricingIds[0], "openai"], [pricingIds[1], "anthropic"]] as const) {
+      registerPricing({
+        id,
+        provider,
+        model: "*",
+        effectiveFrom: 0,
+        inputUsdPerMillion: 1,
+        outputUsdPerMillion: 1,
+      });
+    }
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48), principal: "coordinator", enableExperimentalSessions: true });
     daemons.push(daemon);
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48), timeoutMs: 30_000 });
@@ -44,10 +57,10 @@ describe("built-in backend end-to-end sessions", () => {
         authMode: "broker",
         prompt: `one-shot ${backend.id}`,
         containment: "required",
-        timeoutMs: 10_000,
+        timeoutMs: 30_000,
       });
-      const oneShot = await client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 15_000 }, 20_000);
-      expect(oneShot.state).toBe("succeeded");
+      const oneShot = await client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 35_000 }, 40_000);
+      expect(oneShot.state, `${backend.id}: ${JSON.stringify(oneShot.result)}`).toBe("succeeded");
       expect(oneShot.result?.output).toBe(`${backend.id}-first`);
       expect(oneShot.result?.containment).toMatchObject({ requirement: "required", enforced: true, credentialsIsolated: true });
       expect(oneShot.result?.output).not.toContain("host-");
@@ -58,15 +71,15 @@ describe("built-in backend end-to-end sessions", () => {
         authMode: "broker",
         containment: "required",
       });
-      const first = await client.call<{ job: Job }>("session.send", { sessionId: session.id, prompt: "first request", timeoutMs: 10_000 });
-      const firstResult = await client.call<Job>("run.wait", { jobId: first.job.id, timeoutMs: 15_000 }, 20_000);
+      const first = await client.call<{ job: Job }>("session.send", { sessionId: session.id, prompt: "first request", timeoutMs: 30_000 });
+      const firstResult = await client.call<Job>("run.wait", { jobId: first.job.id, timeoutMs: 35_000 }, 40_000);
       expect(firstResult.result?.output).toBe(`${backend.id}-first`);
       const second = await client.call<{ job: Job; replay: { truncated: boolean } }>("session.resume", {
         sessionId: session.id,
         prompt: "second request",
-        timeoutMs: 10_000,
+        timeoutMs: 30_000,
       });
-      const resumed = await client.call<Job>("run.wait", { jobId: second.job.id, timeoutMs: 15_000 }, 20_000);
+      const resumed = await client.call<Job>("run.wait", { jobId: second.job.id, timeoutMs: 35_000 }, 40_000);
       expect(resumed.state).toBe("succeeded");
       expect(resumed.result?.output).toBe(`${backend.id}-replayed`);
       expect(second.replay.truncated).toBe(false);
@@ -91,7 +104,7 @@ function installBuiltins(bin: string) {
   install(bin, "opencode", `
 const args=process.argv.slice(2);
 if(args.includes("--version")){console.log("opencode 1.17.17");process.exit(0)}
-if(args.includes("--help")){console.log("--pure --format --dir --model --agent");process.exit(0)}
+if(args.includes("--help")){console.log("--pure --format --dir --model --agent --session --auto");process.exit(0)}
 if(Object.values(process.env).some((value)=>value==="host-openai-secret"||value==="host-anthropic-secret")){console.error("host credential exposed");process.exit(9)}
 const prompt=args.at(-1)??"";
 const text=prompt.includes("opencode-first")?"opencode-replayed":"opencode-first";

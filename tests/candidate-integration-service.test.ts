@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunRequestSchema, type RunResult } from "../src/contracts/run";
@@ -21,6 +21,8 @@ const roots: string[] = [];
 const gitAvailable = runGitStrict(["--version"], process.cwd()).ok;
 const gitTest = gitAvailable ? test : test.skip;
 
+setDefaultTimeout(15_000);
+
 const passed: WriteGateDecision = {
   policyPassed: true,
   testsPassed: true,
@@ -36,6 +38,58 @@ afterEach(() => {
 });
 
 describe("CandidateIntegrationService", () => {
+  gitTest("recovers an output-overflow candidate only through advanced gates", async () => {
+    let gateCalls = 0;
+    const fixture = createFixture({
+      outputOverflow: true,
+      evaluateIntegrationGates: async () => { gateCalls += 1; return passed; },
+    });
+
+    expect((await fixture.service.inspect(fixture.jobId, admin())).eligible).toBe(false);
+    const result = await fixture.service.integrate(fixture.jobId, admin());
+
+    expect(gateCalls).toBe(1);
+    expect(result.merged).toBe(true);
+    expect(readFileSync(join(fixture.repo, "candidate.txt"), "utf8")).toBe("candidate\n");
+    const decisions = fixture.finality.list().filter((record) => record.decision.jobId === fixture.jobId);
+    expect(decisions.some((record) => record.decision.allowed && !record.requirements.tests && !record.requirements.review)).toBe(true);
+    expect(decisions.at(-1)?.decision).toMatchObject({ allowed: true, testsPassed: true, reviewPassed: true });
+  }, 15_000);
+
+  gitTest("keeps an output-overflow candidate preserved when recovery gates fail", async () => {
+    const fixture = createFixture({
+      outputOverflow: true,
+      evaluateIntegrationGates: async () => ({ ...passed, testsPassed: false, reasons: ["candidate tests failed"] }),
+    });
+    const primary = getHeadSha(fixture.repo);
+
+    const result = await fixture.service.integrate(fixture.jobId, admin());
+
+    expect(result.merged).toBe(false);
+    expect(result.reason).toContain("candidate tests failed");
+    expect(getHeadSha(fixture.repo)).toBe(primary);
+    expect(existsSync(join(fixture.repo, "candidate.txt"))).toBe(false);
+  });
+
+  gitTest("requires explicit ask-mode approval before overflow recovery gates", async () => {
+    let gateCalls = 0;
+    const fixture = createFixture({
+      outputOverflow: true,
+      approvalPolicy: "ask",
+      evaluateIntegrationGates: async () => { gateCalls += 1; return passed; },
+    });
+
+    await expect(fixture.service.integrate(fixture.jobId, admin())).rejects.toMatchObject({ code: "APPROVAL_REQUIRED" });
+    expect(gateCalls).toBe(0);
+    const approval = fixture.approvals.list({ collaborationId: fixture.jobId, status: "pending" })[0]!;
+    expect(approval).toMatchObject({ kind: "merge", details: { recovery: "output-overflow" } });
+    fixture.approvals.resolveAsAdministrator(approval.id, "coordinator", "approved", "Reviewed recovery candidate.");
+
+    const result = await fixture.service.integrate(fixture.jobId, admin());
+    expect(gateCalls).toBe(1);
+    expect(result.merged).toBe(true);
+  });
+
   gitTest("fast-forwards an allowed auto candidate and persists the decision and journal", async () => {
     const fixture = createFixture();
     const originalHead = getHeadSha(fixture.repo);
@@ -294,6 +348,7 @@ type FixtureOptions = {
   candidatePath?: string;
   candidateText?: string;
   evaluateIntegrationGates?: (context: WriteGateContext) => Promise<WriteGateDecision>;
+  outputOverflow?: boolean;
 };
 
 type Fixture = ReturnType<typeof createFixture>;
@@ -337,7 +392,7 @@ function createFixture(options: FixtureOptions = {}) {
   jobs.create({ id: jobId, projectId: paths.projectId, principal: "worker", request });
   jobs.claim(jobId, "test", 60_000);
   jobs.transition(jobId, "running");
-  jobs.complete(jobId, preservedResult(jobId, baseCommit, candidateCommit, diff));
+  jobs.complete(jobId, preservedResult(jobId, baseCommit, candidateCommit, diff, options.outputOverflow));
 
   const authority = new AuthorityStore(paths, { coordinator: "coordinator" });
   const finality = new FinalityStore(paths);
@@ -346,7 +401,9 @@ function createFixture(options: FixtureOptions = {}) {
     jobId,
     decidedBy: "coordinator",
     requirements: { policy: true, tests: true, review: true, vote: false, budget: true },
-    gates: { policyPassed: true, testsPassed: true, reviewPassed: true, votePassed: false, budgetPassed: true },
+    gates: options.outputOverflow
+      ? { policyPassed: false, testsPassed: false, reviewPassed: false, votePassed: false, budgetPassed: true }
+      : { policyPassed: true, testsPassed: true, reviewPassed: true, votePassed: false, budgetPassed: true },
   });
   const approvals = new ApprovalStore(paths);
   const journal = new IntegrationJournal(paths);
@@ -392,10 +449,13 @@ function preservedResult(
   baseCommit: string,
   candidateCommit: string,
   diff: { diff: string; status: string; files: string[] },
+  outputOverflow = false,
 ): RunResult {
   return {
-    status: "blocked",
-    error: { code: "POLICY_DENIED", message: "Candidate preserved for later integration.", retryable: false },
+    status: outputOverflow ? "failed" : "blocked",
+    error: outputOverflow
+      ? { code: "OUTPUT_OVERFLOW", message: "Provider output exceeded the bounded stream limit.", retryable: false }
+      : { code: "POLICY_DENIED", message: "Candidate preserved for later integration.", retryable: false },
     backend: "opencode",
     output: "candidate complete",
     stderr: "",

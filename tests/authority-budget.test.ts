@@ -28,7 +28,7 @@ describe("persistent authority", () => {
       ...request(paths, "coordinator"),
       projectId: "b".repeat(64),
     }).allowed).toBe(false);
-    expect(() => store.addGrant("worker", grant(paths))).toThrow("Only the configured coordinator");
+    expect(() => store.addGrant("worker", grant(paths))).toThrow("Only the root principal");
 
     const added = store.addGrant("coordinator", grant(paths));
     expect(added.id).toBe("grant-write");
@@ -56,7 +56,7 @@ describe("persistent authority", () => {
     expect(mode(paths.policyPath)).toBe(0o600);
     const reopened = new AuthorityStore(paths, { coordinator: "coordinator", now: () => now });
     expect(reopened.authorize(request(paths, "worker", { estimatedCostUsd: 2, merge: true })).allowed).toBe(true);
-    expect(() => new AuthorityStore(paths, { coordinator: "replacement" })).toThrow("does not match persisted coordinator");
+    expect(() => new AuthorityStore(paths, { coordinator: "replacement" })).toThrow("does not match persisted root");
 
     now = 1_500;
     reopened.revokeGrant("coordinator", "grant-write");

@@ -19,6 +19,31 @@ describe("stream-safe redaction", () => {
     expect(result.text).not.toContain(token);
   });
 
+  test("does not mistake ordinary secret-domain function calls for credentials", () => {
+    const source = [
+      "const secret = makeSecret(options);",
+      "const secretIndex = encode(secret);",
+      "const password = derivePassword(input);",
+    ].join("\n");
+    const result = redactAndTruncate(source);
+
+    expect(result.redacted).toBe(false);
+    expect(result.text).toBe(source);
+    expect(redactAndTruncate(`api_key=${"f".repeat(40)}`).redacted).toBe(true);
+    expect(redactAndTruncate('api_key="makeSecret(options)"').text).toContain('[REDACTED]');
+    expect(redactAndTruncate("password='derivePassword(input)'").text).toContain('[REDACTED]');
+  });
+
+  test("does not reject ordinary storage constants or React key props", () => {
+    const source = [
+      "const STORAGE_KEY = 'signal-garden:intentions'",
+      "const row = <Plant key={item.id} intention={item} />",
+    ].join("\n");
+    expect(redactAndTruncate(source)).toEqual({ text: source, redacted: false, truncated: false });
+    expect(redactAndTruncate(`OPENAI_API_KEY=${"z".repeat(40)}`).redacted).toBe(true);
+    expect(redactAndTruncate(`SECRET_KEY=${"y".repeat(40)}`).redacted).toBe(true);
+  });
+
   test("cannot reconstruct secrets split at arbitrary chunk boundaries", () => {
     const secrets = [
       `hls_${"B".repeat(43)}`,

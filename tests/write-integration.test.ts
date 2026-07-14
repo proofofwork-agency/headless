@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,8 @@ import {
   type WriteGateContext,
   type WriteGateDecision,
 } from "../src/runtime/write-integration";
+
+setDefaultTimeout(15_000);
 
 const gitAvailable = runGitStrict(["--version"], process.cwd()).ok;
 const gitTest = gitAvailable ? test : test.skip;
@@ -70,6 +72,52 @@ describe("coordinator write integration", () => {
     expect(result.branch).toStartWith("headless/candidate/");
     expect(candidateBranchExists(repo, result.branch)).toBe(true);
     expect(existsSync(plan.worktreePath)).toBe(false);
+  });
+
+  gitTest("gates and preserves an output-overflow candidate without auto-integrating it", async () => {
+    const repo = initRepo();
+    const base = getHeadSha(repo)!;
+    const plan = createWriteWorktree(planWriteWorktree({ primaryRoot: repo, label: "overflow-recovery" }));
+    writeFileSync(join(plan.worktreePath, "game.ts"), "export const playable = true;\n");
+    const diff = captureWriteDiff(plan);
+    let gateCalls = 0;
+
+    const result = await integrateWriteCandidate({
+      plan,
+      diff,
+      execution: { ...succeededExecution(), succeeded: false, status: "failed", failureCode: "OUTPUT_OVERFLOW" },
+      policy: policy(async () => { gateCalls += 1; return passed; }),
+    });
+
+    expect(gateCalls).toBe(1);
+    expect(result.outcome).toBe("preserved_no_merge_authority");
+    expect(result.reason).toContain("explicit review");
+    expect(result.candidateCommit).not.toBeNull();
+    expect(result.gates[0]?.decision.testsPassed).toBe(true);
+    expect(getHeadSha(repo)).toBe(base);
+    expect(existsSync(join(repo, "game.ts"))).toBe(false);
+    expect(candidateBranchExists(repo, result.branch)).toBe(true);
+  });
+
+  gitTest("does not gate or integrate an ordinary failed execution", async () => {
+    const repo = initRepo();
+    const base = getHeadSha(repo)!;
+    const plan = createWriteWorktree(planWriteWorktree({ primaryRoot: repo, label: "ordinary-failure" }));
+    writeFileSync(join(plan.worktreePath, "partial.ts"), "export const partial = true;\n");
+    const diff = captureWriteDiff(plan);
+    let gateCalls = 0;
+
+    const result = await integrateWriteCandidate({
+      plan,
+      diff,
+      execution: { ...succeededExecution(), succeeded: false, status: "failed", failureCode: "PROCESS_ERROR" },
+      policy: policy(async () => { gateCalls += 1; return passed; }),
+    });
+
+    expect(gateCalls).toBe(0);
+    expect(result.outcome).toBe("preserved_execution_failure");
+    expect(result.candidateCommit).not.toBeNull();
+    expect(getHeadSha(repo)).toBe(base);
   });
 
   gitTest("a principal without merge authority receives a preserved candidate", async () => {

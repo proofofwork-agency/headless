@@ -20,7 +20,7 @@ import {
 } from "../src/runtime/os-sandbox";
 import { createWorkerEnvironment } from "../src/runtime/worker-environment";
 import { executableReadRoots, maybeWrapWithSandbox, resolveLinuxRelayEntry } from "../src/runner/simple";
-import { backendAdapters } from "../src/backends/registry";
+import { backendDefinitions } from "../src/backends/registry";
 import { ProviderBroker } from "../src/broker/server";
 import { RunToolEndpointManager } from "../src/daemon/run-tool-endpoint";
 import { installRunToolClient } from "../src/runtime/run-tool-client";
@@ -375,7 +375,7 @@ describe("Linux bubblewrap profiles", () => {
     const wrapped = maybeWrapWithSandbox(
       ["bun", "-e", script],
       { backend: "opencode", prompt: "relay", cwd: project, containment: "required", broker: { provider: "openai", baseUrl: relayUrl, token: lease.token, unixSocket: socket } },
-      backendAdapters.opencode,
+      backendDefinitions.opencode,
       project,
       undefined,
       worker,
@@ -478,7 +478,7 @@ describe("Linux bubblewrap profiles", () => {
         broker: { provider: "openai", baseUrl: relayUrl, token: lease.token, unixSocket: brokerSocket },
         runTool: endpoint,
       },
-      backendAdapters.opencode,
+      backendDefinitions.opencode,
       project,
       undefined,
       worker,
@@ -532,7 +532,7 @@ describe("Linux bubblewrap profiles", () => {
     const wrapped = maybeWrapWithSandbox(
       ["bun", "-e", script],
       { backend: "opencode", prompt: "x32 probe", cwd: project, containment: "required" },
-      backendAdapters.opencode,
+      backendDefinitions.opencode,
       project,
       undefined,
       worker,
@@ -582,7 +582,7 @@ describe("macOS Seatbelt profiles", () => {
     const wrapped = maybeWrapWithSandbox(
       ["fixture-bun"],
       { backend: "opencode", prompt: "stage", cwd: project, containment: "required", authMode: "broker" },
-      backendAdapters.opencode,
+      backendDefinitions.opencode,
       project,
       undefined,
       worker,
@@ -635,6 +635,7 @@ describe("macOS Seatbelt profiles", () => {
       expect(profile).toContain(`(deny file-read* (literal ${JSON.stringify(join(canonical(project), ".env.local"))}))`);
       expect(profile).toContain(`(deny file-read* (literal ${JSON.stringify(join(canonical(project), ".git", "config"))}))`);
       expect(profile).toContain("(deny network*)");
+      expect(profile).toContain('(allow file-write* (literal "/dev/null"))');
       expect(profile).toContain("(allow signal (target self))");
       expect(profile).toContain("(allow signal (target children))");
       expect(profile).not.toContain("(allow signal)");
@@ -654,6 +655,7 @@ describe("macOS Seatbelt profiles", () => {
       const profile = buildDarwinWriteProfile({ primaryRoot: primary, worktree, worker });
       expect(profile).toContain("(deny default)");
       expect(profile).toContain(`(allow file-write* (subpath ${JSON.stringify(canonical(worktree))}))`);
+      expect(profile).toContain(`(allow file-read-data (literal ${JSON.stringify(canonical(dirname(worktree)))}))`);
       expect(profile).toContain(`(deny file-write* (subpath ${JSON.stringify(canonical(primary))}))`);
       expect(profile).not.toContain(`(allow file-write* (subpath ${JSON.stringify(canonical(primary))}))`);
       expect(profile).toContain(`(deny file-read* (literal ${JSON.stringify(join(canonical(primary), ".env.production"))}))`);
@@ -675,7 +677,10 @@ describe("macOS Seatbelt profiles", () => {
     const protectedFile = join(primary, "protected.txt");
     const hardlinkAlias = join(worktree, "protected-alias.txt");
     const symlinkAlias = join(worktree, "protected-symlink.txt");
+    const siblingSecret = join(dirname(worktree), "sibling-secret.txt");
+    const nullProbe = join(worktree, "null-probe.txt");
     writeFileSync(protectedFile, "original", { mode: 0o600 });
+    writeFileSync(siblingSecret, "SEEDED_SIBLING_SECRET", { mode: 0o600 });
     symlinkSync(protectedFile, symlinkAlias);
 
     try {
@@ -699,6 +704,14 @@ describe("macOS Seatbelt profiles", () => {
         cwd: worktree,
         encoding: "utf-8",
       });
+      const nullResult = spawnSync(DARWIN_SANDBOX_EXEC, ["-f", profile, "/bin/sh", "-c", `printf ignored > /dev/null && printf allowed > ${shellQuote(nullProbe)}`], {
+        cwd: worktree,
+        encoding: "utf-8",
+      });
+      const siblingReadResult = spawnSync(DARWIN_SANDBOX_EXEC, ["-f", profile, "/bin/cat", siblingSecret], {
+        cwd: worktree,
+        encoding: "utf-8",
+      });
 
       expect(allowedResult.status).toBe(0);
       expect(readFileSync(allowed, "utf-8")).toBe("allowed");
@@ -708,6 +721,10 @@ describe("macOS Seatbelt profiles", () => {
       expect(readFileSync(protectedFile, "utf-8")).toBe("original");
       expect(gitPointerResult.status).not.toBe(0);
       expect(readFileSync(gitPointer, "utf-8")).toBe("gitdir: /daemon/owned/metadata\n");
+      expect(nullResult.status, nullResult.stderr).toBe(0);
+      expect(readFileSync(nullProbe, "utf-8")).toBe("allowed");
+      expect(siblingReadResult.status).not.toBe(0);
+      expect(siblingReadResult.stdout).not.toContain("SEEDED_SIBLING_SECRET");
       expect(existsSync(hardlinkAlias)).toBe(false);
       expect(symlinkResult.status).not.toBe(0);
       expect(readFileSync(protectedFile, "utf-8")).toBe("original");

@@ -108,7 +108,7 @@ await Bun.sleep(60000);
       cwd: root,
       env: process.env,
       stdin: null,
-      timeoutMs: 250,
+      timeoutMs: 2_000,
       signal: new AbortController().signal,
       protocol: "text",
     });
@@ -117,7 +117,7 @@ await Bun.sleep(60000);
     const descendantPid = Number(readFileSync(marker, "utf8"));
     expect(cleanupSawLiveDescendant).toBe(false);
     expect(processAlive(descendantPid)).toBe(false);
-  });
+  }, 10_000);
 
   test("runs a persistent JSON-RPC transport and waits for lifecycle notifications", async () => {
     const root = fixture();

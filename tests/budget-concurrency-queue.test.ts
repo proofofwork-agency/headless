@@ -3,8 +3,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
-import { registerAdapter, unregisterAdapter, type BackendAdapter } from "../src/backends/registry";
-import type { Job } from "../src/contracts/durable";
+import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
+import type { DurableSession, Job } from "../src/contracts/durable";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { BudgetStore } from "../src/runtime/budget-store";
@@ -15,7 +15,7 @@ const adapters: string[] = [];
 
 afterEach(async () => {
   while (daemons.length) await daemons.pop()!.stop();
-  while (adapters.length) unregisterAdapter(adapters.pop()!);
+  while (adapters.length) unregisterBackendDefinition(adapters.pop()!);
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -43,18 +43,23 @@ console.log(JSON.stringify({ type: "text", text: prompt }));
     chmodSync(executable, 0o700);
 
     const adapterId = `budget-queue-${crypto.randomUUID()}`;
-    registerAdapter(fixtureAdapter(adapterId, executable, control));
+    registerBackendDefinition(fixtureAdapter(adapterId, executable, control));
     adapters.push(adapterId);
     const state = { env: { ...process.env, HEADLESS_STATE_HOME: stateHome } };
     const token = "q".repeat(48);
-    const daemon = new HeadlessDaemon({ projectRoot: project, state, token, principal: "coordinator", maxConcurrency: 2 });
+    const daemon = new HeadlessDaemon({ projectRoot: project, state, token, principal: "coordinator", maxConcurrency: 2, enableExperimentalSessions: true });
     daemons.push(daemon);
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: project, state, token });
+    const session = await client.call<DurableSession>("session.create", {
+      backend: adapterId,
+      authMode: "broker",
+      containment: "unsafe",
+    });
     await client.call("budget.upsert", {
       id: "session-cap",
       principal: "coordinator",
-      sessionId: "session-one",
+      sessionId: session.id,
       workflowId: null,
       provider: null,
       maxRequests: null,
@@ -66,13 +71,13 @@ console.log(JSON.stringify({ type: "text", text: prompt }));
       maxRetries: null,
     });
 
-    const first = await client.call<Job>("run.submit", run(adapterId, "first", "session-one"));
+    const first = await client.call<Job>("run.submit", run(adapterId, "first", session.id));
     await waitForPath(join(control, "first.started"), async () => {
       const current = await client.call<Job>("run.status", { jobId: first.id });
       return current.result ? `${current.state}: ${current.result.error?.message ?? current.result.output}` : current.state;
     });
-    const queued = await client.call<Job>("run.submit", run(adapterId, "queued", "session-one"));
-    const cancelled = await client.call<Job>("run.submit", run(adapterId, "cancelled", "session-one"));
+    const queued = await client.call<Job>("run.submit", run(adapterId, "queued", session.id));
+    const cancelled = await client.call<Job>("run.submit", run(adapterId, "cancelled", session.id));
 
     expect((await client.call<Job>("run.status", { jobId: queued.id })).state).toBe("queued");
     expect(existsSync(join(control, "queued.started"))).toBe(false);
@@ -92,7 +97,7 @@ console.log(JSON.stringify({ type: "text", text: prompt }));
   }, 15_000);
 });
 
-function fixtureAdapter(id: string, executable: string, control: string): BackendAdapter {
+function fixtureAdapter(id: string, executable: string, control: string): BackendDefinition {
   return {
     id,
     metadata: { id, aliases: [], promptDelivery: "argv", timeoutMs: 5_000, maxDepth: null, canRead: true, canWrite: false },
@@ -101,8 +106,8 @@ function fixtureAdapter(id: string, executable: string, control: string): Backen
     probe: { versionCommand: ["/usr/bin/true"], helpCommand: ["/usr/bin/true"], requiredHelpFragments: [], timeoutMs: 1_000, maxOutputBytes: 1_024 },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand: (options) => [executable, options.prompt, control],
-    parse: parseOpenCodeJsonl,
+    prepareCommand: (options) => [executable, options.prompt, control],
+    decodeOutput: parseOpenCodeJsonl,
   };
 }
 

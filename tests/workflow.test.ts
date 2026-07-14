@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerAdapter, unregisterAdapter, type BackendAdapter } from "../src/backends/registry";
+import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
 import type { Job, Workflow } from "../src/contracts/durable";
 import { HeadlessDaemonClient } from "../src/daemon/client";
@@ -15,8 +15,8 @@ const originalPath = process.env.PATH;
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];
 
-registerAdapter(fixtureAdapter());
-afterAll(() => unregisterAdapter(BACKEND));
+registerBackendDefinition(fixtureAdapter());
+afterAll(() => unregisterBackendDefinition(BACKEND));
 afterEach(async () => {
   process.env.PATH = originalPath;
   while (daemons.length) await daemons.pop()!.stop();
@@ -148,7 +148,7 @@ async function start(fixture: ReturnType<typeof createFixture>) {
   return { daemon, client };
 }
 
-function fixtureAdapter(): BackendAdapter {
+function fixtureAdapter(): BackendDefinition {
   return {
     id: BACKEND,
     metadata: { id: BACKEND, aliases: [], promptDelivery: "argv", timeoutMs: 10_000, maxDepth: null, canRead: true, canWrite: false },
@@ -157,8 +157,8 @@ function fixtureAdapter(): BackendAdapter {
     probe: { versionCommand: ["/usr/bin/true"], helpCommand: ["/usr/bin/true"], requiredHelpFragments: [], timeoutMs: 1_000, maxOutputBytes: 1_024 },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand: (options, cwd) => ["opencode", "run", "--dir", cwd, "--", options.prompt],
-    parse: parseOpenCodeJsonl,
+    prepareCommand: (options, cwd) => ["opencode", "run", "--dir", cwd, "--", options.prompt],
+    decodeOutput: parseOpenCodeJsonl,
   };
 }
 

@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProviderBroker } from "../src/broker/server";
 import { getProvider, registerProvider, unregisterProvider } from "../src/broker/providers";
 import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
+import { DurableBrokerQuotaStore } from "../src/runtime/broker-quota-store";
+import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 
 const closers: Array<() => void> = [];
 const pricingIds: string[] = [];
@@ -211,6 +213,70 @@ describe("provider broker", () => {
     expect(responses.map((response) => response.status).sort()).toEqual([200, 200, 429]);
     expect(upstreamCalls).toBe(2);
     expect((broker.getLeaseObservation(first.id)?.requests ?? 0) + (broker.getLeaseObservation(second.id)?.requests ?? 0)).toBe(2);
+  });
+
+  test("persists aggregate run ceilings before egress and restores them after broker restart", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-quota-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const project = join(root, "project");
+    mkdirSync(project);
+    const paths = ensureProjectStateDirectories(getProjectStatePaths(project, {
+      env: { ...process.env, HEADLESS_STATE_HOME: join(root, "state"), HEADLESS_RUNTIME_HOME: undefined },
+    }));
+    let upstreamCalls = 0;
+    const createBroker = () => {
+      const store = new DurableBrokerQuotaStore(paths);
+      const broker = new ProviderBroker({
+        credentials: { OPENAI_API_KEY: "secret" },
+        upstreams: { openai: "http://127.0.0.1:9" },
+        fetch: (async () => {
+          upstreamCalls += 1;
+          return Response.json({ ok: true });
+        }) as typeof fetch,
+        initialBudgetQuotas: store.snapshot(),
+        persistBudgetQuota: (quota, expiresAt) => store.update(quota, expiresAt),
+      });
+      broker.start();
+      return broker;
+    };
+    const quota = {
+      id: "durable-run-ceiling",
+      maxRequests: 2,
+      usedRequests: 0,
+      maxInputTokens: 1_000,
+      usedInputTokens: 0,
+      maxOutputTokens: 10,
+      usedOutputTokens: 0,
+      maxCostUsd: null,
+      usedCostUsd: 0,
+    };
+    const issue = (broker: ProviderBroker) => broker.issueLease({
+      runId: "same-logical-run",
+      provider: "openai",
+      models: ["gpt-4o-mini"],
+      endpointClasses: ["responses"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 8,
+      budgetQuotas: [quota],
+    });
+    const send = (lease: ReturnType<typeof issue>) => fetch(`${lease.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${lease.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-4o-mini", input: "x", max_output_tokens: 1 }),
+    });
+
+    const firstBroker = createBroker();
+    const first = issue(firstBroker);
+    const firstResponse = await send(first);
+    expect(firstResponse.status, await firstResponse.text()).toBe(200);
+    firstBroker.stop();
+
+    const secondBroker = createBroker();
+    closers.push(() => secondBroker.stop());
+    const second = issue(secondBroker);
+    expect((await send(second)).status).toBe(200);
+    expect((await send(second)).status).toBe(429);
+    expect(upstreamCalls).toBe(2);
   });
 
   test("rejects provider requests that exceed aggregate input or output token caps before egress", async () => {
@@ -671,16 +737,17 @@ describe("provider broker", () => {
     const broker = new ProviderBroker({ credentials: { OPENAI_API_KEY: "secret" } });
     broker.start();
     closers.push(() => broker.stop());
+    const expiresAt = Date.now() + 500;
     const lease = broker.issueLease({
       runId: "expiring-lease",
       provider: "openai",
       models: ["allowed"],
       endpointClasses: ["responses"],
-      expiresAt: Date.now() + 5,
+      expiresAt,
       maxRequests: 1,
     });
     expect(broker.getResourceUsage().leases).toBe(1);
-    await Bun.sleep(10);
+    while (Date.now() <= expiresAt) await Bun.sleep(10);
 
     const response = await fetch(`${lease.baseUrl}/v1/responses`, {
       method: "POST",

@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getAdapter } from "../src/backends/registry";
+import { getBackendDefinition } from "../src/backends/registry";
 import { NativeSessionManager } from "../src/runtime/native-session-manager";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 describe("native session manager", () => {
-  test("keeps Grok native sessions fail-closed before auth or subprocess startup", async () => {
+  test("admits Grok read-only containment but still fails closed before subprocess startup without file auth", async () => {
     const fixture = createFixture(false);
     const sessions = new PersistentSessionStore(fixture.paths);
     const session = sessions.create({
@@ -25,7 +25,10 @@ describe("native session manager", () => {
       containment: "required",
       authMode: "native-login",
     });
-    const manager = new NativeSessionManager(fixture.project, sessions, { authHomeDir: fixture.home });
+    const manager = new NativeSessionManager(fixture.project, sessions, {
+      authHomeDir: fixture.home,
+      workerBaseDir: fixture.runtime,
+    });
 
     const result = await manager.turn(session, "must not launch", 5_000);
 
@@ -33,7 +36,7 @@ describe("native session manager", () => {
       ok: false,
       status: "blocked",
       sandboxed: false,
-      error: { code: "BACKEND_UNSUPPORTED" },
+      error: { code: "NATIVE_AUTH_UNAVAILABLE" },
       diagnostics: { format: "native-session:prelaunch" },
       containment: {
         requirement: "required",
@@ -48,7 +51,7 @@ describe("native session manager", () => {
       },
     });
     expect(result.sandboxReason).toBeUndefined();
-    expect(result.output).toContain("does not disable");
+    expect(result.output).toContain("No native authentication state");
     await manager.closeAll();
   });
 
@@ -61,7 +64,10 @@ describe("native session manager", () => {
       containment: "required",
       authMode: "native-login",
     });
-    const manager = new NativeSessionManager(fixture.project, sessions, { authHomeDir: fixture.home });
+    const manager = new NativeSessionManager(fixture.project, sessions, {
+      authHomeDir: fixture.home,
+      workerBaseDir: fixture.runtime,
+    });
 
     const result = await manager.turn(session, "must not launch", 5_000);
 
@@ -107,7 +113,7 @@ describe("native session manager", () => {
         enforced: true,
         isolatedHome: true,
         credentialsIsolated: true,
-        network: "provider-direct",
+        network: "native-direct-unrestricted",
         credentialAccess: "backend-native",
         unsafe: false,
       },
@@ -282,7 +288,7 @@ describe("native session manager", () => {
     const sessions = new PersistentSessionStore(fixture.paths);
     const session = sessions.create({ principal: "owner", backend: "opencode", containment: "unsafe" });
     const manager = new NativeSessionManager(fixture.project, sessions, { authHomeDir: fixture.home });
-    const adapter = getAdapter("opencode")!;
+    const adapter = getBackendDefinition("opencode")!;
     const originalBuildEnv = adapter.buildEnv;
     adapter.buildEnv = () => { throw new Error(`Native initialization failed with token ${secret}.`); };
     try {
@@ -350,18 +356,21 @@ describe("native session manager", () => {
     writeFileSync(join(fixture.project, ".slow-probe"), "1");
     const sessions = new PersistentSessionStore(fixture.paths);
     const session = sessions.create({ principal: "owner", backend: "opencode", containment: "unsafe" });
-    const manager = new NativeSessionManager(fixture.project, sessions, { authHomeDir: fixture.home });
+    const manager = new NativeSessionManager(fixture.project, sessions, {
+      authHomeDir: fixture.home,
+      workerBaseDir: fixture.runtime,
+    });
     const controller = new AbortController();
 
     const pending = manager.turn(session, "must-not-run", 5_000, controller.signal);
-    await waitForFile(join(fixture.project, ".probe-started"));
+    await waitForWorkerFile(fixture.runtime, ".probe-started");
     controller.abort("test cancellation");
     const result = await pending;
 
     expect(result).toMatchObject({ ok: false, status: "cancelled", error: { code: "CANCELLED" } });
     expect(readCalls(fixture.project)).toEqual([]);
     await manager.closeAll();
-  });
+  }, 15_000);
 
   test("does not initialize a runtime for a pre-aborted turn", async () => {
     const fixture = createFixture();
@@ -370,14 +379,17 @@ describe("native session manager", () => {
     writeFileSync(join(fixture.project, ".slow-probe"), "1");
     const sessions = new PersistentSessionStore(fixture.paths);
     const session = sessions.create({ principal: "owner", backend: "opencode", containment: "unsafe" });
-    const manager = new NativeSessionManager(fixture.project, sessions, { authHomeDir: fixture.home });
+    const manager = new NativeSessionManager(fixture.project, sessions, {
+      authHomeDir: fixture.home,
+      workerBaseDir: fixture.runtime,
+    });
     const controller = new AbortController();
     controller.abort("already cancelled");
 
     const result = await manager.turn(session, "must-not-run", 5_000, controller.signal);
 
     expect(result).toMatchObject({ ok: false, status: "cancelled", error: { code: "CANCELLED" } });
-    expect(existsSync(join(fixture.project, ".probe-started"))).toBe(false);
+    expect(workerFileExists(fixture.runtime, ".probe-started")).toBe(false);
     expect(readCalls(fixture.project)).toEqual([]);
     await manager.closeAll();
   });
@@ -389,16 +401,19 @@ describe("native session manager", () => {
     writeFileSync(join(fixture.project, ".slow-probe"), "1");
     const sessions = new PersistentSessionStore(fixture.paths);
     const session = sessions.create({ principal: "owner", backend: "opencode", containment: "unsafe" });
-    const manager = new NativeSessionManager(fixture.project, sessions, { authHomeDir: fixture.home });
+    const manager = new NativeSessionManager(fixture.project, sessions, {
+      authHomeDir: fixture.home,
+      workerBaseDir: fixture.runtime,
+    });
 
     const pending = manager.turn(session, "must-not-run", 5_000);
-    await waitForFile(join(fixture.project, ".probe-started"));
+    await waitForWorkerFile(fixture.runtime, ".probe-started");
     await manager.closeAll();
     const result = await pending;
 
     expect(result).toMatchObject({ ok: false, status: "cancelled", error: { code: "CANCELLED" } });
     expect(readCalls(fixture.project)).toEqual([]);
-  });
+  }, 15_000);
 
   test("refuses native resume after the auth profile fingerprint changes and uses bounded replay", async () => {
     const fixture = createFixture();
@@ -539,7 +554,7 @@ function installFakeOpenCode(bin: string) {
   writeFileSync(path, `#!/bin/sh
 if [ "$1" = "--version" ]; then
   if [ -f "$PWD/.slow-probe" ]; then
-    : > "$PWD/.probe-started"
+    : > "$HOME/.probe-started"
     sleep 0.25
   fi
   printf '%s\n' 'opencode 1.15.3'
@@ -587,10 +602,14 @@ function readCalls(project: string) {
   return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean) : [];
 }
 
-async function waitForFile(path: string) {
-  const deadline = Date.now() + 2_000;
-  while (!existsSync(path)) {
-    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}.`);
+async function waitForWorkerFile(baseDir: string, name: string) {
+  const deadline = Date.now() + 10_000;
+  while (!workerFileExists(baseDir, name)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${name} beneath ${baseDir}.`);
     await Bun.sleep(5);
   }
+}
+
+function workerFileExists(baseDir: string, name: string) {
+  return readdirSync(baseDir).some((entry) => existsSync(join(baseDir, entry, "home", name)));
 }

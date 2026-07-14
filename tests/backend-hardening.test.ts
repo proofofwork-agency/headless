@@ -6,15 +6,15 @@ import { buildClaudeCommand, CLAUDE_EMPTY_MCP_CONFIG } from "../src/backends/cla
 import { buildCodexCommand, codexProjectPolicyArguments } from "../src/backends/codex";
 import { buildGrokCommand } from "../src/backends/grok";
 import { buildAdapterEnv } from "../src/backends/env";
-import { probeBackendAdapter, type ProbeExecutor } from "../src/backends/probe";
+import { probeBackendDefinition, type ProbeExecutor } from "../src/backends/probe";
 import {
-  backendAdapters,
-  getAdapter,
-  registerAdapter,
+  backendDefinitions,
+  getBackendDefinition,
+  registerBackendDefinition,
   requiredContainmentSecurityGaps,
-  resolveAdapterId,
-  unregisterAdapter,
-  type BackendAdapter,
+  resolveBackendId,
+  unregisterBackendDefinition,
+  type BackendDefinition,
 } from "../src/backends/registry";
 import {
   buildOpenCodeCommand,
@@ -47,8 +47,8 @@ describe("hardened built-in command preparation", () => {
   });
 
   test("Claude preserves native OAuth outside bare mode and has explicit read/write allow and deny sets", () => {
-    const read = buildClaudeCommand({ backend: "claude-code", prompt: "read", mode: "read-only" });
-    const write = buildClaudeCommand({ backend: "claude-code", prompt: "write", mode: "write" });
+    const read = buildClaudeCommand({ backend: "claude-code", prompt: "read", mode: "read-only", authMode: "native-login" });
+    const write = buildClaudeCommand({ backend: "claude-code", prompt: "write", mode: "write", authMode: "native-login" });
     const broker = buildClaudeCommand({ backend: "claude-code", prompt: "broker", authMode: "broker" });
 
     for (const flag of ["--safe-mode", "--setting-sources", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--no-chrome"]) {
@@ -68,7 +68,7 @@ describe("hardened built-in command preparation", () => {
     expect(write[write.indexOf("--disallowedTools") + 1]).not.toContain("Bash");
   });
 
-  test("Codex disables project control surfaces and selects its native sandbox by mode", () => {
+  test("Codex disables project control surfaces and delegates required containment to Headless", () => {
     const root = mkdtempSync(join(tmpdir(), "headless-codex-adapter-"));
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     mkdirSync(join(root, ".git"));
@@ -79,10 +79,12 @@ describe("hardened built-in command preparation", () => {
 
     const read = buildCodexCommand({ backend: "codex", prompt: "read", mode: "read-only" }, root);
     const write = buildCodexCommand({ backend: "codex", prompt: "write", mode: "write" }, root);
+    const unsafeWrite = buildCodexCommand({ backend: "codex", prompt: "write", mode: "write", containment: "unsafe" }, root);
     const readConfig = read.filter((value, index) => read[index - 1] === "-c").join("\n");
 
-    expect(read[read.indexOf("--sandbox") + 1]).toBe("read-only");
-    expect(write[write.indexOf("--sandbox") + 1]).toBe("workspace-write");
+    expect(read[read.indexOf("--sandbox") + 1]).toBe(process.platform === "darwin" ? "danger-full-access" : "read-only");
+    expect(write[write.indexOf("--sandbox") + 1]).toBe(process.platform === "darwin" ? "danger-full-access" : "workspace-write");
+    expect(unsafeWrite[unsafeWrite.indexOf("--sandbox") + 1]).toBe("workspace-write");
     expect(read).toContain("--ignore-user-config");
     expect(read).toContain("--ignore-rules");
     expect(read).toContain("--ephemeral");
@@ -218,7 +220,7 @@ function compareVersion(left: number[], right: number[]) {
 describe("adapter security metadata and bounded capability probes", () => {
   test("reports write support and hardened strict auth honestly", () => {
     for (const id of ["opencode", "claude-code", "codex"] as const) {
-      const adapter = backendAdapters[id];
+      const adapter = backendDefinitions[id];
       expect(adapter.capabilities.write).toBe(true);
       expect(adapter.metadata.canWrite).toBe(true);
       expect(adapter.security).toEqual({
@@ -235,14 +237,21 @@ describe("adapter security metadata and bounded capability probes", () => {
     }
   });
 
-  test("keeps Grok fail-closed after static hardening because dynamic project surfaces remain", () => {
-    expect(requiredContainmentSecurityGaps(backendAdapters["grok-build"])).toEqual([
+  test("admits Grok only when a read-only mount makes late project controls impossible", () => {
+    expect(requiredContainmentSecurityGaps(backendDefinitions["grok-build"])).toEqual([
       "project configuration",
       "startup hooks",
       "project MCP servers",
       "project skills",
     ]);
-    expect(backendAdapters["grok-build"].probe.requiredHelpFragments).toEqual(expect.arrayContaining([
+    expect(requiredContainmentSecurityGaps(backendDefinitions["grok-build"], "read-only")).toEqual([]);
+    expect(requiredContainmentSecurityGaps(backendDefinitions["grok-build"], "write")).toEqual([
+      "project configuration",
+      "startup hooks",
+      "project MCP servers",
+      "project skills",
+    ]);
+    expect(backendDefinitions["grok-build"].probe.requiredHelpFragments).toEqual(expect.arrayContaining([
       "--no-subagents",
       "--no-memory",
       "--disable-web-search",
@@ -255,11 +264,11 @@ describe("adapter security metadata and bounded capability probes", () => {
 
   test("deterministically verifies every required help capability", async () => {
     for (const id of ["opencode", "claude-code", "codex"] as const) {
-      const adapter = getAdapter(id)!;
+      const adapter = getBackendDefinition(id)!;
       const execute: ProbeExecutor = async (argv) => argv.includes("--version")
         ? execution("adapter 9.8.7")
         : execution(adapter.probe!.requiredHelpFragments.join("\n"));
-      expect(await probeBackendAdapter(id, execute)).toEqual({
+      expect(await probeBackendDefinition(id, execute)).toEqual({
         ok: true,
         version: "9.8.7",
         capabilities: adapter.capabilities,
@@ -269,9 +278,9 @@ describe("adapter security metadata and bounded capability probes", () => {
   });
 
   test("fails closed when a required capability or probe bound is missing", async () => {
-    const versionCommand = getAdapter("opencode")!.probe.versionCommand.join("\0");
+    const versionCommand = getBackendDefinition("opencode")!.probe.versionCommand.join("\0");
     const execute: ProbeExecutor = async (argv) => argv.join("\0") === versionCommand ? execution("1.15.3") : execution("--pure");
-    const result = await probeBackendAdapter("opencode", execute);
+    const result = await probeBackendDefinition("opencode", execute);
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("--format");
   });
@@ -279,25 +288,25 @@ describe("adapter security metadata and bounded capability probes", () => {
   test("rejects a CLI older than the security surface's minimum version", async () => {
     const execute: ProbeExecutor = async (argv) => argv.includes("--version")
       ? execution("opencode 1.0.0")
-      : execution(getAdapter("opencode")!.probe.requiredHelpFragments.join("\n"));
-    const result = await probeBackendAdapter("opencode", execute);
+      : execution(getBackendDefinition("opencode")!.probe.requiredHelpFragments.join("\n"));
+    const result = await probeBackendDefinition("opencode", execute);
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("older than required 1.15.3");
   });
 
   test("refuses to probe an arbitrary backend without a contained executor", async () => {
-    const result = await probeBackendAdapter("codex");
+    const result = await probeBackendDefinition("codex");
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("contained probe executor");
   });
 
   test("resolves built-in aliases and exact registered extension IDs", () => {
     const fixture = fixtureAdapter("credential-free-fixture");
-    registerAdapter(fixture);
-    cleanups.push(() => unregisterAdapter(fixture.id));
-    expect(resolveAdapterId("claude")).toBe("claude-code");
-    expect(resolveAdapterId(fixture.id)).toBe(fixture.id);
-    expect(() => resolveAdapterId("missing-fixture")).toThrow("Unsupported backend");
+    registerBackendDefinition(fixture);
+    cleanups.push(() => unregisterBackendDefinition(fixture.id));
+    expect(resolveBackendId("claude")).toBe("claude-code");
+    expect(resolveBackendId(fixture.id)).toBe(fixture.id);
+    expect(() => resolveBackendId("missing-fixture")).toThrow("Unsupported backend");
   });
 
   test("runs a registered credential-free adapter through required containment", async () => {
@@ -305,11 +314,11 @@ describe("adapter security metadata and bounded capability probes", () => {
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     const fixture = {
       ...fixtureAdapter("credential-free-runner"),
-      buildCommand: () => ["/usr/bin/printf", "fixture-output"],
-      parse: (stdout: string) => ({ output: stdout, cost: null, tokens: null, error: null }),
-    } satisfies BackendAdapter;
-    registerAdapter(fixture);
-    cleanups.push(() => unregisterAdapter(fixture.id));
+      prepareCommand: () => ["/usr/bin/printf", "fixture-output"],
+      decodeOutput: (stdout: string) => ({ output: stdout, cost: null, tokens: null, error: null }),
+    } satisfies BackendDefinition;
+    registerBackendDefinition(fixture);
+    cleanups.push(() => unregisterBackendDefinition(fixture.id));
 
     const result = await runHeadless({ backend: fixture.id, prompt: "ignored", cwd: root, containment: "required" });
     expect(result.ok).toBe(true);
@@ -348,11 +357,11 @@ console.log(phase === "help" ? "--fixture-capability" : "7.6.5");
         timeoutMs: 2_000,
         maxOutputBytes: 4_096,
       },
-      buildCommand: () => ["/usr/bin/printf", "contained-output"],
-      parse: (stdout: string) => ({ output: stdout, cost: null, tokens: null, error: null }),
-    } satisfies BackendAdapter;
-    registerAdapter(fixture);
-    cleanups.push(() => unregisterAdapter(fixture.id));
+      prepareCommand: () => ["/usr/bin/printf", "contained-output"],
+      decodeOutput: (stdout: string) => ({ output: stdout, cost: null, tokens: null, error: null }),
+    } satisfies BackendDefinition;
+    registerBackendDefinition(fixture);
+    cleanups.push(() => unregisterBackendDefinition(fixture.id));
 
     const result = await runHeadless({ backend: fixture.id, prompt: "ignored", cwd: project, containment: "required" });
     expect(result.ok).toBe(true);
@@ -365,7 +374,7 @@ function execution(stdout: string) {
   return { exitCode: 0, stdout, stderr: "", timedOut: false, overflowed: false };
 }
 
-function fixtureAdapter(id: string): BackendAdapter {
+function fixtureAdapter(id: string): BackendDefinition {
   return {
     id,
     metadata: { id, aliases: [], promptDelivery: "native", timeoutMs: 1_000, maxDepth: null, canRead: true, canWrite: false },
@@ -374,7 +383,7 @@ function fixtureAdapter(id: string): BackendAdapter {
     probe: { versionCommand: ["true", "--version"], helpCommand: ["true", "--help"], requiredHelpFragments: [], timeoutMs: 1_000, maxOutputBytes: 1_024 },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand: () => ["/usr/bin/true"],
-    parse: () => ({ output: "ok", cost: null, tokens: null, error: null }),
+    prepareCommand: () => ["/usr/bin/true"],
+    decodeOutput: () => ({ output: "ok", cost: null, tokens: null, error: null }),
   };
 }

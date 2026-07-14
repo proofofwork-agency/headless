@@ -26,11 +26,11 @@ describe("fleet CLI protocol parity", () => {
     });
     expect(parseProjectCommand(["project", "trust", "grant", "--allow-bypass"])).toEqual({
       method: "project.trust.grant",
-      params: { nativeLoginAllowed: true, bypassAllowed: true },
+      params: { nativeLoginAllowed: false, nativeDirectUnrestrictedAcknowledged: false, bypassAllowed: true },
     });
-    expect(parseProjectCommand(["project", "trust", "grant", "--deny-native-login"])).toEqual({
+    expect(parseProjectCommand(["project", "trust", "grant", "--allow-native-direct-unrestricted"])).toEqual({
       method: "project.trust.grant",
-      params: { nativeLoginAllowed: false, bypassAllowed: false },
+      params: { nativeLoginAllowed: true, nativeDirectUnrestrictedAcknowledged: true, bypassAllowed: false },
     });
     expect(parseProjectCommand(["project", "trust", "revoke"]).method).toBe("project.trust.revoke");
   });
@@ -66,7 +66,7 @@ describe("fleet CLI protocol parity", () => {
 
   test("maps durable goal start, detached run, coordinator chat, follow, and lifecycle actions", () => {
     expect(parseGoalCommand([
-      "goal", "run", "--fleet-profile-id", "fleet-a", "--coordinator", "agent:codex-lead",
+      "goal", "run", "--fleet-profile-id", "fleet-a", "--synthesizer", "agent:codex-lead",
       "--mode", "write", "--auth-mode", "broker", "--approval-policy", "auto",
       "--autonomous", "--detach", "--timeout-ms", "5000", "Ship v0.2",
     ])).toEqual({
@@ -76,7 +76,7 @@ describe("fleet CLI protocol parity", () => {
         objective: "Ship v0.2",
         mode: "write",
         fleetProfileId: "fleet-a",
-        coordinator: { kind: "agent", agentId: "codex-lead" },
+        synthesizer: { kind: "agent", agentId: "codex-lead" },
         authMode: "broker",
         approvalPolicy: "auto",
         autonomous: true,
@@ -98,7 +98,7 @@ describe("fleet CLI protocol parity", () => {
       expect(parseGoalCommand(["goal", action, "--goal-id", "goal-a"]).method).toBe(`goal.${action}`);
     }
     expect(parseGoalCommand(["goal", "list"])).toMatchObject({ method: "goal.list", params: {} });
-    expect(() => parseGoalCommand(["goal", "start", "--coordinator", "self-appointed", "objective"])).toThrow("Invalid --coordinator");
+    expect(() => parseGoalCommand(["goal", "start", "--synthesizer", "self-appointed", "objective"])).toThrow("Invalid --synthesizer");
     expect(() => parseGoalCommand(["goal", "start", "--mode", "uncontained", "objective"])).toThrow("Invalid --mode");
   });
 
@@ -110,9 +110,9 @@ describe("fleet CLI protocol parity", () => {
       params: { goalId: "goal-a", afterSequence: 0, limit: 10 },
     });
     expect(parseCollaborationCommand([
-      "collaboration", "transfer-leader", "--goal-id", "goal-a", "--agent-id", "claude-lead",
+      "collaboration", "transfer-synthesizer", "--goal-id", "goal-a", "--agent-id", "claude-lead",
     ])).toEqual({
-      method: "collaboration.transferLeader",
+      method: "collaboration.transferSynthesizer",
       params: { goalId: "goal-a", agentId: "claude-lead" },
     });
     expect(parseCollaborationCommand([
@@ -176,7 +176,7 @@ describe("fleet MCP protocol parity", () => {
   });
 });
 
-describe("native defaults and optional model boundaries", () => {
+describe("broker defaults and optional model boundaries", () => {
   test("accepts omitted models across runs, sessions, workflows, and fleet agents", () => {
     const run = RunSubmitParamsSchema.parse({ backend: "codex", prompt: "Use the configured model." });
     const session = SessionCreateParamsSchema.parse({ backend: "claude-code" });
@@ -184,25 +184,26 @@ describe("native defaults and optional model boundaries", () => {
       steps: [{ id: "review", backend: "opencode", prompt: "Review with the configured model." }],
     });
     const fleet = FleetProfileUpsertParamsSchema.parse({
-      id: "native-defaults",
-      name: "Native defaults",
+      id: "broker-defaults",
+      name: "Broker defaults",
       agents: [{ id: "grok-reviewer", backend: "grok", name: "Grok reviewer" }],
     });
 
-    expect(run).toMatchObject({ authMode: "native-login", approvalPolicy: "ask" });
+    expect(run).not.toHaveProperty("authMode");
+    expect(run).not.toHaveProperty("approvalPolicy");
     expect(run).not.toHaveProperty("model");
-    expect(session).toMatchObject({ authMode: "native-login", approvalPolicy: "ask" });
+    expect(session).toMatchObject({ authMode: "broker", approvalPolicy: "ask" });
     expect(session).not.toHaveProperty("model");
-    expect(workflow).toMatchObject({ authMode: "native-login", steps: [{ model: null }] });
+    expect(workflow).toMatchObject({ authMode: "broker", steps: [{ model: null }] });
     expect(fleet.agents[0]).not.toHaveProperty("model");
   });
 
-  test("keeps goal security optional for fleet inheritance while council defaults native", () => {
+  test("keeps goal security optional for fleet inheritance while council defaults broker", () => {
     const goal = GoalStartParamsSchema.parse({ objective: "Inherit the selected fleet security controls." });
     const council = CouncilRunParamsSchema.parse({ question: "Use native configured defaults." });
 
     expect(goal).not.toHaveProperty("authMode");
     expect(goal).not.toHaveProperty("approvalPolicy");
-    expect(council).toMatchObject({ authMode: "native-login", approvalPolicy: "ask" });
+    expect(council).toMatchObject({ authMode: "broker", approvalPolicy: "ask" });
   });
 });

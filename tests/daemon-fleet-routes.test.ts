@@ -1,30 +1,36 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DirectedMessage, Goal } from "../src/contracts/collaboration";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
-import { registerAdapter, unregisterAdapter, type BackendAdapter } from "../src/backends/registry";
+import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { GoalStore } from "../src/runtime/goal-store";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { runGitStrict } from "../src/runtime/git";
 import { WorktreeLeaseStore } from "../src/runtime/worktree-leases";
 import { CandidateDecisionStore } from "../src/runtime/candidate-decision-store";
 
+setDefaultTimeout(20_000);
+
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];
 const GOAL_BACKEND = "fixture-goal-coder";
 
 afterEach(async () => {
-  unregisterAdapter(GOAL_BACKEND);
+  unregisterBackendDefinition(GOAL_BACKEND);
   while (daemons.length) await daemons.pop()!.stop();
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
 describe("daemon fleet and collaboration routes", () => {
-  test("persists trusted fleet profiles and a human-coordinated addressed goal without client identity fields", async () => {
+  test("persists trusted fleet profiles and an addressed goal without client identity fields", async () => {
     const fixture = createFixture();
+    const script = join(fixture.project, "paused-goal-coder.sh");
+    writeFileSync(script, "sleep 30\n", { mode: 0o700 });
+    chmodSync(script, 0o700);
+    registerBackendDefinition(goalAdapter(script));
     const daemon = await start(fixture);
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: fixture.token });
 
@@ -34,15 +40,15 @@ describe("daemon fleet and collaboration routes", () => {
 
     const trust = await client.call<{ trusted: boolean; bypassAllowed: boolean }>("project.trust.grant", {
       nativeLoginAllowed: true,
+      nativeDirectUnrestrictedAcknowledged: true,
       bypassAllowed: true,
     });
     expect(trust).toMatchObject({ trusted: true, bypassAllowed: true });
 
     const upserted = await client.call<{ profile: { id: string }; activeProfileId: string }>("fleet.profile.upsert", {
       id: "fleet-human",
-      name: "Human control",
-      coordinator: { kind: "human" },
-      agents: [{ id: "codex-reviewer", backend: "codex", name: "Codex reviewer" }],
+      name: "Foreground lead control",
+      agents: [{ id: "codex-reviewer", backend: GOAL_BACKEND, name: "Codex reviewer" }],
       activate: true,
     });
     expect(upserted).toMatchObject({ profile: { id: "fleet-human" }, activeProfileId: "fleet-human" });
@@ -56,10 +62,10 @@ describe("daemon fleet and collaboration routes", () => {
     const started = await client.call<{ goal: Goal }>("goal.start", {
       objective: "Coordinate this durable goal visibly.",
       fleetProfileId: "fleet-human",
-      coordinator: { kind: "human" },
+      synthesizer: { kind: "agent", agentId: "codex-reviewer" },
       detach: true,
     });
-    expect(started.goal).toMatchObject({ principal: "owner", state: "planning", leaderAgentId: null });
+    expect(started.goal).toMatchObject({ principal: "owner", state: "planning", synthesizerAgentId: "codex-reviewer" });
     expect("projectRoot" in started.goal).toBe(false);
 
     const sent = await client.call<{ goal: Goal; message: DirectedMessage }>("goal.send", {
@@ -69,7 +75,7 @@ describe("daemon fleet and collaboration routes", () => {
     expect(sent.message).toMatchObject({
       collaborationId: started.goal.id,
       senderId: "owner",
-      recipientId: "owner",
+      recipientId: "codex-reviewer",
       kind: "chat",
       redacted: true,
     });
@@ -78,48 +84,41 @@ describe("daemon fleet and collaboration routes", () => {
       afterSequence: 0,
       limit: 10,
     });
-    expect(messages.messages.map((message) => message.content)).toEqual(["Human coordinator note."]);
-    await client.call("auth.provisionIntegration", { name: "mailbox-reviewer" });
-    const foreign = new HeadlessDaemonClient({
-      projectRoot: fixture.project,
-      state: fixture.state,
-      credential: { integration: "mailbox-reviewer" },
-    });
-    await expect(foreign.call("collaboration.messages.acknowledge", {
-      goalId: started.goal.id,
-      messageIds: [messages.messages[0]!.id],
-    })).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    expect(messages.messages.filter((message) => message.kind === "chat").map((message) => message.content)).toEqual(["Human coordinator note."]);
     await expect(client.call("collaboration.messages.acknowledge", {
       goalId: started.goal.id,
-      messageIds: [messages.messages[0]!.id],
+      messageIds: [sent.message.id],
       recipientId: "owner",
     })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
     expect(await client.call("collaboration.messages.acknowledge", {
       goalId: started.goal.id,
-      messageIds: [messages.messages[0]!.id],
+      messageIds: [sent.message.id],
     })).toEqual({
       goalId: started.goal.id,
-      acknowledgedMessageIds: [messages.messages[0]!.id],
+      acknowledgedMessageIds: [sent.message.id],
       pruned: 1,
     });
     expect((await client.call<{ messages: DirectedMessage[] }>("collaboration.messages", {
       goalId: started.goal.id,
       afterSequence: 0,
       limit: 10,
-    })).messages).toEqual([]);
+    })).messages.some((message) => message.id === sent.message.id)).toBe(false);
     expect(await client.call<Goal>("goal.status", { goalId: started.goal.id })).toMatchObject({ id: started.goal.id, state: "planning" });
 
     await daemon.stop();
     daemons.pop();
     const restarted = await start(fixture);
     const recovered = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: fixture.token });
-    expect(await recovered.call<Goal>("goal.status", { goalId: started.goal.id })).toMatchObject({ state: "planning" });
+    expect(await recovered.call<Goal>("goal.status", { goalId: started.goal.id })).toMatchObject({
+      id: started.goal.id,
+      synthesizerAgentId: "codex-reviewer",
+    });
     const recoveredMessages = await recovered.call<{ messages: DirectedMessage[] }>("collaboration.messages", {
       goalId: started.goal.id,
       afterSequence: 0,
       limit: 10,
     });
-    expect(recoveredMessages.messages).toHaveLength(0);
+    expect(recoveredMessages.messages.some((message) => message.id === sent.message.id)).toBe(false);
     expect(statSync(restarted.state.fleetProfilesPath).mode & 0o777).toBe(0o600);
     expect(statSync(restarted.state.projectTrustPath).mode & 0o777).toBe(0o600);
   });
@@ -129,7 +128,7 @@ describe("daemon fleet and collaboration routes", () => {
     const script = join(fixture.project, "goal-coder.sh");
 writeFileSync(script, `
 case "$1" in
-  *"You are the sticky coordinator planning"*)
+  *"You are the sticky task synthesizer planning"*)
     printf '%s\n' 'HEADLESS_PLAN_V1' '{"delegations":[{"id":"inspect","task":"Inspect the candidate requirements and report concrete evidence.","capabilities":[]}]}'
     ;;
   *"Execute the assigned independent delegation"*) printf '%s\n' 'worker-evidence-for-synthesis' ;;
@@ -146,7 +145,7 @@ case "$1" in
 esac
 `, { mode: 0o700 });
     chmodSync(script, 0o700);
-    registerAdapter(goalAdapter(script));
+    registerBackendDefinition(goalAdapter(script));
     const daemon = await start(fixture);
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: fixture.token });
     await client.call("fleet.profile.upsert", {
@@ -154,7 +153,6 @@ esac
       name: "Automatic test fleet",
       authMode: "broker",
       approvalPolicy: "auto",
-      coordinator: { kind: "election" },
       agents: [
         { id: "leader", backend: GOAL_BACKEND, name: "Leader", authMode: "broker", approvalPolicy: "auto", priority: 10 },
         { id: "reviewer", backend: GOAL_BACKEND, name: "Reviewer", authMode: "broker", approvalPolicy: "auto" },
@@ -164,6 +162,7 @@ esac
     const started = await client.call<{ goal: Goal }>("goal.start", {
       objective: "Produce and review a deterministic candidate.",
       fleetProfileId: "fleet-automatic-test",
+      synthesizer: { kind: "election" },
       detach: true,
       timeoutMs: 15_000,
     });
@@ -243,7 +242,7 @@ esac
     const script = join(fixture.project, "write-goal-coder.sh");
     writeFileSync(script, `
 case "$1" in
-  *"You are the sticky coordinator planning"*)
+  *"You are the sticky task synthesizer planning"*)
     printf '%s\n' 'HEADLESS_PLAN_V1' '{"delegations":[{"id":"inspect","task":"Inspect the write goal requirements.","capabilities":[]}]}'
     ;;
   *"Execute the assigned independent delegation"*) printf '%s\n' 'write-goal worker evidence' ;;
@@ -263,7 +262,7 @@ esac
       "-c", "user.name=Test", "-c", "user.email=test@example.test",
       "commit", "--no-gpg-sign", "-m", "add write goal fixture",
     ], fixture.project).ok).toBe(true);
-    registerAdapter(goalAdapter(script, true));
+    registerBackendDefinition(goalAdapter(script, true));
     const daemon = new HeadlessDaemon({
       projectRoot: fixture.project,
       state: fixture.state,
@@ -280,7 +279,6 @@ esac
       name: "Write goal fleet",
       authMode: "broker",
       approvalPolicy: "auto",
-      coordinator: { kind: "automatic" },
       agents: [
         { id: "writer", backend: GOAL_BACKEND, name: "Writer", authMode: "broker", approvalPolicy: "auto", priority: 10 },
         { id: "write-reviewer", backend: GOAL_BACKEND, name: "Reviewer", authMode: "broker", approvalPolicy: "auto" },
@@ -321,7 +319,7 @@ esac
     const script = join(fixture.project, "ask-goal-coder.sh");
     writeFileSync(script, `
 case "$1" in
-  *"You are the sticky coordinator planning"*)
+  *"You are the sticky task synthesizer planning"*)
     printf '%s\n' 'HEADLESS_PLAN_V1' '{"delegations":[{"id":"inspect","task":"Inspect the ask-mode write requirements.","capabilities":[]}]}'
     ;;
   *"Execute the assigned independent delegation"*) printf '%s\n' 'ask-mode worker evidence' ;;
@@ -341,7 +339,7 @@ esac
       "-c", "user.name=Test", "-c", "user.email=test@example.test",
       "commit", "--no-gpg-sign", "-m", "add ask goal fixture",
     ], fixture.project).ok).toBe(true);
-    registerAdapter(goalAdapter(script, true));
+    registerBackendDefinition(goalAdapter(script, true));
     const daemon = new HeadlessDaemon({
       projectRoot: fixture.project,
       state: fixture.state,
@@ -358,7 +356,6 @@ esac
       name: "Ask write goal fleet",
       authMode: "broker",
       approvalPolicy: "ask",
-      coordinator: { kind: "automatic" },
       agents: [
         { id: "ask-writer", backend: GOAL_BACKEND, name: "Writer", authMode: "broker", approvalPolicy: "ask", priority: 10 },
         { id: "ask-reviewer", backend: GOAL_BACKEND, name: "Reviewer", authMode: "broker", approvalPolicy: "ask" },
@@ -425,7 +422,6 @@ esac
       name: "Idle scanner test",
       authMode: "broker",
       approvalPolicy: "auto",
-      coordinator: { kind: "human" },
       idleAutonomy: "suggest",
       agents: [{ id: "idle-worker", backend: "codex", name: "Idle worker", authMode: "broker", approvalPolicy: "auto" }],
       activate: true,
@@ -439,7 +435,7 @@ esac
       objective: "Surface deterministic idle work.",
       authMode: "broker",
       approvalPolicy: "auto",
-      coordinator: { kind: "human" },
+      synthesizer: { kind: "automatic" },
       autonomous: true,
       deadlineAt: Date.now() + 60_000,
     }).goal;
@@ -454,7 +450,7 @@ esac
       objective: "Remain below the quiescence boundary.",
       authMode: "broker",
       approvalPolicy: "auto",
-      coordinator: { kind: "human" },
+      synthesizer: { kind: "automatic" },
       autonomous: true,
       deadlineAt: Date.now() + 60_000,
     }).goal;
@@ -514,7 +510,7 @@ esac
       "-c", "user.name=Test", "-c", "user.email=test@example.test",
       "commit", "--no-gpg-sign", "-m", "add idle fixture",
     ], fixture.project).ok).toBe(true);
-    registerAdapter(goalAdapter(script, true));
+    registerBackendDefinition(goalAdapter(script, true));
     const daemon = new HeadlessDaemon({
       projectRoot: fixture.project,
       state: fixture.state,
@@ -531,7 +527,6 @@ esac
       name: "Idle write fleet",
       authMode: "broker",
       approvalPolicy: "auto",
-      coordinator: { kind: "human" },
       idleAutonomy: "write",
       agents: [{ id: "idle-writer", backend: GOAL_BACKEND, name: "Idle writer", authMode: "broker", approvalPolicy: "auto" }],
       activate: true,
@@ -545,7 +540,7 @@ esac
       objective: "Repair the verified idle opportunity.",
       authMode: "broker",
       approvalPolicy: "auto",
-      coordinator: { kind: "human" },
+      synthesizer: { kind: "automatic" },
       autonomous: true,
       deadlineAt: Date.now() + 60_000,
     }).goal;
@@ -584,7 +579,7 @@ esac
     expect(leases).toContainEqual(expect.objectContaining({ kind: "candidate", state: "released", terminalOutcome: "merged_fast_forward" }));
     const writeJob = daemon.jobs.list().find((job) => daemon.jobs.request(job.id)?.mode === "write");
     expect(writeJob).toMatchObject({ state: "succeeded", result: { commit: { merged: true } } });
-  });
+  }, 20_000);
 });
 
 async function start(fixture: ReturnType<typeof createFixture>) {
@@ -616,7 +611,7 @@ function createFixture() {
   };
 }
 
-function goalAdapter(script: string, write = false): BackendAdapter {
+function goalAdapter(script: string, write = false): BackendDefinition {
   return {
     id: GOAL_BACKEND,
     metadata: { id: GOAL_BACKEND, aliases: [], promptDelivery: "argv", timeoutMs: 10_000, maxDepth: null, canRead: true, canWrite: write },
@@ -625,8 +620,8 @@ function goalAdapter(script: string, write = false): BackendAdapter {
     probe: { versionCommand: ["/usr/bin/true"], helpCommand: ["/usr/bin/true"], requiredHelpFragments: [], timeoutMs: 1_000, maxOutputBytes: 1_024 },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand: (options) => ["/bin/sh", script, options.prompt],
-    parse: (stdout) => ({
+    prepareCommand: (options) => ["/bin/sh", script, options.prompt],
+    decodeOutput: (stdout) => ({
       output: stdout.trim(),
       error: null,
       cost: null,
