@@ -1,6 +1,7 @@
 {
   "name": "@proofofwork-agency/headless",
-  "version": "0.2.0",
+  "version": "0.2.0-alpha.0",
+  "private": true,
   "description": "Universal headless runner and local control plane for AI coding CLIs with a native JSONL ledger and OpenCode plugin tools.",
   "packageManager": "bun@1.3.14",
   "type": "module",
@@ -12,7 +13,7 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./mcp": {
+    "./experimental/mcp": {
       "types": "./dist/mcp/server.d.ts",
       "import": "./dist/mcp/server.js",
       "default": "./dist/mcp/server.js"
@@ -22,7 +23,12 @@
       "import": "./dist/daemon/client.js",
       "default": "./dist/daemon/client.js"
     },
-    "./broker/linux-relay": {
+    "./experimental": {
+      "types": "./dist/experimental.d.ts",
+      "import": "./dist/experimental.js",
+      "default": "./dist/experimental.js"
+    },
+    "./experimental/broker/linux-relay": {
       "types": "./dist/broker/linux-relay.d.ts",
       "import": "./dist/broker/linux-relay.js",
       "default": "./dist/broker/linux-relay.js"
@@ -40,6 +46,8 @@
     "SECURITY.md",
     "docs/mcp-integration.md",
     "docs/native-login.md",
+    "docs/command-reference.md",
+    "docs/cli-and-tui-guide.md",
     "docs/plan.md",
     "LICENSE"
   ],
@@ -47,7 +55,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "bun run clean && bun build ./src/cli.ts ./src/hless.ts ./src/index.ts ./src/mcp/server.ts ./src/daemon/client.ts ./src/broker/linux-relay.ts --root ./src --outdir ./dist --target bun && bun build ./src/tui/App.tsx --outdir ./dist/tui --target bun && bun run build:types && bun run --cwd plugin build",
+    "build": "bun run clean && bun build ./src/cli.ts ./src/hless.ts ./src/index.ts ./src/experimental.ts ./src/mcp/server.ts ./src/daemon/client.ts ./src/broker/linux-relay.ts --root ./src --outdir ./dist --target bun && bun build ./src/tui/App.tsx --outdir ./dist/tui --target bun && bun run build:types && bun run --cwd plugin build",
     "build:types": "bunx tsc --emitDeclarationOnly --outDir dist",
     "dev": "bun --watch src/cli.ts",
     "typecheck": "bunx tsc --noEmit",
@@ -56,6 +64,7 @@
     "lint": "bun scripts/source-hygiene.ts lint",
     "format:check": "bun scripts/source-hygiene.ts format",
     "check:docs": "bun scripts/docs-check.ts",
+    "generate:docs": "bun scripts/generate-command-reference.ts",
     "check": "bun run typecheck && bun run typecheck:plugin && bun run lint && bun run format:check && bun run check:docs && bun run test",
     "smoke:pack": "bun scripts/pack-smoke.ts",
     "smoke:native": "bun scripts/native-subscription-smoke.ts",
@@ -69,7 +78,6 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "ink": "^7.1.0",
     "react": "^19.2.7",
-    "react-devtools-core": "^7.0.1",
     "zod": "^3.24.0",
     "zod-to-json-schema": "^3.24.6"
   },

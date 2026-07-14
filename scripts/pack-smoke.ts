@@ -25,6 +25,8 @@ try {
     "package/dist/hless.js",
     "package/dist/index.js",
     "package/dist/index.d.ts",
+    "package/dist/experimental.js",
+    "package/dist/experimental.d.ts",
     "package/dist/mcp/server.js",
     "package/dist/mcp/server.d.ts",
     "package/dist/daemon/client.js",
@@ -39,6 +41,8 @@ try {
     "package/LICENSE",
     "package/docs/mcp-integration.md",
     "package/docs/native-login.md",
+    "package/docs/command-reference.md",
+    "package/docs/cli-and-tui-guide.md",
     "package/docs/plan.md",
   ]);
   requireEntries(pluginEntries, ["package/package.json", "package/dist/index.js", "package/dist/index.d.ts", "package/README.md", "package/LICENSE"]);
@@ -54,6 +58,8 @@ try {
     "package/LICENSE",
     "package/docs/mcp-integration.md",
     "package/docs/native-login.md",
+    "package/docs/command-reference.md",
+    "package/docs/cli-and-tui-guide.md",
     "package/docs/plan.md",
   ]);
   requirePublishedFileAllowlist(pluginEntries, "plugin", [
@@ -67,7 +73,7 @@ try {
     JSON.parse(await run(["tar", "-xOzf", rootTarball, "package/package.json"], root)),
     {
       name: "@proofofwork-agency/headless",
-      version: "0.2.0",
+      version: "0.2.0-alpha.0",
       bins: {
         headless: "./dist/cli.js",
         hless: "./dist/hless.js",
@@ -77,7 +83,7 @@ try {
   );
   validatePackedManifest(
     JSON.parse(await run(["tar", "-xOzf", pluginTarball, "package/package.json"], root)),
-    { name: "@proofofwork-agency/headless-plugin", version: "0.2.0" },
+    { name: "@proofofwork-agency/headless-plugin", version: "0.2.0-alpha.0" },
   );
 
   writeFileSync(join(scratch, "pack-contents.json"), `${JSON.stringify({ rootEntries, pluginEntries }, null, 2)}\n`);
@@ -97,24 +103,23 @@ try {
 
   await run(["bun", "install", "--ignore-scripts"], installRoot, 120_000);
   const version = (await run([join(installRoot, "node_modules", ".bin", "headless"), "--version"], installRoot)).trim();
-  if (version !== "0.2.0") throw new Error(`Installed headless binary reported ${JSON.stringify(version)} instead of 0.2.0.`);
+  if (version !== "0.2.0-alpha.0") throw new Error(`Installed headless binary reported ${JSON.stringify(version)} instead of 0.2.0-alpha.0.`);
   const aliasVersion = (await run([join(installRoot, "node_modules", ".bin", "hless"), "--version"], installRoot)).trim();
   if (aliasVersion !== version) throw new Error(`Installed hless alias reported ${JSON.stringify(aliasVersion)} instead of ${version}.`);
 
   await verifyIsolatedNpmLink(installRoot, scratch, version);
 
   await run(["bun", "-e", [
-    'import { RunRequestSchema } from "@proofofwork-agency/headless";',
-    'import { resolveDaemonExtensionConfig } from "@proofofwork-agency/headless";',
+    'import { RunRequestSchema, resolveDaemonExtensionConfig } from "@proofofwork-agency/headless/experimental";',
     'import { HeadlessDaemonClient } from "@proofofwork-agency/headless/daemon";',
-    'import { runLinuxBrokerRelay } from "@proofofwork-agency/headless/broker/linux-relay";',
-    'import { MCP_VERSION, mcpToolDefinitions } from "@proofofwork-agency/headless/mcp";',
+    'import { runLinuxBrokerRelay } from "@proofofwork-agency/headless/experimental/broker/linux-relay";',
+    'import { MCP_VERSION, mcpToolDefinitions } from "@proofofwork-agency/headless/experimental/mcp";',
     'import plugin from "@proofofwork-agency/headless-plugin";',
     'if (RunRequestSchema.parse({ backend: "opencode", prompt: "ok", projectRoot: process.cwd() }).containment !== "required") throw new Error("contract import failed");',
     'if (typeof resolveDaemonExtensionConfig !== "function") throw new Error("daemon extension export failed");',
     'if (typeof HeadlessDaemonClient !== "function") throw new Error("daemon export failed");',
     'if (typeof runLinuxBrokerRelay !== "function") throw new Error("Linux broker relay export failed");',
-    'if (MCP_VERSION !== "0.2.0" || !mcpToolDefinitions.some((tool) => tool.name === "headless_run")) throw new Error("MCP export failed");',
+    'if (MCP_VERSION !== "0.2.0-alpha.0" || !mcpToolDefinitions.some((tool) => tool.name === "headless_run")) throw new Error("MCP export failed");',
     'if (plugin.id !== "headless" || typeof plugin.server !== "function") throw new Error("plugin export failed");',
   ].join(" ")], installRoot);
 
@@ -122,7 +127,6 @@ try {
 
   await verifyInstalledExtensionDaemon(installRoot, scratch);
 
-  await run([join(installRoot, "node_modules", ".bin", "headless-mcp")], installRoot, 10_000, "");
   console.log(`pack smoke passed: ${rootEntries.length} root files, ${pluginEntries.length} plugin files, installed CLI/npm-link/doctor/TUI/MCP/plugin/extensions verified`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
@@ -251,7 +255,7 @@ export default function register(api) {
     cachedInputUsdPerMillion: 0.5,
     inputIncludesCached: true,
   });
-  api.registerAdapter({
+  api.registerBackendDefinition({
     id: "package-fixture",
     metadata: { id: "package-fixture", aliases: [], promptDelivery: "native", timeoutMs: 5_000, maxDepth: null, canRead: true, canWrite: false },
     capabilities: { write: false, streaming: false, structuredOutput: true, nativeResume: false, cancellation: true, tools: false, effort: false, brokerCompatible: false },
@@ -259,8 +263,8 @@ export default function register(api) {
     probe: { versionCommand: ["/usr/bin/true"], helpCommand: ["/usr/bin/true"], requiredHelpFragments: [], timeoutMs: 1_000, maxOutputBytes: 1_024 },
     stdinPrompt: false,
     credentialPrefixes: [],
-    buildCommand(options) { return ["/usr/bin/printf", \`packed-extension:\${options.prompt}\`]; },
-    parse(stdout) { return { output: stdout, cost: null, tokens: null, error: null }; },
+    prepareCommand(options) { return ["/usr/bin/printf", \`packed-extension:\${options.prompt}\`]; },
+    decodeOutput(stdout) { return { output: stdout, cost: null, tokens: null, error: null }; },
   });
 }
 `, { mode: 0o600 });
@@ -319,6 +323,21 @@ export default function register(api) {
     ) {
       throw new Error(`Installed extension daemon did not report configured registrations: ${JSON.stringify(ping)}`);
     }
+    await run([
+      cli,
+      "lead",
+      "use",
+      "opencode",
+      "--cwd",
+      project,
+      "--extension-config",
+      configPath,
+    ], installRoot, 10_000, undefined, env);
+    await run([
+      join(installRoot, "node_modules", ".bin", "headless-mcp"),
+      "--host",
+      "opencode",
+    ], project, 10_000, "", { ...env, HEADLESS_PROJECT_ROOT: project });
     const doctor = await run([
       cli,
       "doctor",
@@ -421,11 +440,11 @@ function requireGeneratedArtifactParity(entries: string[], distRoot: string, lab
 
 function validatePackedManifest(
   manifest: unknown,
-  expected: { name: string; version: string; bins?: Record<string, string> },
+  expected: { name: string; version: string; bins?: Record<string, string>; private?: boolean },
 ) {
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw new Error("Packed package.json is not an object.");
   const value = manifest as Record<string, unknown>;
-  if (value.name !== expected.name || value.version !== expected.version || value.private === true) {
+  if (value.name !== expected.name || value.version !== expected.version || value.private !== (expected.private ?? true)) {
     throw new Error(`Packed manifest identity mismatch for ${expected.name}@${expected.version}.`);
   }
   if (expected.bins) {
