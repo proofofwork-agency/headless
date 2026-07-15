@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BudgetSchema, type Budget } from "../contracts/durable";
-import { IdentifierSchema, PrincipalIdSchema, ProjectIdSchema, TimestampSchema } from "../contracts/common";
-import { LinkedHoldRecordSchema } from "../contracts/linked-hold";
+import { BackendIdSchema, IdentifierSchema, MAX_RUN_PROMPT_BYTES, PrincipalIdSchema, ProjectIdSchema, TimestampSchema } from "../contracts/common";
+import { LinkedHoldEnvelopeSchema, LinkedHoldRecordSchema, type LinkedHoldRecord } from "../contracts/linked-hold";
+import { HeadlessError } from "./headless-error";
 import { ensureProjectStateDirectories, type ProjectStatePaths } from "./project-state";
 import { readOwnerOnlyJson, writeOwnerOnlyJson } from "./owner-json";
 
@@ -70,6 +71,39 @@ const CommitUsageSchema = z.object({
   artifactBytes: z.number().int().nonnegative().optional(),
 }).strict();
 
+const digest = z.string().regex(/^[a-f0-9]{64}$/);
+const providerId = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/);
+
+const PrepareLinkedProviderHoldSchema = z.object({
+  parentJobId: IdentifierSchema,
+  parentReservationId: IdentifierSchema,
+  childReservationId: IdentifierSchema,
+  requestId: z.string().uuid(),
+  parentBackend: BackendIdSchema,
+  targetBackend: BackendIdSchema,
+  parentProvider: providerId,
+  targetProvider: providerId,
+  budgetFraction: z.number().positive().max(0.5),
+  parentDeadlineAt: TimestampSchema,
+  childDeadlineAt: TimestampSchema,
+  approvalPolicy: z.enum(["ask", "auto"]),
+  parentAllocation: LinkedHoldEnvelopeSchema,
+  targetReservation: LinkedHoldEnvelopeSchema,
+  requestDigest: digest,
+  promptDigest: digest,
+  promptBytes: z.number().int().nonnegative().safe().max(MAX_RUN_PROMPT_BYTES),
+}).strict().superRefine((input, context) => {
+  if (input.parentProvider === input.targetProvider) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["targetProvider"], message: "Linked holds require different parent and target providers." });
+  }
+  if (input.parentBackend === input.targetBackend) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["targetBackend"], message: "Linked holds require different parent and target backends." });
+  }
+  if (input.childDeadlineAt > input.parentDeadlineAt) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["childDeadlineAt"], message: "The child deadline cannot exceed the parent deadline." });
+  }
+});
+
 const LegacyBudgetStoreStateSchema = z.object({
   version: z.literal(2),
   projectId: ProjectIdSchema,
@@ -102,6 +136,7 @@ export type BudgetReservationRequest = z.input<typeof ReservationRequestSchema>;
 export type BudgetReservation = z.infer<typeof BudgetReservationSchema>;
 export type CommitUsage = z.input<typeof CommitUsageSchema>;
 export type BudgetStoreState = z.infer<typeof BudgetStoreStateSchema>;
+export type PrepareLinkedProviderHoldInput = z.input<typeof PrepareLinkedProviderHoldSchema>;
 export type BudgetCheck = {
   passed: boolean;
   budgetIds: string[];
@@ -163,6 +198,141 @@ export class BudgetStore {
 
   getState() {
     return BudgetStoreStateSchema.parse(this.state);
+  }
+
+  /** Persist a cross-provider delegation intent without moving any authority. */
+  prepareLinkedProviderHold(value: PrepareLinkedProviderHoldInput) {
+    const input = PrepareLinkedProviderHoldSchema.parse(value);
+    const linkId = linkedHoldId(this.projectId, input.parentJobId, input.requestId);
+    const existing = this.state.linkedHolds.find((hold) => hold.linkId === linkId);
+    if (existing) {
+      if (linkedPlanIdentity(existing) !== linkedPlanIdentity(input)) {
+        throw new HeadlessError("CONFLICT", "Delegation request id already names a different linked provider hold.");
+      }
+      return { allowed: true as const, hold: LinkedHoldRecordSchema.parse(existing), existing: true, reasons: [] as string[] };
+    }
+    const parent = this.state.reservations.find((candidate) => candidate.id === input.parentReservationId);
+    if (!parent || !parent.active || parent.parentReservationId !== null) {
+      return linkedHoldDenied("Parent budget reservation is not active and transferable.");
+    }
+    if (parent.provider !== input.parentProvider) {
+      return linkedHoldDenied("Parent provider does not match its active budget reservation.");
+    }
+    if (this.state.reservations.some((candidate) => candidate.parentReservationId === parent.id)) {
+      return linkedHoldDenied("The parent already admitted its single delegated child.");
+    }
+
+    const targetRequest = linkedTargetRequest(this.projectId, parent, input);
+    const targetBudgets = this.matchingBudgets(targetRequest);
+    const parentBudgets = parent.budgetIds
+      .map((budgetId) => this.state.budgets.find((candidate) => candidate.id === budgetId))
+      .filter((budget): budget is Budget => Boolean(budget));
+    const reasons = this.linkedHoldViolations(parent, parentBudgets, targetBudgets, targetRequest, input);
+    if (reasons.length > 0) return linkedHoldDenied(reasons);
+
+    const now = this.now();
+    const candidate = LinkedHoldRecordSchema.parse({
+      ...input,
+      linkId,
+      depth: 1,
+      parentBudgetIds: [...parent.budgetIds],
+      targetBudgetIds: targetBudgets.map((budget) => budget.id),
+      parentCarveId: linkedOperationId("parent", linkId),
+      targetQuotaId: linkedOperationId("target", linkId),
+      state: "intent",
+      transitionNumber: 0,
+      createdAt: now,
+      updatedAt: now,
+      terminalAt: null,
+      childJobId: null,
+      brokerEvidence: emptyBrokerEvidence(),
+      terminalSettlementDigest: null,
+      usageProjection: null,
+    });
+    if (this.state.linkedHolds.some((hold) => hold.childReservationId === candidate.childReservationId)) {
+      throw new HeadlessError("CONFLICT", "Linked child reservation id is already assigned to another delegation intent.");
+    }
+
+    const next = BudgetStoreStateSchema.parse(this.state);
+    next.linkedHolds.push(candidate);
+    next.updatedAt = now;
+    this.persistReplacement(next);
+    return { allowed: true as const, hold: LinkedHoldRecordSchema.parse(candidate), existing: false, reasons: [] as string[] };
+  }
+
+  /** Atomically carve the parent and create the target reservation for one prepared intent. */
+  applyLinkedProviderHold(linkId: string) {
+    const id = z.string().regex(/^[a-f0-9]{64}$/).parse(linkId);
+    const current = this.state.linkedHolds.find((candidate) => candidate.linkId === id);
+    if (!current) return linkedHoldDenied("Unknown linked provider hold.");
+    if (current.state === "held") {
+      const reservation = this.state.reservations.find((candidate) => candidate.id === current.childReservationId);
+      if (!reservation) return linkedHoldDenied("Held linked provider reservation is missing.");
+      return { allowed: true as const, hold: LinkedHoldRecordSchema.parse(current), reservation: BudgetReservationSchema.parse(reservation), existing: true, reasons: [] as string[] };
+    }
+    if (current.state !== "intent" || current.transitionNumber !== 0) {
+      return linkedHoldDenied("Linked provider hold is not a prepared generation-zero intent.");
+    }
+
+    const parent = this.state.reservations.find((candidate) => candidate.id === current.parentReservationId);
+    if (!parent || !parent.active || parent.parentReservationId !== null || parent.provider !== current.parentProvider) {
+      return linkedHoldDenied("Parent budget reservation changed before the linked hold was applied.");
+    }
+    if (JSON.stringify(parent.budgetIds) !== JSON.stringify(current.parentBudgetIds)) {
+      return linkedHoldDenied("Parent budget generation changed after linked-hold preparation.");
+    }
+    if (this.state.reservations.some((candidate) => candidate.id === current.childReservationId || candidate.parentReservationId === parent.id)) {
+      return linkedHoldDenied("The parent or child reservation was consumed by another delegation.");
+    }
+    if (this.state.linkedHolds.some((candidate) => candidate.linkId !== id
+      && candidate.parentReservationId === parent.id
+      && linkedHoldConsumesCapacity(candidate))) {
+      return linkedHoldDenied("Another linked provider hold already consumed this parent's child slot.");
+    }
+
+    const targetRequest = linkedTargetRequest(this.projectId, parent, current);
+    const targetBudgets = this.matchingBudgets(targetRequest);
+    if (JSON.stringify(targetBudgets.map((budget) => budget.id)) !== JSON.stringify(current.targetBudgetIds)) {
+      return linkedHoldDenied("Target budget generation changed after linked-hold preparation.");
+    }
+    const parentBudgets = parent.budgetIds
+      .map((budgetId) => this.state.budgets.find((candidate) => candidate.id === budgetId))
+      .filter((budget): budget is Budget => Boolean(budget));
+    const reasons = this.linkedHoldViolations(parent, parentBudgets, targetBudgets, targetRequest, current);
+    if (reasons.length > 0) return linkedHoldDenied(reasons);
+
+    const now = this.now();
+    const next = BudgetStoreStateSchema.parse(this.state);
+    const nextParent = next.reservations.find((candidate) => candidate.id === parent.id)!;
+    subtractEnvelope(nextParent.envelope, current.parentAllocation);
+    const child = BudgetReservationSchema.parse({
+      id: current.childReservationId,
+      projectId: nextParent.projectId,
+      principal: nextParent.principal,
+      sessionId: null,
+      workflowId: null,
+      provider: current.targetProvider,
+      inputTokens: current.targetReservation.inputTokens,
+      outputTokens: current.targetReservation.outputTokens,
+      costUsd: current.targetReservation.costUsd,
+      artifactBytes: current.targetReservation.artifactBytes,
+      retries: current.targetReservation.retries,
+      budgetIds: [...new Set(current.targetBudgetIds)],
+      active: false,
+      createdAt: now,
+      parentReservationId: nextParent.id,
+      delegationRequestId: current.requestId,
+      budgetFraction: current.budgetFraction,
+      envelope: current.targetReservation,
+    });
+    next.reservations.push(child);
+    const nextHold = next.linkedHolds.find((candidate) => candidate.linkId === id)!;
+    nextHold.state = "held";
+    nextHold.transitionNumber = 1;
+    nextHold.updatedAt = now;
+    next.updatedAt = now;
+    this.persistReplacement(next);
+    return { allowed: true as const, hold: LinkedHoldRecordSchema.parse(nextHold), reservation: BudgetReservationSchema.parse(child), existing: false, reasons: [] as string[] };
   }
 
   upsertBudget(value: Budget) {
@@ -314,8 +484,9 @@ export class BudgetStore {
 
     const reasons = budgets.flatMap((budget) => {
       if (budget.maxConcurrency === null) return [];
-      const active = this.state.reservations.filter((candidate) => candidate.active && candidate.budgetIds.includes(budget.id)).length;
-      return active + 1 > budget.maxConcurrency ? [`${budget.id}: concurrency limit exceeded.`] : [];
+      const held = this.reservationHoldsConcurrency(reservation.id);
+      const active = this.concurrencyCount(budget.id);
+      return active + (held ? 0 : 1) > budget.maxConcurrency ? [`${budget.id}: concurrency limit exceeded.`] : [];
     });
     if (reasons.length > 0) {
       return { allowed: false as const, budgetIds: [...reservation.budgetIds], reasons };
@@ -593,11 +764,17 @@ export class BudgetStore {
     });
   }
 
-  private reservationViolations(budget: Budget, request: z.infer<typeof ReservationRequestSchema>) {
-    const active = this.state.reservations.filter((reservation) => reservation.budgetIds.includes(budget.id));
-    const reasons = this.currentViolations(budget);
+  private reservationViolations(
+    budget: Budget,
+    request: z.infer<typeof ReservationRequestSchema>,
+    requestedProviderCalls = 1,
+    state: BudgetStoreState = this.state,
+  ) {
+    const active = state.reservations.filter((reservation) => reservation.budgetIds.includes(budget.id));
+    const reasons = this.currentViolations(budget, state);
+    const reservedRequests = active.reduce((total, reservation) => total + reservationRequestHold(reservation, state), 0);
 
-    if (budget.maxRequests !== null && budget.usedRequests + active.length + 1 > budget.maxRequests) {
+    if (budget.maxRequests !== null && budget.usedRequests + reservedRequests + requestedProviderCalls > budget.maxRequests) {
       reasons.push(`${budget.id}: request limit exceeded.`);
     }
     checkNullableLimit(
@@ -631,7 +808,7 @@ export class BudgetStore {
     return reasons;
   }
 
-  private currentViolations(budget: Budget) {
+  private currentViolations(budget: Budget, state: BudgetStoreState = this.state) {
     const reasons: string[] = [];
     if (budget.maxRequests !== null && budget.usedRequests > budget.maxRequests) {
       reasons.push(`${budget.id}: request usage exceeds its limit.`);
@@ -642,17 +819,170 @@ export class BudgetStore {
     if (budget.maxArtifactBytes !== null && budget.usedArtifactBytes > budget.maxArtifactBytes) {
       reasons.push(`${budget.id}: artifact usage exceeds its limit.`);
     }
-    const active = this.state.reservations.filter((reservation) => reservation.active && reservation.budgetIds.includes(budget.id)).length;
+    const active = this.concurrencyCount(budget.id, state);
     if (budget.maxConcurrency !== null && active > budget.maxConcurrency) {
       reasons.push(`${budget.id}: active concurrency exceeds its limit.`);
     }
     return reasons;
   }
 
+  private linkedHoldViolations(
+    parent: BudgetReservation,
+    parentBudgets: Budget[],
+    targetBudgets: Budget[],
+    targetRequest: z.infer<typeof ReservationRequestSchema>,
+    input: Pick<LinkedHoldRecord, "budgetFraction" | "parentAllocation" | "targetReservation">,
+  ) {
+    const reasons = [
+      ...parentBudgets.flatMap((budget) => this.currentViolations(budget)),
+      ...envelopeViolations(parent.envelope, input.parentAllocation, input.budgetFraction),
+      ...envelopeCoverageViolations(input.parentAllocation, input.targetReservation),
+      ...targetBudgets.flatMap((budget) => this.reservationViolations(budget, targetRequest, input.targetReservation.requests)),
+    ];
+    const finiteCostLimit = parent.envelope.costUsd !== null
+      || parentBudgets.some((budget) => budget.maxCostUsd !== null)
+      || targetBudgets.some((budget) => budget.maxCostUsd !== null);
+    if (finiteCostLimit && (input.parentAllocation.costUsd === null || input.targetReservation.costUsd === null)) {
+      reasons.push("Cross-provider delegation pricing is unknown under a finite parent or target cost limit.");
+    }
+    for (const budget of targetBudgets) {
+      if (budget.maxConcurrency === null) continue;
+      if (this.concurrencyCount(budget.id) + 1 > budget.maxConcurrency) {
+        reasons.push(`${budget.id}: concurrency limit exceeded.`);
+      }
+    }
+    return [...new Set(reasons)];
+  }
+
+  private reservationHoldsConcurrency(reservationId: string, state: BudgetStoreState = this.state) {
+    return state.linkedHolds.some((hold) => hold.childReservationId === reservationId && linkedHoldConsumesCapacity(hold));
+  }
+
+  private concurrencyCount(budgetId: string, state: BudgetStoreState = this.state) {
+    return state.reservations.filter((reservation) => reservation.budgetIds.includes(budgetId)
+      && (reservation.active || this.reservationHoldsConcurrency(reservation.id, state))).length;
+  }
+
   private persist() {
     this.state = BudgetStoreStateSchema.parse(this.state);
     writeOwnerOnlyJson(this.paths.budgetsPath, this.state);
   }
+
+  private persistReplacement(value: BudgetStoreState) {
+    const next = BudgetStoreStateSchema.parse(value);
+    writeOwnerOnlyJson(this.paths.budgetsPath, next);
+    this.state = next;
+  }
+}
+
+function linkedHoldId(projectId: string, parentJobId: string, requestId: string) {
+  return createHash("sha256").update(`${projectId}\0${parentJobId}\0${requestId}`).digest("hex");
+}
+
+function linkedOperationId(kind: "parent" | "target", linkId: string) {
+  return `linked-${kind}-${linkId}`;
+}
+
+function linkedTargetRequest(
+  projectId: string,
+  parent: BudgetReservation,
+  input: Pick<LinkedHoldRecord, "childReservationId" | "targetProvider" | "targetReservation">,
+) {
+  return ReservationRequestSchema.parse({
+    id: input.childReservationId,
+    projectId,
+    principal: parent.principal,
+    sessionId: null,
+    workflowId: null,
+    provider: input.targetProvider,
+    inputTokens: input.targetReservation.inputTokens,
+    outputTokens: input.targetReservation.outputTokens,
+    costUsd: input.targetReservation.costUsd,
+    artifactBytes: input.targetReservation.artifactBytes,
+    retries: input.targetReservation.retries,
+  });
+}
+
+function emptyBrokerEvidence() {
+  return {
+    parentCarveId: null,
+    targetLeaseId: null,
+    targetLeaseIssuedAt: null,
+    targetRequests: null,
+    targetForwardedRequests: null,
+    targetInputTokens: null,
+    targetOutputTokens: null,
+    targetCostUsd: null,
+    targetActiveRequests: null,
+    targetRevoked: null,
+    targetExpiresAt: null,
+  };
+}
+
+function linkedPlanIdentity(value: PrepareLinkedProviderHoldInput | LinkedHoldRecord) {
+  return JSON.stringify({
+    parentJobId: value.parentJobId,
+    parentReservationId: value.parentReservationId,
+    childReservationId: value.childReservationId,
+    requestId: value.requestId,
+    parentBackend: value.parentBackend,
+    targetBackend: value.targetBackend,
+    parentProvider: value.parentProvider,
+    targetProvider: value.targetProvider,
+    budgetFraction: value.budgetFraction,
+    parentDeadlineAt: value.parentDeadlineAt,
+    childDeadlineAt: value.childDeadlineAt,
+    approvalPolicy: value.approvalPolicy,
+    parentAllocation: value.parentAllocation,
+    targetReservation: value.targetReservation,
+    requestDigest: value.requestDigest,
+    promptDigest: value.promptDigest,
+    promptBytes: value.promptBytes,
+  });
+}
+
+function linkedHoldDenied(reason: string | string[]) {
+  return {
+    allowed: false as const,
+    hold: null,
+    reservation: null,
+    existing: false,
+    reasons: Array.isArray(reason) ? reason : [reason],
+  };
+}
+
+function linkedHoldConsumesCapacity(hold: LinkedHoldRecord) {
+  return hold.state !== "intent"
+    && hold.state !== "settled"
+    && hold.state !== "rolled_back"
+    && hold.state !== "exhausted";
+}
+
+function reservationRequestHold(reservation: BudgetReservation, state: BudgetStoreState) {
+  const linked = state.linkedHolds.some((hold) => hold.childReservationId === reservation.id && linkedHoldConsumesCapacity(hold));
+  return linked ? reservation.envelope.requests : 1;
+}
+
+function envelopeCoverageViolations(
+  parent: z.infer<typeof LinkedHoldEnvelopeSchema>,
+  target: z.infer<typeof LinkedHoldEnvelopeSchema>,
+) {
+  const reasons: string[] = [];
+  if (target.requests <= 0 || target.requests > parent.requests) reasons.push("Target request hold exceeds the linked parent allocation.");
+  checkLinkedNullableCoverage(reasons, "input token", parent.inputTokens, target.inputTokens);
+  checkLinkedNullableCoverage(reasons, "output token", parent.outputTokens, target.outputTokens);
+  checkLinkedNullableCoverage(reasons, "cost", parent.costUsd, target.costUsd);
+  if (target.artifactBytes > parent.artifactBytes) reasons.push("Target artifact hold exceeds the linked parent allocation.");
+  if (target.retries > parent.retries) reasons.push("Target retry hold exceeds the linked parent allocation.");
+  return reasons;
+}
+
+function checkLinkedNullableCoverage(reasons: string[], label: string, parent: number | null, target: number | null) {
+  if (parent === null || target === null) {
+    if (parent !== target) reasons.push(`Target ${label} hold cannot be linked across known and unknown allocations.`);
+    return;
+  }
+  if (target > parent) reasons.push(`Target ${label} hold exceeds the linked parent allocation.`);
 }
 
 function projectedNullable(current: number | null, reserved: Array<number | null>, next: number | null) {
