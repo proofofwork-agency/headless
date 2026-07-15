@@ -3,9 +3,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getBackendDefinition } from "../src/backends/registry";
-import { NativeSessionManager } from "../src/runtime/native-session-manager";
+import { NativeSessionManager, prepareNativeSessionEnvironment } from "../src/runtime/native-session-manager";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
+import { createWorkerEnvironment } from "../src/runtime/worker-environment";
 
 const roots: string[] = [];
 const originalPath = process.env.PATH;
@@ -16,6 +17,56 @@ afterEach(() => {
 });
 
 describe("native session manager", () => {
+  test("applies only containment-safe backend environment preparation", () => {
+    const fixture = createFixture(false);
+    const worker = createWorkerEnvironment({ baseDir: fixture.runtime, sourceEnv: { PATH: process.env.PATH } });
+    try {
+      const options = {
+        prompt: "",
+        cwd: fixture.project,
+        mode: "read-only" as const,
+        containment: "required" as const,
+        authMode: "native-login" as const,
+        approvalPolicy: "ask" as const,
+      };
+      const codex = prepareNativeSessionEnvironment(
+        getBackendDefinition("codex")!,
+        worker,
+        { ...options, backend: "codex" },
+        "darwin",
+      );
+      expect(codex).toMatchObject({
+        HOME: worker.home,
+        SSL_CERT_FILE: "/etc/ssl/cert.pem",
+        SSL_CERT_DIR: "/etc/ssl/certs",
+      });
+      const claude = prepareNativeSessionEnvironment(
+        getBackendDefinition("claude-code")!,
+        worker,
+        { ...options, backend: "claude-code" },
+        "darwin",
+      );
+      expect(claude.CLAUDE_CODE_TMPDIR).toBe(worker.temp);
+      const opencode = prepareNativeSessionEnvironment(
+        getBackendDefinition("opencode")!,
+        worker,
+        { ...options, backend: "opencode" },
+        "darwin",
+      );
+      expect(opencode).toMatchObject({
+        OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+        OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
+        OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
+      });
+      for (const env of [codex, claude, opencode]) {
+        expect(Object.keys(env).some((key) => /(?:API_KEY|AUTH_TOKEN|OAUTH_TOKEN|SOCKET)$/i.test(key))).toBe(false);
+      }
+    } finally {
+      worker.cleanup();
+    }
+  });
+
   test("admits Grok read-only containment but still fails closed before subprocess startup without file auth", async () => {
     const fixture = createFixture(false);
     const sessions = new PersistentSessionStore(fixture.paths);

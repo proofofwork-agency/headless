@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BudgetSchema, GrantSchema, type Budget, type Grant } from "../src/contracts/durable";
 import { AuthorityStore } from "../src/runtime/authority-store";
 import { BudgetStore } from "../src/runtime/budget-store";
 import { FinalityStore } from "../src/runtime/finality-store";
-import { getProjectStatePaths, type ProjectStatePaths } from "../src/runtime/project-state";
+import { ensureProjectStateDirectories, getProjectStatePaths, type ProjectStatePaths } from "../src/runtime/project-state";
 
 const temporaryPaths: string[] = [];
 
@@ -290,6 +290,120 @@ describe("persistent budgets", () => {
     expect(store.commit("workflow-one-active").passed).toBe(true);
     expect(store.activate("workflow-one-queued").allowed).toBe(true);
     expect(store.commit("workflow-one-queued").passed).toBe(true);
+  });
+
+  test("atomically carves one capped child slice and returns only proven unused allocation", () => {
+    const paths = fixturePaths();
+    const store = new BudgetStore(paths);
+    expect(store.reserve(reservation(paths, {
+      id: "parent",
+      inputTokens: 1_000,
+      outputTokens: 1_000,
+      costUsd: 4,
+      artifactBytes: 400,
+      retries: 4,
+    })).allowed).toBe(true);
+    expect(store.activate("parent").allowed).toBe(true);
+    const requestId = crypto.randomUUID();
+    const child = store.subreserveDelegation({
+      id: "child",
+      parentReservationId: "parent",
+      requestId,
+      budgetFraction: 0.25,
+      provider: "openai",
+      inputTokens: 40_000,
+      outputTokens: 8_000,
+      costUsd: 1,
+      artifactBytes: 100,
+      retries: 1,
+    });
+    expect(child.allowed).toBe(true);
+    expect(child.reservation?.envelope).toEqual({ requests: 2, inputTokens: 40_000, outputTokens: 8_000, costUsd: 1, artifactBytes: 100, retries: 1 });
+    expect(store.subreserveDelegation({
+      id: "replay",
+      parentReservationId: "parent",
+      requestId,
+      provider: "openai",
+      inputTokens: 1,
+      outputTokens: 1,
+      costUsd: 0,
+    })).toMatchObject({ allowed: true, existing: true, reservation: { id: "child" } });
+    expect(store.subreserveDelegation({
+      id: "second",
+      parentReservationId: "parent",
+      requestId: crypto.randomUUID(),
+      provider: "openai",
+      inputTokens: 1,
+      outputTokens: 1,
+      costUsd: 0,
+    })).toMatchObject({ allowed: false, existing: false });
+    expect(store.activate("child").allowed).toBe(true);
+    store.commit("child", { inputTokens: 10_000, outputTokens: 1_000, costUsd: 0.25, observedRequests: 1, artifactBytes: 25 });
+    expect(store.getReservation("parent")?.envelope).toEqual({
+      requests: 7,
+      inputTokens: 190_000,
+      outputTokens: 31_000,
+      costUsd: 3.75,
+      artifactBytes: 375,
+      retries: 3,
+    });
+  });
+
+  test("exhausts a delegated slice after crash without returning it to the parent", () => {
+    const paths = fixturePaths();
+    const store = new BudgetStore(paths);
+    expect(store.reserve(reservation(paths, { id: "parent-crash", costUsd: 4 })).allowed).toBe(true);
+    store.activate("parent-crash");
+    const child = store.subreserveDelegation({
+      id: "child-crash",
+      parentReservationId: "parent-crash",
+      requestId: crypto.randomUUID(),
+      budgetFraction: 0.5,
+      provider: "openai",
+      inputTokens: 100_000,
+      outputTokens: 16_000,
+      costUsd: 2,
+    });
+    expect(child.allowed).toBe(true);
+    const remaining = store.getReservation("parent-crash")?.envelope;
+    store.failClosedAfterInterruption("child-crash");
+    expect(store.getReservation("parent-crash")?.envelope).toEqual(remaining);
+    expect(store.getReservation("child-crash")).toBeNull();
+  });
+
+  test("upgrades version-two reservations into transferable envelopes", () => {
+    const paths = fixturePaths();
+    ensureProjectStateDirectories(paths);
+    writeFileSync(paths.budgetsPath, `${JSON.stringify({
+      version: 2,
+      projectId: paths.projectId,
+      budgets: [],
+      reservations: [{
+        id: "legacy-parent",
+        projectId: paths.projectId,
+        principal: "worker",
+        sessionId: null,
+        workflowId: null,
+        provider: null,
+        inputTokens: 100,
+        outputTokens: 200,
+        costUsd: null,
+        artifactBytes: 0,
+        retries: 0,
+        budgetIds: [],
+        active: true,
+        createdAt: 1,
+      }],
+      updatedAt: 1,
+    })}\n`, { mode: 0o600 });
+    const upgraded = new BudgetStore(paths).getState();
+    expect(upgraded.version).toBe(3);
+    expect(upgraded.reservations[0]).toMatchObject({
+      id: "legacy-parent",
+      parentReservationId: null,
+      delegationRequestId: null,
+      envelope: { requests: 8, inputTokens: 200_000, outputTokens: 32_000, costUsd: null },
+    });
   });
 });
 

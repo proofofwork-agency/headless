@@ -87,6 +87,17 @@ export type BrokerRequestLog = {
   error: string | null;
 };
 
+export type BrokerLeaseCarve = {
+  id: string;
+  parentLeaseId: string;
+  runId: string;
+  requests: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  settled: boolean;
+};
+
 export type ProviderBrokerOptions = {
   credentials?: Record<string, string | undefined>;
   upstreams?: Record<string, string | undefined>;
@@ -243,6 +254,75 @@ export class ProviderBroker {
       inFlightBodyBytes: lease.inFlightBodyBytes,
       revoked: lease.revoked,
     };
+  }
+
+  /** Synchronously remove a delegated slice from the live parent lease. */
+  carveRunLease(runId: string, allocation: Omit<BrokerLeaseCarve, "id" | "parentLeaseId" | "runId" | "settled">) {
+    const lease = [...this.leases.values()].find((candidate) => candidate.runId === runId && !candidate.revoked);
+    if (!lease) throw new Error("Parent broker lease is unavailable for delegation.");
+    const runQuota = lease.budgetQuotas.find((quota) => quota.id.startsWith("headless-run-"));
+    const aggregate = runQuota ? this.budgetQuotas.get(runQuota.id) : null;
+    const remainingRequests = lease.maxRequests - lease.requests;
+    if (allocation.requests <= 0 || allocation.requests > remainingRequests) throw new Error("Parent broker request remainder cannot fund the delegated slice.");
+    assertCarveFits("input token", allocation.inputTokens, runQuota?.maxInputTokens ?? null, aggregate?.usedInputTokens ?? 0);
+    assertCarveFits("output token", allocation.outputTokens, runQuota?.maxOutputTokens ?? null, aggregate?.usedOutputTokens ?? 0);
+    assertCarveFits("cost", allocation.costUsd, lease.maxCostUsd, Math.max(lease.accountedCostUsd, lease.observedCostUsd));
+
+    lease.maxRequests -= allocation.requests;
+    if (allocation.costUsd !== null && lease.maxCostUsd !== null) lease.maxCostUsd -= allocation.costUsd;
+    if (runQuota && aggregate) {
+      if (runQuota.maxRequests !== null && aggregate.maxRequests !== null) {
+        runQuota.maxRequests -= allocation.requests;
+        aggregate.maxRequests -= allocation.requests;
+      }
+      if (allocation.inputTokens !== null && runQuota.maxInputTokens !== null && aggregate.maxInputTokens !== null) {
+        runQuota.maxInputTokens -= allocation.inputTokens;
+        aggregate.maxInputTokens -= allocation.inputTokens;
+      }
+      if (allocation.outputTokens !== null && runQuota.maxOutputTokens !== null && aggregate.maxOutputTokens !== null) {
+        runQuota.maxOutputTokens -= allocation.outputTokens;
+        aggregate.maxOutputTokens -= allocation.outputTokens;
+      }
+      this.persistBudgetQuota?.(BrokerBudgetQuotaSchema.parse(aggregate), lease.expiresAt);
+    }
+    return {
+      id: randomUUID(),
+      parentLeaseId: lease.id,
+      runId,
+      ...allocation,
+      settled: false,
+    } satisfies BrokerLeaseCarve;
+  }
+
+  settleRunLeaseCarve(carve: BrokerLeaseCarve, actual?: { requests?: number; inputTokens?: number | null; outputTokens?: number | null; costUsd?: number | null }) {
+    if (carve.settled) return false;
+    carve.settled = true;
+    const lease = this.leases.get(carve.parentLeaseId);
+    if (!lease || lease.revoked || lease.runId !== carve.runId) return false;
+    const runQuota = lease.budgetQuotas.find((quota) => quota.id.startsWith("headless-run-"));
+    const aggregate = runQuota ? this.budgetQuotas.get(runQuota.id) : null;
+    lease.maxRequests += Math.max(0, carve.requests - Math.min(carve.requests, actual?.requests ?? carve.requests));
+    const unusedCost = unusedNullable(carve.costUsd, actual?.costUsd);
+    if (unusedCost !== null && lease.maxCostUsd !== null) lease.maxCostUsd += unusedCost;
+    if (runQuota && aggregate) {
+      const unusedRequests = Math.max(0, carve.requests - Math.min(carve.requests, actual?.requests ?? carve.requests));
+      if (runQuota.maxRequests !== null && aggregate.maxRequests !== null) {
+        runQuota.maxRequests += unusedRequests;
+        aggregate.maxRequests += unusedRequests;
+      }
+      const unusedInput = unusedNullable(carve.inputTokens, actual?.inputTokens);
+      const unusedOutput = unusedNullable(carve.outputTokens, actual?.outputTokens);
+      if (unusedInput !== null && runQuota.maxInputTokens !== null && aggregate.maxInputTokens !== null) {
+        runQuota.maxInputTokens += unusedInput;
+        aggregate.maxInputTokens += unusedInput;
+      }
+      if (unusedOutput !== null && runQuota.maxOutputTokens !== null && aggregate.maxOutputTokens !== null) {
+        runQuota.maxOutputTokens += unusedOutput;
+        aggregate.maxOutputTokens += unusedOutput;
+      }
+      this.persistBudgetQuota?.(BrokerBudgetQuotaSchema.parse(aggregate), lease.expiresAt);
+    }
+    return true;
   }
 
   getResourceUsage() {
@@ -880,4 +960,18 @@ function messageOf(error: unknown) {
 function boundedPositive(value: number, maximum: number, label: string) {
   if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) throw new TypeError(`${label} must be a positive bounded integer.`);
   return value;
+}
+
+function assertCarveFits(label: string, allocation: number | null, maximum: number | null, used: number) {
+  if (allocation === null) {
+    if (maximum !== null) throw new Error(`Delegated ${label} allocation is unknown under a finite parent lease.`);
+    return;
+  }
+  if (maximum === null) return;
+  if (allocation > Math.max(0, maximum - used)) throw new Error(`Parent broker ${label} remainder cannot fund the delegated slice.`);
+}
+
+function unusedNullable(allocated: number | null, actual: number | null | undefined) {
+  if (allocated === null || actual === null || actual === undefined) return null;
+  return Math.max(0, allocated - actual);
 }

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { z } from "zod";
-import { IdentifierSchema, PrincipalIdSchema, ProjectIdSchema, TimestampSchema } from "../contracts/common";
+import { BackendIdSchema, BoundedTextSchema, IdentifierSchema, PositiveTimeoutSchema, PrincipalIdSchema, ProjectIdSchema, TimestampSchema } from "../contracts/common";
 import { ensureOwnerOnlyDirectory } from "../runtime/project-state";
 import { redactAndTruncate, redactDeep } from "../runtime/redaction";
 import { runToolCallTimeoutMs } from "../runtime/run-tool-client";
@@ -30,8 +30,11 @@ export const RunToolOperationSchema = z.enum([
   "messages_pull",
   "ask_for_more_work",
   "ask_for_backup",
+  "run.delegate",
 ]);
 export type RunToolOperation = z.infer<typeof RunToolOperationSchema>;
+export const DEPTH_ZERO_RUN_TOOL_OPERATIONS = RunToolOperationSchema.options;
+export const DELEGATED_RUN_TOOL_OPERATIONS = RunToolOperationSchema.options.filter((operation) => operation !== "run.delegate");
 
 export const RunToolScopeSchema = z.object({
   projectId: ProjectIdSchema,
@@ -90,12 +93,21 @@ const paramSchemas = {
   messages_pull: z.object({ limit: z.number().int().min(1).max(50).default(20) }).strict(),
   ask_for_more_work: z.object({ completed: z.string().min(1).max(16_384) }).strict(),
   ask_for_backup: z.object({ reason: z.string().min(1).max(16_384) }).strict(),
+  "run.delegate": z.object({
+    backend: BackendIdSchema,
+    prompt: BoundedTextSchema,
+    model: z.string().trim().min(1).max(256).optional(),
+    agent: z.string().trim().min(1).max(256).optional(),
+    timeoutMs: PositiveTimeoutSchema.optional(),
+    budgetFraction: z.number().positive().max(0.5).default(0.25),
+  }).strict(),
 } satisfies Record<RunToolOperation, z.ZodTypeAny>;
 
 export type RunToolCallHandler = (
   scope: Readonly<RunToolScope>,
   operation: RunToolOperation,
   params: Record<string, unknown>,
+  requestId: string,
 ) => unknown | Promise<unknown>;
 
 export type RunToolEndpoint = {
@@ -103,6 +115,7 @@ export type RunToolEndpoint = {
   socketPath: string;
   token: string;
   scope: RunToolScope;
+  operations: RunToolOperation[];
 };
 
 type EndpointRecord = {
@@ -117,6 +130,7 @@ type EndpointRecord = {
   requests: number;
   inFlight: number;
   maxRequests: number;
+  operations: ReadonlySet<RunToolOperation>;
 };
 
 export type RunToolEndpointManagerOptions = {
@@ -144,8 +158,10 @@ export class RunToolEndpointManager {
     this.maxRequestsPerRun = boundedPositive(options.maxRequestsPerRun ?? 128, 1_024, "maxRequestsPerRun");
   }
 
-  async issue(input: RunToolScope): Promise<RunToolEndpoint> {
+  async issue(input: RunToolScope, operations: readonly RunToolOperation[] = RunToolOperationSchema.options): Promise<RunToolEndpoint> {
     const scope = RunToolScopeSchema.parse(input);
+    const allowed = operations.map((operation) => RunToolOperationSchema.parse(operation));
+    if (new Set(allowed).size !== allowed.length || allowed.length === 0) throw new TypeError("Run tool operation allowlist must be non-empty and unique.");
     if (scope.expiresAt <= this.now()) throw new TypeError("Run tool credential expiry must be in the future.");
     const id = randomUUID();
     const socketPath = join(this.options.socketDir, `${process.pid}-${id.slice(0, 8)}.tool.sock`);
@@ -165,6 +181,7 @@ export class RunToolEndpointManager {
       requests: 0,
       inFlight: 0,
       maxRequests: this.maxRequestsPerRun,
+      operations: new Set(allowed),
     } satisfies EndpointRecord;
     server.on("connection", (socket) => this.accept(record, socket));
     try {
@@ -180,7 +197,7 @@ export class RunToolEndpointManager {
       record.timer.unref?.();
       this.records.set(id, record);
       server.on("error", () => { void this.revoke(id); });
-      return { id, socketPath, token, scope: structuredClone(scope) };
+      return { id, socketPath, token, scope: structuredClone(scope), operations: [...allowed] };
     } catch (error) {
       server.close();
       rmSync(socketPath, { force: true });
@@ -244,12 +261,17 @@ export class RunToolEndpointManager {
       if (!safeTokenEqual(record.tokenDigest, request.token)) throw policyError("RUN_TOOL_AUTH_FAILED", "Run tool authentication failed.");
       if (record.requests >= record.maxRequests) throw policyError("RUN_TOOL_LIMIT", "Run tool request limit exhausted.");
       if (record.inFlight >= 4) throw policyError("RUN_TOOL_BUSY", "Run tool concurrency limit reached.");
+      if (!record.operations.has(request.operation)) throw policyError("POLICY_DENIED", "Run tool operation is not allowed for this credential.");
       const params = paramSchemas[request.operation].parse(request.params) as Record<string, unknown>;
+      if (request.operation === "run.delegate") {
+        const requested = typeof params.timeoutMs === "number" ? params.timeoutMs : 60_000;
+        socket.setTimeout(Math.max(runToolCallTimeoutMs(), Math.min(record.scope.expiresAt - this.now(), requested + 10_000)), () => socket.destroy());
+      }
       // Reserve before the first await so concurrent callers cannot race the cap.
       record.requests += 1;
       record.inFlight += 1;
       try {
-        const result = await this.options.handle(Object.freeze(structuredClone(record.scope)), request.operation, params);
+        const result = await this.options.handle(Object.freeze(structuredClone(record.scope)), request.operation, params, request.id);
         if (!record.active || record.scope.expiresAt <= this.now()) {
           throw policyError("RUN_TOOL_EXPIRED", "Run tool credential expired or was revoked.");
         }

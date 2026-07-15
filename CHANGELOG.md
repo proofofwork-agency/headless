@@ -6,6 +6,7 @@ Publication remains blocked. Both package manifests are private at `0.2.0-alpha.
 
 ### Fixed
 
+- Applied every backend's containment-safe `prepareEnvironment` hook to persistent native-session launches as well as one-shots. Codex now receives the system CA bundle paths inside its isolated home without widening the Seatbelt network profile; tests prove the hooks do not restore ambient credentials or host control paths. Keychain-only Claude login on macOS remains an explicit fail-closed limitation rather than being papered over with real-home or token forwarding.
 - Added one legacy-aware durable RunResult decoder for the superseded `provider-direct` value. Run-event projections, protected archives, jobs, sessions, and workflow steps now return canonical `native-direct-unrestricted`; protected archive hashes are verified before normalization, historical bytes remain unchanged, and malformed or unknown values still fail closed.
 - Restored daemon and `doctor` startup for upgraded real project state instead of allowing strict current-write validation to brick the daemon on its own pre-rename history.
 - Separated Linux run-tool feature health from containment integrity. The loopback relay round-trip probe remains a fresh CI/test diagnostic but no longer denies unrelated contained runs or caches a transient failure process-wide; actual helper failures remain bounded and explicit.
@@ -14,6 +15,7 @@ Publication remains blocked. Both package manifests are private at `0.2.0-alpha.
 
 ### Added
 
+- Added experimental depth-one worker delegation through `run.delegate`: one daemon-attributed read-only child per parent, same-provider broker-only routing in v1, active-lead exclusion, idempotent replay, non-queueing capacity admission, cancellation/restart recovery, and structured child outcomes that never terminate the parent. Child spend is an atomic 25%-default/50%-maximum carve from the parent's remaining reservation, with unused return and crash-unknown exhaustion instead of a second project-wide reservation.
 - Promoted `mcp` into the Beta 1 CLI surface. Codex, Claude Code, and Grok installs use their native commands; OpenCode receives a safely merged global configuration outside the checkout, with complete manual fallbacks where automation cannot finish.
 - Added `headless init --lead codex|claude|opencode|grok`, which initializes external state, installs that host's MCP entry, and binds the foreground lead without granting project trust or native egress.
 - Promoted the observer `tui` into the Beta 1 CLI surface and added a read-only Config view for trust, lead generation/connection, budgets, backend readiness, and daemon state. It generates exact root-CLI commands but cannot execute mutations.

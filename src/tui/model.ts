@@ -1,5 +1,5 @@
 import type { ApprovalRequest, DirectedMessage, FleetProfile, Goal, Turn } from "../contracts/collaboration";
-import type { Budget, Task } from "../contracts/durable";
+import type { Budget, Job, Task } from "../contracts/durable";
 import type { RunEvent } from "../contracts/run";
 import type { TaskState } from "../runtime/read-model";
 import { redactAndTruncate } from "../runtime/redaction";
@@ -41,6 +41,20 @@ export type ProjectTrustView = {
   bypassAllowed: boolean;
 };
 
+export type DelegationView = {
+  parentJobId: string;
+  childJobId: string;
+  requestId: string;
+  backend: string;
+  state: Job["state"];
+  createdAt: number;
+  deadlineAt: number | null;
+  budgetFraction: number;
+  usage: NonNullable<Job["result"]>["usage"] | null;
+  cost: NonNullable<Job["result"]>["cost"] | null;
+  error: NonNullable<Job["result"]>["error"];
+};
+
 export type TuiControlRoomState = {
   projectRoot: string;
   projectId: string | null;
@@ -62,6 +76,7 @@ export type TuiControlRoomState = {
   messages: DirectedMessage[];
   approvals: ApprovalRequest[];
   budgets: Budget[];
+  delegations: DelegationView[];
   candidate: CandidateView | null;
   lead: {
     host: string;
@@ -173,6 +188,7 @@ export type ConfigViewModel = {
   daemon: string;
   budgets: Array<{ id: string; summary: string }>;
   backends: Array<{ id: string; backend: string; readiness: OperatorStatus; detail: string }>;
+  delegations: Array<{ id: string; summary: string }>;
   commands: ConfigCommand[];
 };
 
@@ -253,6 +269,10 @@ export function configViewModel(state: TuiControlRoomState): ConfigViewModel {
       backend: backend.backend,
       readiness: providerReadiness(backend),
       detail: safeInline(backend.detail ?? "No readiness detail reported."),
+    })),
+    delegations: state.delegations.map((delegation) => ({
+      id: delegation.childJobId,
+      summary: `  ↳ ${delegation.backend} · ${delegation.state} · parent ${delegation.parentJobId} · fraction ${delegation.budgetFraction} · elapsed ${Math.max(0, Date.now() - delegation.createdAt)}ms · deadline ${delegation.deadlineAt === null ? "unknown" : new Date(delegation.deadlineAt).toISOString()} · usage ${delegation.usage?.input ?? "?"}/${delegation.usage?.output ?? "?"} tokens · requests ${delegation.cost?.observedRequests ?? "?"} · cost ${delegation.cost?.amountUsd ?? "unknown"}${delegation.error ? ` · ${delegation.error.code}` : ""}`,
     })),
     commands,
   };
@@ -373,6 +393,7 @@ export function initialControlRoomState(projectRoot: string): TuiControlRoomStat
     messages: [],
     approvals: [],
     budgets: [],
+    delegations: [],
     candidate: null,
     lead: null,
     logMode: "compact",

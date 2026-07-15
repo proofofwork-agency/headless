@@ -116,6 +116,7 @@ export function buildDarwinReadOnlyProfile(options: DarwinReadSandboxProfileOpti
   const workdir = canonicalizeExistingPath(options.workdir);
   return buildDarwinProfile({
     readableRoots: [workdir, ...darwinRuntimeReadRoots(options.runtimeReadRoots)],
+    readableDirectories: ancestorDirectories(workdir),
     writableRoots: workerWritableRoots(options.worker),
     denyWriteRoots: options.denyWriteRoots,
     denyReadRoots: [...repositoryCredentialPaths(workdir), ...(options.denyReadRoots ?? [])],

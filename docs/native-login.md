@@ -38,20 +38,65 @@ Headless never mounts the real home directory. It creates an owner-only worker r
 | Backend | Host source | Worker destination |
 | --- | --- | --- |
 | Codex | `~/.codex/auth.json` | `$HOME/.codex/auth.json` |
-| Claude | `~/.claude/.credentials.json` | `$HOME/.claude/.credentials.json` |
+| Claude (Linux/Windows file login) | `~/.claude/.credentials.json` | `$HOME/.claude/.credentials.json` |
 | OpenCode | `~/.local/share/opencode/auth.json` | `$XDG_DATA_HOME/opencode/auth.json` |
 | Grok | `~/.grok/auth.json` | `$HOME/.grok/auth.json` |
 | Grok | `~/.config/grok/auth.json` | `$XDG_CONFIG_HOME/grok/auth.json` |
 
 An individual file is limited to 2 MiB and the complete capsule to 4 MiB. Installed files use mode `0600`; worker directories use `0700`. Headless fingerprints the selected backend and exact capsule contents for session-recovery checks. The worker does not receive sibling-provider files, ambient API-key or OAuth-token variables, Git credentials, SSH keys or agents, shell startup files, keychain exports, project `.env` files, or host sockets.
 
-Claude on macOS currently requires a supported regular-file state such as `~/.claude/.credentials.json`. The installed Claude CLI's login-keychain-only state is not discoverable from Headless's isolated `HOME` under the required default-deny Seatbelt profile. Restoring only `USER`/`LOGNAME`, `SECURITYSESSIONID`, or `CFFIXED_USER_HOME` does not make it available; using the real `HOME` would violate credential scope, and exporting the item or forwarding `CLAUDE_CODE_OAUTH_TOKEN` would violate the capsule boundary. Headless therefore returns `NATIVE_AUTH_UNAVAILABLE`. Use broker mode when no supported regular-file Claude login exists.
+Claude on macOS currently requires a supported regular-file state such as `~/.claude/.credentials.json`. The installed Claude CLI's login-keychain-only state is not discoverable from Headless's isolated `HOME` under the required default-deny Seatbelt profile. Restoring only `USER`/`LOGNAME`, `SECURITYSESSIONID`, or `CFFIXED_USER_HOME` does not make it available; using the real `HOME` would violate credential scope, and exporting the item or forwarding an ambient OAuth token would violate the capsule boundary. Headless therefore returns `NATIVE_AUTH_UNAVAILABLE` when no file exists. Use broker mode when no supported regular-file Claude login exists.
+
+### Claude authentication under Headless
+
+`claude auth status --json` reports whether the host Claude CLI can authenticate; it does not prove that Headless can construct a contained capsule. On macOS, that status may be `loggedIn: true` because the current login is in Keychain while an old `~/.claude/.credentials.json` remains on disk. Headless can copy only the file, so an expired file can produce a provider `401` even though the host CLI works. Headless does not compare, merge, or export the Keychain credential.
+
+On Linux, the supported subscription-login path is a normal Claude login, which Claude Code stores in the exact file Headless already allowlists:
+
+```bash
+PROJECT="${PROJECT:-$(pwd)}"
+
+claude auth login
+test -f "$HOME/.claude/.credentials.json"
+
+headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
+headless exec --cwd "$PROJECT" \
+  --backend claude-code \
+  --auth-mode native-login \
+  --approval-policy ask \
+  --timeout-ms 60000 \
+  --json -- "Reply with OK only. Do not use tools."
+```
+
+The file must be a non-symlinked, single-link regular file no larger than 2 MiB. Headless copies it owner-only to the isolated worker's `$HOME/.claude/.credentials.json`; it never mounts the host home. A custom `CLAUDE_CONFIG_DIR` is not an allowlisted source. Windows uses the analogous `%USERPROFILE%\.claude\.credentials.json`, but Headless execution itself currently returns `UNSUPPORTED_PLATFORM` on Windows.
+
+`claude setup-token` is not a file-login workaround. [Anthropic documents](https://code.claude.com/docs/en/iam#generate-a-long-lived-token) that it prints a one-year, inference-only subscription token and does not save it anywhere; consumers set it as `CLAUDE_CODE_OAUTH_TOKEN`. Headless intentionally removes ambient OAuth-token variables and has no allowlisted setup-token file format. Do not paste that token into `.credentials.json`: the format is undocumented and Headless would have no safe provenance or lifecycle contract for it.
+
+On macOS with a Keychain-only subscription login, use broker mode with an Anthropic Console API key until an explicit, reviewed setup-token capsule is implemented. The key must be present in the daemon's startup environment, and the model must have trusted pricing or receive the normal explicit approval:
+
+```bash
+PROJECT="${PROJECT:-$(pwd)}"
+: "${ANTHROPIC_API_KEY:?export ANTHROPIC_API_KEY before starting the Headless daemon}"
+: "${HEADLESS_CLAUDE_MODEL:?export the Anthropic model ID admitted by your Headless pricing policy}"
+
+headless exec --cwd "$PROJECT" \
+  --backend claude-code \
+  --auth-mode broker \
+  --model "$HEADLESS_CLAUDE_MODEL" \
+  --approval-policy ask \
+  --timeout-ms 60000 \
+  --json -- "Reply with OK only. Do not use tools."
+```
+
+If the project daemon is already running without `ANTHROPIC_API_KEY`, restart that owned daemon from an environment containing the key; changing the caller shell cannot add a credential to an existing daemon.
 
 OpenCode's model default is metadata, not capsule content. If a native OpenCode request omits `model`, Headless reads at most 64 KiB from the first present fixed global file, `~/.config/opencode/opencode.json` then `opencode.jsonc`. The file must resolve canonically inside the real home, be an owner-owned single-link regular file, and pass a no-follow open. Headless parses JSON/JSONC, validates only the scalar `model` with normal option bounds, passes it explicitly as `--model`, immediately clears the source buffers, and includes the selected value in the auth-profile fingerprint. It never copies or activates the host config; plugin, MCP, command, permission, agent, and every other field remain unavailable inside the worker because OpenCode still runs in pure mode with Headless's immutable config and disable flags.
 
 Host `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, and alternate config paths are intentionally not consulted because they are untrusted control-plane surfaces. Use an explicit public `model` when the fixed global file does not provide the desired default. If neither fixed file contains a safe scalar, or the selected file is malformed, oversized, linked, non-owner, or unsafe, the run/session returns `NATIVE_AUTH_UNAVAILABLE` before an OpenCode process is launched. An explicit model takes precedence without reading host OpenCode config. A changed extracted model changes the persisted fingerprint, so Headless refuses native resume and uses only its recorded bounded replay path when replay evidence is available.
 
 An unavailable, invalid, symlinked, or oversized login produces `NATIVE_AUTH_UNAVAILABLE`. Native authentication deliberately means the official backend can use its own scoped account state and contact its provider; it does not claim broker-style network or credential invisibility.
+
+One-shot and persistent native-session launches apply the selected backend's `prepareEnvironment` hook after the isolated baseline environment is built. These hooks may add only backend control values and read-only system trust-store paths; they do not restore ambient API keys, OAuth tokens, keychain exports, real-home paths, or host sockets. In particular, Codex receives `SSL_CERT_FILE=/etc/ssl/cert.pem` and `SSL_CERT_DIR=/etc/ssl/certs` so TLS validation works from its isolated home without widening the Seatbelt network profile. Claude's keychain-only limitation above is separate and is not bypassed by environment preparation.
 
 Grok hardening prepares a Headless-owned `config.toml` in its isolated `GROK_HOME`, explicit environment-level disables for every Cursor/Claude/Codex compatibility cell, no memory/subagents/web fetch/update/telemetry, a Headless system-prompt override, a mode-specific built-in tool allowlist, and startup-snapshot masks for existing project control paths. Before any provider access, a contained, network-denied `grok inspect --json` must attest that native project surfaces and every compatibility cell are disabled. Grok remains experimental and blocked when the installed version cannot produce that evidence.
 

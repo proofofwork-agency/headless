@@ -44,6 +44,7 @@ type ObserverSnapshot = {
   approvals: ApprovalRequest[];
   budgets?: Budget[];
   jobs: Job[];
+  delegations?: TuiControlRoomState["delegations"];
   tasks: Task[];
   orchestration: Partial<OrchestrationView> & { enabled: boolean };
 };
@@ -132,6 +133,7 @@ export async function restoreControlRoom(client: ControlRoomClient, current: Tui
       messages: activeGoalId ? snapshot.goalMessages[activeGoalId] ?? [] : [],
       approvals: snapshot.approvals,
       budgets: snapshot.budgets ?? [],
+      delegations: snapshot.delegations ?? [],
       observedAt: typeof snapshot.observedAt === "number" && Number.isFinite(snapshot.observedAt) ? snapshot.observedAt : null,
       durableTasks: snapshot.tasks,
       orchestration,

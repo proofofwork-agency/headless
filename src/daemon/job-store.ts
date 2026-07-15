@@ -37,6 +37,7 @@ export class JobStore {
     workflowId?: string | null;
     councilId?: string | null;
     councilSlot?: string | null;
+    delegationOf?: Job["delegationOf"];
   }) {
     const now = Date.now();
     const job = JobSchema.parse({
@@ -47,6 +48,7 @@ export class JobStore {
       workflowId: input.workflowId ?? null,
       councilId: input.councilId ?? null,
       councilSlot: input.councilSlot ?? null,
+      delegationOf: input.delegationOf ?? null,
       backend: input.request.backend,
       mode: input.request.mode,
       authMode: input.request.authMode,
@@ -87,6 +89,17 @@ export class JobStore {
       .filter((name) => name.endsWith(".job.json"))
       .map((name) => parsePersistedJob(safeJsonParse(readFileSync(join(this.jobsDir, name), "utf8"))))
       .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  findDelegation(parentJobId: string, requestId: string) {
+    return this.list().find((job) => (
+      job.delegationOf?.parentJobId === parentJobId
+      && job.delegationOf.requestId === requestId
+    )) ?? null;
+  }
+
+  delegatedChild(parentJobId: string) {
+    return this.list().find((job) => job.delegationOf?.parentJobId === parentJobId) ?? null;
   }
 
   transition(id: string, state: Job["state"], patch: Partial<Pick<Job, "leaseOwner" | "leaseExpiresAt">> = {}) {

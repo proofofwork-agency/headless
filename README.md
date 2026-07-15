@@ -108,6 +108,8 @@ Every backend is treated as arbitrary code. Output and events are bounded and re
 
 Required workers may receive a run-scoped cooperation helper. On Linux its loopback-to-Unix round-trip probe is diagnostic only: a transient cooperation failure does not weaken containment or deny an otherwise valid run. Helper calls still fail loudly and remain bounded. `HEADLESS_RUN_TOOL_TIMEOUT_MS` sets the daemon/helper call window before daemon startup; it defaults to 5,000 ms and is clamped to 1,000–60,000 ms.
 
+Depth-zero read-only workers may use the experimental `run.delegate` helper operation to request one contained sibling job. V1 is deliberately narrow: the child must use a different backend on the same provider, broker authentication (or a credential-free backend), required containment, and read-only mode. Admission is immediate rather than queued, excludes the foreground-lead backend, inherits the parent deadline and approval policy (`bypass` becomes `auto`), and atomically carves 25% of the parent reservation by default with a hard 50% cap. A delegated child cannot delegate again; its failure is returned as structured tool data and does not terminate the parent.
+
 Headless owns its ledger and communication state. It does not read, import, or depend on a ContextRelay runtime.
 
 ## Writes and experimental orchestration
@@ -178,7 +180,7 @@ bun run smoke:pack
 
 Do not infer release readiness from a stale test count. Gate A requires zero failures/errors on macOS and Linux, clean-clone build and tarball installation, protected broker smoke for OpenAI/Anthropic/Gemini/xAI, installed native-login smoke for each advertised backend/version, and operational GitHub Actions jobs. Gates B and C add their recorded orchestration and per-backend write evidence. Publication remains blocked until the applicable gate is complete and the packages resolve through `npm view` after an authorized release.
 
-See [native authentication](./docs/native-login.md), [foreground-lead MCP integration](./docs/mcp-integration.md), [security limits](./SECURITY.md), and the [current plan](./docs/plan.md).
+See [native authentication](./docs/native-login.md), [foreground-lead MCP integration](./docs/mcp-integration.md), [security limits](./SECURITY.md), the [current plan](./docs/plan.md), and the [Docusaurus site sources](./website/README.md).
 
 ## License
 

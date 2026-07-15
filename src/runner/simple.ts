@@ -236,7 +236,7 @@ async function executeSupervisedRun(
       Object.assign(worker.env, installRunToolClient(worker, options.runTool));
     }
     const prepared = nativeOptions.runTool
-      ? { ...nativeOptions, prompt: withRunToolInstructions(nativeOptions.prompt) }
+      ? { ...nativeOptions, prompt: withRunToolInstructions(nativeOptions.prompt, options.runTool!.operations) }
       : nativeOptions;
     const env = adapterEnvironment(adapter, worker, prepared);
     if (prepared.mode === "write") return await runContainedWrite(prepared, adapter, cwd, env, worker, started, timeoutMs, containment, supervisor);

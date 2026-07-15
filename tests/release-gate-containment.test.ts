@@ -12,6 +12,31 @@ afterEach(() => {
 const platformTest = process.platform === "darwin" || process.platform === "linux" ? test : test.skip;
 
 describe("release gate containment", () => {
+  platformTest("default package-script gates complete inside containment", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-gate-package-scripts-"));
+    roots.push(root);
+    const project = join(root, "project");
+    mkdirSync(project);
+    await Bun.write(join(project, "package.json"), `${JSON.stringify({
+      name: "headless-gate-package-scripts",
+      private: true,
+      scripts: {
+        check: "bun -e \"console.log('matrix-check-ok')\"",
+        build: "bun -e \"console.log('matrix-build-ok')\"",
+      },
+    }, null, 2)}\n`);
+
+    const report = await runReleaseGate({ cwd: project, timeoutMs: 10_000, recordArtifact: false });
+
+    expect(report.ok).toBe(true);
+    expect(report.checks.map((entry) => ({ name: entry.name, ok: entry.ok, timedOut: entry.timedOut, cancelled: entry.cancelled }))).toEqual([
+      { name: "check", ok: true, timedOut: false, cancelled: false },
+      { name: "build", ok: true, timedOut: false, cancelled: false },
+    ]);
+    expect(report.checks[0]?.output).toContain("matrix-check-ok");
+    expect(report.checks[1]?.output).toContain("matrix-build-ok");
+  });
+
   platformTest("project gate scripts cannot read or mutate sibling host files or use direct egress", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-gate-containment-"));
     roots.push(root);

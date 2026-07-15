@@ -33,7 +33,7 @@ import {
 } from "./job-admission-service";
 import type { JobStore } from "./job-store";
 import type { RunEventStore } from "./run-event-store";
-import type { RunToolEndpoint, RunToolEndpointManager } from "./run-tool-endpoint";
+import { DELEGATED_RUN_TOOL_OPERATIONS, DEPTH_ZERO_RUN_TOOL_OPERATIONS, type RunToolEndpoint, type RunToolEndpointManager } from "./run-tool-endpoint";
 import { reviewCandidateDiff } from "./candidate-service";
 import type { TaskStore } from "./task-store";
 import { experimentalExecResultToRunResult } from "../experimental/run-result-converter";
@@ -181,7 +181,7 @@ export class RunExecutionService {
               sessionId: request.sessionId ?? jobId,
               principal,
               expiresAt: deadlineAt + 10_000,
-            });
+            }, startingJob.delegationOf === null ? DEPTH_ZERO_RUN_TOOL_OPERATIONS : DELEGATED_RUN_TOOL_OPERATIONS);
           }
           const legacy = useNativePersistentSession
             ? await this.options.nativeSessions.turn(durableSession, request.prompt, remainingRunMs, controller.signal)
@@ -215,6 +215,7 @@ export class RunExecutionService {
                   expiresAt: runToolEndpoint.scope.expiresAt,
                   jobId,
                   sessionId: runToolEndpoint.scope.sessionId,
+                  operations: runToolEndpoint.operations,
                 } : undefined,
                 worktreeLease: request.mode === "write" ? this.options.worktreeLeases.createHooks(jobId) : undefined,
                 writeIntegration: request.mode === "write" ? {
@@ -708,11 +709,11 @@ export class RunExecutionService {
       budgetQuotas: [
         {
           id: `headless-run-${createHash("sha256").update(jobId).digest("hex")}`,
-          maxRequests: DEFAULT_BROKER_MAX_REQUESTS,
+          maxRequests: Math.min(DEFAULT_BROKER_MAX_REQUESTS, limits.maxRequests),
           usedRequests: 0,
-          maxInputTokens: DEFAULT_BROKER_MAX_INPUT_TOKENS,
+          maxInputTokens: limits.maxInputTokens ?? DEFAULT_BROKER_MAX_INPUT_TOKENS,
           usedInputTokens: 0,
-          maxOutputTokens: DEFAULT_BROKER_MAX_OUTPUT_TOKENS,
+          maxOutputTokens: limits.maxOutputTokens ?? DEFAULT_BROKER_MAX_OUTPUT_TOKENS,
           usedOutputTokens: 0,
           maxCostUsd,
           usedCostUsd: 0,

@@ -638,6 +638,8 @@ describe("macOS Seatbelt profiles", () => {
       expect(profile).not.toContain("(allow default)");
       expect(profile).not.toContain("(allow mach-lookup)");
       expect(profile).toContain(`(allow file-read* (subpath ${JSON.stringify(canonical(project))}))`);
+      expect(profile).toContain(`(allow file-read-data (literal ${JSON.stringify(canonical(dirname(project)))}))`);
+      expect(profile).not.toContain(`(allow file-read-data (subpath ${JSON.stringify(canonical(dirname(project)))}))`);
       expect(profile).toContain(`(allow file-write* (subpath ${JSON.stringify(worker.root)}))`);
       expect(profile).not.toContain(`(allow file-write* (subpath ${JSON.stringify(canonical(project))}))`);
       expect(profile).toContain(`(deny file-read* (literal ${JSON.stringify(join(canonical(project), ".env.local"))}))`);
@@ -743,8 +745,11 @@ describe("macOS Seatbelt profiles", () => {
   });
 
   darwinTest("read profile hides repository environment and Git credentials while preserving source reads", () => {
-    const project = temporaryDirectory("headless-darwin-repository-credentials-");
+    const parent = temporaryDirectory("headless-darwin-repository-credentials-");
+    const project = join(parent, "project");
     const ordinary = join(project, "ordinary.txt");
+    const siblingSecret = join(parent, "sibling-secret.txt");
+    mkdirSync(project);
     mkdirSync(join(project, "packages", "api"), { recursive: true });
     const secrets = [
       join(project, ".env"),
@@ -756,10 +761,15 @@ describe("macOS Seatbelt profiles", () => {
     ];
     mkdirSync(join(project, ".git"));
     writeFileSync(ordinary, "ordinary-project-source\n");
+    writeFileSync(siblingSecret, "SEEDED_REPOSITORY_SECRET\n", { mode: 0o600 });
     for (const path of secrets) writeFileSync(path, "SEEDED_REPOSITORY_SECRET\n", { mode: 0o600 });
     const profile = writeDarwinReadOnlySandboxProfile({ workdir: project });
     try {
-      const result = spawnSync(DARWIN_SANDBOX_EXEC, ["-f", profile, "/bin/sh", "-c", credentialIsolationScript([ordinary], secrets)], {
+      const script = [
+        `ls ${shellQuote(parent)} >/dev/null || exit 31`,
+        credentialIsolationScript([ordinary], [...secrets, siblingSecret]),
+      ].join("; ");
+      const result = spawnSync(DARWIN_SANDBOX_EXEC, ["-f", profile, "/bin/sh", "-c", script], {
         cwd: project,
         encoding: "utf-8",
       });

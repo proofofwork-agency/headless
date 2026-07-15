@@ -3,8 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
+import { ProviderBroker } from "../src/broker/server";
 import { RunRequestSchema, type SerializedRunRequest } from "../src/contracts/run";
-import { JobAdmissionService, daemonFailureResult } from "../src/daemon/job-admission-service";
+import { JobAdmissionService, daemonFailureResult, delegatedApprovalPolicy } from "../src/daemon/job-admission-service";
 import { JobStore } from "../src/daemon/job-store";
 import { RunEventStore } from "../src/daemon/run-event-store";
 import { TaskStore } from "../src/daemon/task-store";
@@ -25,6 +26,11 @@ afterEach(() => {
 });
 
 describe("job admission service", () => {
+  test("composes delegated approval policy without transferring bypass", () => {
+    expect(delegatedApprovalPolicy("ask")).toBe("ask");
+    expect(delegatedApprovalPolicy("auto")).toBe("auto");
+    expect(delegatedApprovalPolicy("bypass")).toBe("auto");
+  });
   test("preserves eligible FIFO order, emits positions, rejects overflow, and cancels queued work", async () => {
     const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
     const first = fixture.service.submit(run(fixture.backend, "first"), "coordinator");
@@ -274,6 +280,162 @@ describe("job admission service", () => {
     await fixture.service.waitForIdle();
     fixture.service.dispose();
   });
+
+  test("admits one child immediately, replays its request id, and never queues behind the parent", async () => {
+    const fixture = createFixture({ maxConcurrency: 2, maxQueued: 2 });
+    const childBackend = `delegated-${crypto.randomUUID()}`;
+    registerBackendDefinition(adapter(childBackend));
+    adapters.push(childBackend);
+    const parent = fixture.service.submit({ ...run(fixture.backend, "parent", "read-only", 30_000), authMode: "broker" }, "coordinator");
+    await waitUntil(() => fixture.jobs.get(parent.id)?.state === "running");
+    const requestId = crypto.randomUUID();
+    const first = fixture.service.admitDelegation({
+      parentJobId: parent.id,
+      requestId,
+      backend: childBackend,
+      prompt: "bounded child",
+      timeoutMs: 5_000,
+      budgetFraction: 0.25,
+    });
+    expect(first.existing).toBe(false);
+    expect(first.job.delegationOf).toMatchObject({ parentJobId: parent.id, requestId, depth: 1 });
+    expect(fixture.service.admitDelegation({
+      parentJobId: parent.id,
+      requestId,
+      backend: childBackend,
+      prompt: "bounded child",
+      timeoutMs: 5_000,
+      budgetFraction: 0.25,
+    })).toMatchObject({ existing: true, job: { id: first.job.id } });
+    expect(() => fixture.service.admitDelegation({
+      parentJobId: parent.id,
+      requestId: crypto.randomUUID(),
+      backend: childBackend,
+      prompt: "second child",
+      timeoutMs: 5_000,
+      budgetFraction: 0.25,
+    })).toThrow("single delegated child");
+    expect(fixture.service.load()).toEqual({ activeJobs: 2, queuedJobs: 0 });
+
+    fixture.release("bounded child");
+    fixture.release("parent");
+    await fixture.service.waitForIdle();
+    fixture.service.dispose();
+  });
+
+  test("fails delegation immediately when maxConcurrency one is occupied by its parent", async () => {
+    const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
+    const targetBackend = `capacity-child-${crypto.randomUUID()}`;
+    registerBackendDefinition(adapter(targetBackend));
+    adapters.push(targetBackend);
+    const parent = fixture.service.submit({ ...run(fixture.backend, "sole parent", "read-only", 30_000), authMode: "broker" }, "coordinator");
+    await waitUntil(() => fixture.jobs.get(parent.id)?.state === "running");
+    let denied: unknown;
+    try {
+      fixture.service.admitDelegation({
+        parentJobId: parent.id,
+        requestId: crypto.randomUUID(),
+        backend: targetBackend,
+        prompt: "must not queue",
+        timeoutMs: 5_000,
+        budgetFraction: 0.25,
+      });
+    } catch (error) {
+      denied = error;
+    }
+    expect(denied).toMatchObject({ code: "DELEGATION_CAPACITY_UNAVAILABLE", retryable: true });
+    expect(fixture.service.load()).toEqual({ activeJobs: 1, queuedJobs: 0 });
+    fixture.release("sole parent");
+    await fixture.service.waitForIdle();
+    fixture.service.dispose();
+  });
+
+  test("cascades parent cancellation to its live delegated child", async () => {
+    const fixture = createFixture({ maxConcurrency: 2, maxQueued: 2 });
+    const childBackend = `cancel-child-${crypto.randomUUID()}`;
+    registerBackendDefinition(adapter(childBackend));
+    adapters.push(childBackend);
+    const parent = fixture.service.submit({ ...run(fixture.backend, "cancel parent", "read-only", 30_000), authMode: "broker" }, "coordinator");
+    await waitUntil(() => fixture.jobs.get(parent.id)?.state === "running");
+    const child = fixture.service.admitDelegation({
+      parentJobId: parent.id,
+      requestId: crypto.randomUUID(),
+      backend: childBackend,
+      prompt: "cancel child",
+      timeoutMs: 5_000,
+      budgetFraction: 0.25,
+    }).job;
+    await waitUntil(() => fixture.jobs.get(child.id)?.state === "running");
+    fixture.service.cancel(parent.id);
+    expect(fixture.jobs.get(parent.id)?.state).toBe("cancelling");
+    expect(fixture.jobs.get(child.id)?.state).toBe("cancelling");
+    expect(fixture.aborted).toEqual([child.id, parent.id]);
+    fixture.release("cancel child");
+    fixture.release("cancel parent");
+    await fixture.service.waitForIdle();
+    expect(fixture.jobs.get(child.id)?.state).toBe("cancelled");
+    expect(fixture.jobs.get(parent.id)?.state).toBe("cancelled");
+    fixture.service.dispose();
+  });
+
+  test("recovers an interrupted parent and child with fail-closed child-slice exhaustion", () => {
+    const fixture = createFixture({ maxConcurrency: 2, maxQueued: 2 });
+    const childBackend = `recovery-child-${crypto.randomUUID()}`;
+    registerBackendDefinition(adapter(childBackend));
+    adapters.push(childBackend);
+    const parentRequest = RunRequestSchema.parse({
+      ...run(fixture.backend, "recovery parent", "read-only", 30_000),
+      projectRoot: fixture.paths.canonicalProjectRoot,
+      authMode: "broker",
+    });
+    const parent = fixture.jobs.create({ projectId: fixture.paths.projectId, principal: "coordinator", request: parentRequest });
+    fixture.budgets.reserve({
+      id: parent.id,
+      projectId: fixture.paths.projectId,
+      principal: parent.principal,
+      provider: null,
+      inputTokens: 1_000,
+      outputTokens: 4_096,
+      costUsd: null,
+    });
+    fixture.budgets.activate(parent.id);
+    fixture.jobs.claim(parent.id, "crashed-daemon", 30_000);
+    fixture.jobs.transition(parent.id, "running");
+    const childRequest = RunRequestSchema.parse({
+      ...run(childBackend, "recovery child", "read-only", 5_000),
+      projectRoot: fixture.paths.canonicalProjectRoot,
+      authMode: "broker",
+    });
+    const childId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    const carved = fixture.budgets.subreserveDelegation({
+      id: childId,
+      parentReservationId: parent.id,
+      requestId,
+      provider: null,
+      inputTokens: 100,
+      outputTokens: 4_096,
+      costUsd: null,
+    });
+    expect(carved.allowed).toBe(true);
+    fixture.budgets.activate(childId);
+    const child = fixture.jobs.create({
+      id: childId,
+      projectId: fixture.paths.projectId,
+      principal: parent.principal,
+      request: childRequest,
+      delegationOf: { parentJobId: parent.id, requestId, depth: 1, budgetFraction: 0.25 },
+    });
+    fixture.jobs.claim(child.id, "crashed-daemon", 5_000);
+    fixture.jobs.transition(child.id, "running");
+
+    expect(fixture.jobs.recoverInterruptedJobs(true).map((job) => job.id).sort()).toEqual([child.id, parent.id].sort());
+    fixture.service.recoverBudgetReservations();
+    expect(fixture.budgets.getState().reservations).toHaveLength(0);
+    expect(fixture.jobs.get(child.id)?.delegationOf).toMatchObject({ parentJobId: parent.id, requestId, depth: 1 });
+    expect(fixture.jobs.get(child.id)?.result?.error?.message).toBe("Daemon stopped while the job lease was active.");
+    fixture.service.dispose();
+  });
 });
 
 function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
@@ -295,6 +457,7 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
   const sessions = new PersistentSessionStore(paths);
   const started: string[] = [];
   const approvedTurns: string[] = [];
+  const aborted: string[] = [];
   const releases = new Map<string, () => void>();
 
   const service = new JobAdmissionService({
@@ -309,6 +472,8 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
     trust: new ProjectTrustStore(paths),
     authority: new AuthorityStore(paths, { coordinator: "coordinator" }),
     budgets,
+    broker: new ProviderBroker(),
+    activeLeadBackend: () => null,
     isStopping: () => false,
     execute: async (jobId, request, controls) => {
       jobs.claim(jobId, "test-daemon", request.timeoutMs);
@@ -317,14 +482,20 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
       if (controls.coderToolApproved) approvedTurns.push(request.prompt);
       await new Promise<void>((resolve) => releases.set(request.prompt, resolve));
       budgets.commit(jobId);
-      jobs.complete(jobId, {
+      const cancelled = jobs.get(jobId)?.state === "cancelling";
+      jobs.complete(jobId, cancelled ? {
+        ...daemonFailureResult(request, jobId, "fixture cancellation"),
+        status: "cancelled",
+        error: { code: "CANCELLED", message: "fixture cancellation", retryable: false },
+        output: "fixture cancellation",
+      } : {
         ...daemonFailureResult(request, jobId, "fixture success"),
         status: "succeeded",
         error: null,
         output: request.prompt,
       });
     },
-    abort: () => undefined,
+    abort: (jobId) => { aborted.push(jobId); },
     completed: () => undefined,
   });
 
@@ -340,6 +511,7 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
     service,
     started,
     approvedTurns,
+    aborted,
     release(prompt: string) {
       const resolve = releases.get(prompt);
       if (!resolve) throw new Error(`No active fixture execution for ${prompt}.`);

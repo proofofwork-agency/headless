@@ -1,4 +1,6 @@
+import { createHash, randomUUID } from "node:crypto";
 import { getProvider } from "../broker/providers";
+import type { BrokerLeaseCarve, ProviderBroker } from "../broker/server";
 import { getBackendDefinition, resolveBackendId } from "../backends/registry";
 import type { ApprovalRequest } from "../contracts/collaboration";
 import type { Job } from "../contracts/durable";
@@ -38,12 +40,15 @@ export type JobAdmissionServiceOptions = {
   trust: ProjectTrustStore;
   authority: AuthorityStore;
   budgets: BudgetStore;
+  broker: ProviderBroker;
+  activeLeadBackend: () => string | null;
   isStopping: () => boolean;
   execute: (jobId: string, request: SerializedRunRequest, controls: { coderToolApproved: boolean }) => Promise<void>;
   abort: (jobId: string) => void;
   completed: (job: Job) => void;
   trackExecution?: (execution: Promise<void>) => void;
   diagnostic?: (message: string, error?: unknown) => void;
+  auditDelegation?: (type: "worker_spawned" | "headless_result", parent: Job, child: Job, metadata: Record<string, unknown>) => void;
 };
 
 type PendingJob = { id: string; request: SerializedRunRequest; coderToolApproved: boolean };
@@ -66,6 +71,7 @@ export class JobAdmissionService {
   private readonly executions = new Set<Promise<void>>();
   private activeJobs = 0;
   private activeWrites = 0;
+  private readonly delegationCarves = new Map<string, BrokerLeaseCarve>();
 
   constructor(private readonly options: JobAdmissionServiceOptions) {
     this.maxConcurrency = Math.max(1, Math.min(options.maxConcurrency ?? 4, 64));
@@ -74,6 +80,216 @@ export class JobAdmissionService {
 
   load() {
     return { activeJobs: this.activeJobs, queuedJobs: this.pendingJobs.length + this.waitingApprovalJobs.size };
+  }
+
+  admitDelegation(input: {
+    parentJobId: string;
+    requestId: string;
+    backend: string;
+    prompt: string;
+    model?: string;
+    agent?: string;
+    timeoutMs?: number;
+    budgetFraction: number;
+  }) {
+    if (this.options.isStopping()) throw new HeadlessError("DAEMON_UNAVAILABLE", "Daemon is shutting down and cannot delegate.");
+    const parent = this.requireJob(input.parentJobId);
+    const parentRequest = this.options.jobs.request(parent.id);
+    if (!parentRequest || parent.state !== "running") throw new HeadlessError("POLICY_DENIED", "Delegation requires a running durable parent job.");
+    const audit = {
+      parentJobId: parent.id,
+      requestId: input.requestId,
+      targetBackend: input.backend,
+      depth: 1,
+      promptSha256: createHash("sha256").update(input.prompt).digest("hex"),
+      promptBytes: Buffer.byteLength(input.prompt),
+      budgetFraction: input.budgetFraction,
+    };
+    this.delegationPolicyEvent(parent, "deferred", "run-delegation-request", audit);
+
+    const existing = this.options.jobs.findDelegation(parent.id, input.requestId);
+    if (existing) {
+      this.delegationPolicyEvent(parent, "allowed", "run-delegation-idempotent-replay", { ...audit, childJobId: existing.id });
+      return { job: existing, existing: true };
+    }
+    if (this.options.jobs.delegatedChild(parent.id)) throw this.delegationDenied(parent, audit, "The parent already admitted its single delegated child.");
+    if (parent.delegationOf !== null) throw this.delegationDenied(parent, audit, "A delegated worker cannot delegate again.");
+    if (parent.mode !== "read-only" || parentRequest.mode !== "read-only" || parentRequest.containment !== "required") {
+      throw this.delegationDenied(parent, audit, "Delegation is available only to read-only parents under required containment.");
+    }
+    if (parentRequest.authMode !== "broker") throw this.delegationDenied(parent, audit, "Native-login delegation is prohibited.");
+    let backend: string;
+    try {
+      backend = resolveBackendId(input.backend);
+    } catch {
+      throw this.delegationDenied(parent, audit, `Unknown delegation backend: ${input.backend}.`);
+    }
+    if (backend === resolveBackendId(parent.backend)) throw this.delegationDenied(parent, audit, "Delegation must target a different backend.");
+    const lead = this.options.activeLeadBackend();
+    if (lead && backend === resolveBackendId(lead)) throw this.delegationDenied(parent, audit, "Delegation cannot target the active foreground-lead backend.");
+    if (this.activeJobs >= this.maxConcurrency || this.maxConcurrency === 1) {
+      const error = new HeadlessError("DELEGATION_CAPACITY_UNAVAILABLE", "No ordinary worker slot is immediately available for delegation.", { retryable: true });
+      this.delegationPolicyEvent(parent, "denied", "run-delegation-capacity", { ...audit, error: error.message });
+      throw error;
+    }
+
+    const parentDeadlineAt = jobDeadlineAt(parent, parentRequest);
+    const replyMarginMs = 10_000;
+    const requestedMs = input.timeoutMs ?? 60_000;
+    const deadlineAt = Math.min(Date.now() + requestedMs, parentDeadlineAt - replyMarginMs);
+    const timeoutMs = deadlineAt - Date.now();
+    if (timeoutMs < 1_000) throw this.delegationDenied(parent, audit, "Too little parent deadline remains for a bounded child and reply margin.");
+    const approvalPolicy = delegatedApprovalPolicy(parent.approvalPolicy);
+    const request = RunRequestSchema.parse({
+      backend,
+      prompt: input.prompt,
+      projectRoot: this.options.projectRoot,
+      mode: "read-only",
+      model: input.model,
+      agent: input.agent,
+      timeoutMs,
+      containment: "required",
+      authMode: "broker",
+      approvalPolicy,
+    });
+    const adapter = getBackendDefinition(backend);
+    if (!adapter) throw this.delegationDenied(parent, audit, `Unknown delegation backend: ${backend}.`);
+    if (request.agent && !adapter.supportsNamedAgent) throw this.delegationDenied(parent, audit, `Backend ${backend} does not support named agents.`);
+    if (request.agent) safeAgentName(request.agent, backend);
+    const parentProvider = providerForRequest(parentRequest);
+    const childProvider = providerForRequest(request);
+    if (parentProvider !== childProvider) {
+      throw this.delegationDenied(parent, audit, "Cross-provider delegation requires linked target-provider holds and is unavailable in v1.");
+    }
+    if (adapter.security.strictAuth === "broker-api-key") {
+      if (!request.model) throw this.delegationDenied(parent, audit, `Backend ${backend} requires an explicit broker-scoped model.`);
+      const provider = childProvider ? getProvider(childProvider) : null;
+      if (!provider || !process.env[provider.credentialEnv]) throw this.delegationDenied(parent, audit, `Backend ${backend} has no daemon-broker credential.`);
+    }
+    const estimate = estimateRequestResources(request);
+    const unpriced = request.authMode === "broker"
+      && adapter.security.strictAuth === "broker-api-key"
+      && estimate.cost.amountUsd === null
+      && !this.options.budgets.hasCostLimit({
+        projectId: this.options.projectId,
+        principal: parent.principal,
+        sessionId: null,
+        workflowId: null,
+        provider: childProvider,
+      });
+    if (unpriced) {
+      const error = new HeadlessError("APPROVAL_REQUIRED", "Delegated broker pricing is unknown and cannot create a worker-resolvable approval.");
+      this.delegationPolicyEvent(parent, "denied", "run-delegation-approval", { ...audit, approvalPolicy, error: error.message });
+      throw error;
+    }
+    const authorization = this.options.authority.authorize({
+      projectId: this.options.projectId,
+      principal: parent.principal,
+      operation: "run",
+      backend,
+      estimatedCostUsd: estimate.cost.amountUsd,
+      merge: false,
+    });
+    if (!authorization.allowed) throw this.delegationDenied(parent, audit, authorization.reason || "Delegated target authorization was denied.");
+
+    const childId = randomUUID();
+    const carved = this.options.budgets.subreserveDelegation({
+      id: childId,
+      parentReservationId: parent.id,
+      requestId: input.requestId,
+      budgetFraction: input.budgetFraction,
+      provider: childProvider,
+      inputTokens: estimate.inputTokens,
+      outputTokens: estimate.outputTokens,
+      costUsd: estimate.cost.amountUsd,
+    });
+    if (!carved.allowed || !carved.reservation) throw this.delegationDenied(parent, audit, carved.reasons.join(" "));
+    const activation = this.options.budgets.activate(childId);
+    if (!activation.allowed) {
+      this.options.budgets.release(childId);
+      const error = new HeadlessError("DELEGATION_CAPACITY_UNAVAILABLE", activation.reasons.join(" "), { retryable: true });
+      this.delegationPolicyEvent(parent, "denied", "run-delegation-budget-capacity", { ...audit, error: error.message });
+      throw error;
+    }
+    let leaseCarve: BrokerLeaseCarve | null = null;
+    let createdJob: Job | null = null;
+    try {
+      if (childProvider !== null) {
+        leaseCarve = this.options.broker.carveRunLease(parent.id, {
+          requests: carved.reservation.envelope.requests,
+          inputTokens: carved.reservation.envelope.inputTokens,
+          outputTokens: carved.reservation.envelope.outputTokens,
+          costUsd: carved.reservation.envelope.costUsd,
+        });
+      }
+      this.options.authority.consumeIteration(authorization.grantId, childId);
+      const job = this.options.jobs.create({
+        id: childId,
+        projectId: this.options.projectId,
+        principal: parent.principal,
+        request,
+        maxAttempts: 1,
+        mergePolicy: "preserve",
+        delegationOf: { parentJobId: parent.id, requestId: input.requestId, depth: 1, budgetFraction: input.budgetFraction },
+      });
+      createdJob = job;
+      this.options.tasks.create({ jobId: childId, projectId: this.options.projectId, capability: `read-only:${backend}` });
+      if (leaseCarve) this.delegationCarves.set(childId, leaseCarve);
+      this.options.runEvents.append({ jobId: childId, sessionId: null }, { kind: "lifecycle", state: "queued", detail: `delegated child of ${parent.id}` });
+      this.delegationPolicyEvent(parent, "allowed", "run-delegation-admitted", { ...audit, childJobId: childId, deadlineAt, approvalPolicy, allocation: carved.reservation.envelope });
+      this.options.auditDelegation?.("worker_spawned", parent, job, { ...audit, childJobId: childId, deadlineAt, approvalPolicy, allocation: carved.reservation.envelope });
+      this.activeJobs += 1;
+      const execution = this.options.execute(childId, request, { coderToolApproved: false })
+        .catch((error) => this.completeUnexpectedFailure(childId, request, error))
+        .finally(() => {
+          this.activeJobs -= 1;
+          this.executions.delete(execution);
+          this.pump();
+        });
+      this.executions.add(execution);
+      this.options.trackExecution?.(execution);
+      return { job, existing: false };
+    } catch (error) {
+      if (leaseCarve) this.options.broker.settleRunLeaseCarve(leaseCarve, { requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
+      this.options.budgets.release(childId);
+      if (createdJob && this.options.jobs.get(createdJob.id)?.state === "queued") {
+        this.completeAdmission(createdJob, blockedResult(request, childId, "POLICY_DENIED", "Delegated child launch failed before execution."), "run-delegation-launch");
+      }
+      throw error;
+    }
+  }
+
+  settleDelegation(child: Job) {
+    const carve = this.delegationCarves.get(child.id);
+    const result = child.result;
+    let settled = false;
+    if (carve) {
+      this.delegationCarves.delete(child.id);
+      settled = result ? this.options.broker.settleRunLeaseCarve(carve, {
+        requests: result.cost.observedRequests,
+        inputTokens: result.usage.input,
+        outputTokens: result.usage.output,
+        costUsd: result.cost.amountUsd,
+      }) : this.options.broker.settleRunLeaseCarve(carve);
+    }
+    const parent = child.delegationOf ? this.options.jobs.get(child.delegationOf.parentJobId) : null;
+    if (parent) this.delegationPolicyEvent(parent, "allowed", "run-delegation-completed", {
+      parentJobId: parent.id,
+      childJobId: child.id,
+      requestId: child.delegationOf!.requestId,
+      status: child.state,
+      usage: result?.usage ?? null,
+      cost: result?.cost ?? null,
+    });
+    if (parent) this.options.auditDelegation?.("headless_result", parent, child, {
+      parentJobId: parent.id,
+      childJobId: child.id,
+      requestId: child.delegationOf!.requestId,
+      status: child.state,
+      usage: result?.usage ?? null,
+      cost: result?.cost ?? null,
+    });
+    return settled;
   }
 
   submit(params: Record<string, unknown>, principal: string, options: JobAdmissionSubmitOptions = {}) {
@@ -160,13 +376,27 @@ export class JobAdmissionService {
 
   recoverBudgetReservations() {
     const jobs = new Map(this.options.jobs.list().map((job) => [job.id, job]));
-    for (const reservation of this.options.budgets.getState().reservations) {
+    const reservations = [...this.options.budgets.getState().reservations]
+      .sort((left, right) => Number(left.parentReservationId === null) - Number(right.parentReservationId === null));
+    for (const reservation of reservations) {
       const job = jobs.get(reservation.id);
       if (!job) {
         this.options.budgets.release(reservation.id);
         continue;
       }
       if (job.state === "queued") {
+        if (job.delegationOf !== null) {
+          this.options.budgets.failClosedAfterInterruption(reservation.id);
+          const request = this.options.jobs.request(job.id);
+          if (!request) throw new Error(`Recovered delegated job ${job.id} request is missing.`);
+          const completed = this.options.jobs.complete(job.id, {
+            ...daemonFailureResult(request, job.id, "Daemon stopped before the delegated child was claimed."),
+            status: "blocked",
+          });
+          this.reconcileTerminalEvents(completed);
+          this.options.completed(completed);
+          continue;
+        }
         if (job.attempt > 1) {
           const request = this.options.jobs.request(job.id);
           this.options.budgets.failClosedAfterInterruption(reservation.id);
@@ -278,6 +508,8 @@ export class JobAdmissionService {
   cancel(jobId: string) {
     const job = this.requireJob(jobId);
     if (isTerminal(job)) return job;
+    const child = this.options.jobs.delegatedChild(jobId);
+    if (child && !isTerminal(child)) this.cancel(child.id);
     if (job.state === "queued") {
       this.clearQueueDeadline(jobId);
       const index = this.pendingJobs.findIndex((pending) => pending.id === jobId);
@@ -798,6 +1030,25 @@ export class JobAdmissionService {
     return job;
   }
 
+  private delegationPolicyEvent(
+    parent: Job,
+    decision: "allowed" | "denied" | "deferred",
+    rule: string,
+    details: Record<string, unknown>,
+  ) {
+    this.options.runEvents.append({ jobId: parent.id, sessionId: parent.sessionId }, {
+      kind: "policy",
+      decision,
+      rule,
+      reason: JSON.stringify(details),
+    });
+  }
+
+  private delegationDenied(parent: Job, audit: Record<string, unknown>, message: string) {
+    this.delegationPolicyEvent(parent, "denied", "run-delegation-policy", { ...audit, error: message });
+    return new HeadlessError("POLICY_DENIED", message);
+  }
+
   private diagnostic(message: string, error?: unknown) {
     if (this.options.diagnostic) {
       this.options.diagnostic(message, error);
@@ -899,6 +1150,10 @@ export function estimateRequestResources(request: SerializedRunRequest) {
     model: request.model,
     prompt: request.prompt,
   });
+}
+
+export function delegatedApprovalPolicy(parent: Job["approvalPolicy"]): "ask" | "auto" {
+  return parent === "ask" ? "ask" : "auto";
 }
 
 function cancelledResult(request: SerializedRunRequest, jobId: string): RunResult {
