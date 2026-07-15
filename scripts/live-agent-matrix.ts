@@ -56,10 +56,6 @@ type CommandResult = {
 };
 
 const REQUIRED_CHECKS = ["exec:opencode", "exec:codex", "session.multi-turn", "council.run"] as const;
-const CLAUDE_KEYCHAIN_LIMITATIONS = new Set([
-  "OAuth session expired and could not be refreshed",
-  "Claude native login requires supported regular-file state; keychain-only login is unavailable in required containment.",
-]);
 const GROK_ATTESTATION_LIMITATION = "Grok inspect did not prove project trust is disabled.";
 
 class MatrixHalt extends Error {}
@@ -69,8 +65,43 @@ export function documentedBackendSkip(backend: string, result: Record<string, un
   const code = stringValue(error?.code);
   const message = stringValue(error?.message);
   if (code === "RATE_LIMITED") return "provider returned structured RATE_LIMITED";
-  if (backend === "claude-code" && message && CLAUDE_KEYCHAIN_LIMITATIONS.has(message)) return "documented macOS Claude keychain-only limitation";
-  if (backend === "grok-build" && message === GROK_ATTESTATION_LIMITATION) return "documented Grok project-trust attestation gate";
+  if (backend === "claude-code" && code === "NATIVE_AUTH_UNAVAILABLE") return "documented macOS Claude keychain-only limitation";
+  if (backend === "grok-build" && code === "BACKEND_UNSUPPORTED" && message?.includes(GROK_ATTESTATION_LIMITATION)) {
+    return "documented Grok project-trust attestation gate";
+  }
+  return null;
+}
+
+export function validateSessionTurnEnvelope(
+  value: Record<string, unknown> | null,
+  expected: { sessionId: string; backend: string; nativeSessionId?: string },
+) {
+  if (!value) return "session turn did not return a structured envelope";
+  const session = objectValue(value.session);
+  const job = objectValue(value.job);
+  const result = objectValue(value.result);
+  const replay = objectValue(value.replay);
+  const jobResult = objectValue(job?.result);
+  const sessionResult = objectValue(session?.result);
+  const jobId = stringValue(job?.id);
+  const nativeSessionId = stringValue(session?.nativeSessionId);
+  if (!session || !job || !result || !replay) return "session turn envelope is missing session, job, result, or replay evidence";
+  if (session.id !== expected.sessionId || session.backend !== expected.backend) return "session turn is attributed to the wrong session or backend";
+  if (session.state !== "completed" || session.replay !== false) return "native session turn did not reach the durable completed state";
+  if (!nativeSessionId || (expected.nativeSessionId && nativeSessionId !== expected.nativeSessionId)) {
+    return "native session identity is missing or changed across resume";
+  }
+  if (!jobId || job.sessionId !== expected.sessionId || job.state !== "succeeded") return "session job is not a succeeded job bound to the session";
+  if (session.lastJobId !== jobId || result.jobId !== jobId || result.sessionId !== expected.sessionId) {
+    return "session, job, and result identifiers are not durably linked";
+  }
+  if (result.status !== "succeeded" || jobResult?.status !== "succeeded" || sessionResult?.status !== "succeeded") {
+    return "session turn lacks succeeded result evidence at every durable layer";
+  }
+  if (typeof result.output !== "string" || result.output.trim().length === 0) return "session turn returned no assistant output";
+  if (typeof replay.bytes !== "number" || !Number.isSafeInteger(replay.bytes) || replay.bytes < 0 || typeof replay.truncated !== "boolean") {
+    return "session turn replay evidence is malformed";
+  }
   return null;
 }
 
@@ -301,19 +332,16 @@ async function main() {
       const firstEnvelope = parseObjectOrNull(first.stdout);
       const firstResult = objectValue(firstEnvelope?.result);
       const firstSession = objectValue(firstEnvelope?.session);
-      const firstReplay = objectValue(firstEnvelope?.replay);
       const firstSkip = documentedBackendSkip(executor, firstResult);
-      if (
-        !commandSucceeded(first)
-        || firstResult?.status !== "succeeded"
-        || firstSession?.id !== sessionId
-        || firstSession?.backend !== executor
-        || firstSession?.state !== "idle"
-        || typeof firstReplay?.bytes !== "number"
-        || typeof firstReplay?.truncated !== "boolean"
-      ) {
-        return { ok: false, skip: firstSkip !== null, detail: firstSkip ?? commandFailure("session.send", first, firstResult) };
+      const firstInvalid = validateSessionTurnEnvelope(firstEnvelope, { sessionId, backend: executor });
+      if (!commandSucceeded(first) || firstInvalid) {
+        return {
+          ok: false,
+          skip: firstSkip !== null,
+          detail: firstSkip ?? firstInvalid ?? commandFailure("session.send", first, firstResult),
+        };
       }
+      const nativeSessionId = stringValue(firstSession?.nativeSessionId)!;
 
       // Exercise the distinct resume action, not a second send alias.
       const resumed = await run([
@@ -326,20 +354,13 @@ async function main() {
       ], 90_000);
       const resumedEnvelope = parseObjectOrNull(resumed.stdout);
       const resumedResult = objectValue(resumedEnvelope?.result);
-      const resumedSession = objectValue(resumedEnvelope?.session);
-      const resumedReplay = objectValue(resumedEnvelope?.replay);
       const resumeSkip = documentedBackendSkip(executor, resumedResult);
-      const ok = commandSucceeded(resumed)
-        && resumedResult?.status === "succeeded"
-        && resumedSession?.id === sessionId
-        && resumedSession?.backend === executor
-        && resumedSession?.state === "idle"
-        && typeof resumedReplay?.bytes === "number"
-        && typeof resumedReplay?.truncated === "boolean";
+      const resumeInvalid = validateSessionTurnEnvelope(resumedEnvelope, { sessionId, backend: executor, nativeSessionId });
+      const ok = commandSucceeded(resumed) && resumeInvalid === null;
       return {
         ok,
         skip: !ok && resumeSkip !== null,
-        detail: ok ? `send+resume succeeded for ${executor}` : resumeSkip ?? commandFailure("session.resume", resumed, resumedResult),
+        detail: ok ? `send+resume succeeded for ${executor}` : resumeSkip ?? resumeInvalid ?? commandFailure("session.resume", resumed, resumedResult),
       };
     });
 
@@ -755,7 +776,7 @@ function commandOutcome(result: CommandResult, ok: boolean, success: string): Ch
 
 function commandFailure(label: string, result: CommandResult, structuredResult?: Record<string, unknown> | null) {
   const error = objectValue(structuredResult?.error);
-  const detail = stringValue(error?.message) ?? stringValue(error?.code) ?? result.stderr ?? result.stdout;
+  const detail = stringValue(error?.message) ?? stringValue(error?.code) ?? (result.stderr || result.stdout);
   return `${label} ${result.timedOut ? "timed out" : result.overflowed ? "overflowed" : `exited ${String(result.exitCode)}`}: ${safeDiagnostic(detail)}`;
 }
 

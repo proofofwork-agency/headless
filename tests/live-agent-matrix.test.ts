@@ -5,6 +5,7 @@ import {
   matrixCompleteness,
   mcpHostForBackend,
   validateCouncilRecord,
+  validateSessionTurnEnvelope,
   type MatrixCheck,
 } from "../scripts/live-agent-matrix";
 
@@ -28,6 +29,35 @@ function council(approved = true) {
   };
 }
 
+function sessionEnvelope(overrides: Record<string, unknown> = {}) {
+  const result = {
+    status: "succeeded",
+    output: "ONE",
+    jobId: "job-1",
+    sessionId: "session-1",
+  };
+  return {
+    session: {
+      id: "session-1",
+      backend: "opencode",
+      state: "completed",
+      nativeSessionId: "ses_live_opencode",
+      replay: false,
+      lastJobId: "job-1",
+      result,
+    },
+    job: {
+      id: "job-1",
+      sessionId: "session-1",
+      state: "succeeded",
+      result,
+    },
+    replay: { truncated: false, bytes: 0 },
+    result,
+    ...overrides,
+  };
+}
+
 describe("live agent matrix contracts", () => {
   test("requires both named execs, session multi-turn, and real council finality", () => {
     const complete = [
@@ -43,14 +73,55 @@ describe("live agent matrix contracts", () => {
     });
   });
 
-  test("accepts only exact structured/documented skips", () => {
+  test("accepts only stable structured/documented skips from the live backends", () => {
     expect(documentedBackendSkip("codex", { error: { code: "RATE_LIMITED", message: "bounded" } })).toContain("RATE_LIMITED");
-    expect(documentedBackendSkip("claude-code", { error: { code: "PROCESS_ERROR", message: "OAuth session expired and could not be refreshed" } })).toContain("keychain-only");
-    expect(documentedBackendSkip("claude-code", { error: { code: "NATIVE_AUTH_UNAVAILABLE", message: "Claude native login requires supported regular-file state; keychain-only login is unavailable in required containment." } })).toContain("keychain-only");
-    expect(documentedBackendSkip("grok-build", { error: { code: "POLICY_DENIED", message: "Grok inspect did not prove project trust is disabled." } })).toContain("attestation");
+    expect(documentedBackendSkip("claude-code", {
+      error: { code: "NATIVE_AUTH_UNAVAILABLE", message: "Failed to authenticate. API Error: 401 Invalid authentication credentials" },
+    })).toContain("keychain-only");
+    expect(documentedBackendSkip("grok-build", {
+      error: {
+        code: "BACKEND_UNSUPPORTED",
+        message: "Grok isolation attestation failed before provider access: Grok inspect did not prove project trust is disabled.",
+      },
+    })).toContain("attestation");
+    expect(documentedBackendSkip("claude-code", { error: { code: "PROCESS_ERROR", message: "OAuth session expired and could not be refreshed" } })).toBeNull();
     expect(documentedBackendSkip("claude-code", { error: { code: "PROCESS_ERROR", message: "401 Invalid authentication credentials" } })).toBeNull();
     expect(documentedBackendSkip("codex", { error: { code: "PROCESS_ERROR", message: "429 from an unexpected layer" } })).toBeNull();
-    expect(documentedBackendSkip("grok-build", { error: { code: "POLICY_DENIED", message: "Grok inspect did not prove project trust is disabled" } })).toBeNull();
+    expect(documentedBackendSkip("grok-build", {
+      error: { code: "POLICY_DENIED", message: "Grok isolation attestation failed before provider access: Grok inspect did not prove project trust is disabled." },
+    })).toBeNull();
+    expect(documentedBackendSkip("grok-build", { error: { code: "BACKEND_UNSUPPORTED", message: "unrelated unsupported backend" } })).toBeNull();
+  });
+
+  test("accepts the actual OpenCode completed session envelope and stable native resume identity", () => {
+    const first = sessionEnvelope();
+    expect(validateSessionTurnEnvelope(first, { sessionId: "session-1", backend: "opencode" })).toBeNull();
+
+    const resumed = sessionEnvelope({
+      replay: { truncated: false, bytes: 42 },
+      result: { ...(first.result as Record<string, unknown>), output: "TWO" },
+    });
+    expect(validateSessionTurnEnvelope(resumed, {
+      sessionId: "session-1",
+      backend: "opencode",
+      nativeSessionId: "ses_live_opencode",
+    })).toBeNull();
+  });
+
+  test("rejects incomplete or replayed session evidence instead of treating exit zero as success", () => {
+    const envelope = sessionEnvelope();
+    expect(validateSessionTurnEnvelope({
+      ...envelope,
+      session: { ...(envelope.session as Record<string, unknown>), state: "idle" },
+    }, { sessionId: "session-1", backend: "opencode" })).toContain("completed");
+    expect(validateSessionTurnEnvelope({
+      ...envelope,
+      session: { ...(envelope.session as Record<string, unknown>), nativeSessionId: "ses_changed" },
+    }, {
+      sessionId: "session-1",
+      backend: "opencode",
+      nativeSessionId: "ses_live_opencode",
+    })).toContain("identity");
   });
 
   test("validates every council phase, both votes, and exit consistency", () => {
