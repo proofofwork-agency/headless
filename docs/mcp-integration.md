@@ -79,7 +79,7 @@ Execution and orchestration:
 - `headless_workflow_run` and `headless_workflow_status` operate bounded workflow DAGs.
 - `headless_gate` runs configured release-gate checks.
 
-Worker-initiated `run.delegate` is not an MCP mutation. It is a separately authenticated run-tool operation available only inside an eligible depth-zero contained worker. The daemon reauthorizes and audits one read-only, same-provider child against the parent's deadline and carved budget reservation; the lead cannot forge the parent linkage or grant a child native credentials.
+Worker-initiated `run.delegate` is not an MCP mutation. It is a separately authenticated run-tool operation available only inside an eligible depth-zero contained worker. The daemon reauthorizes and audits one read-only child against the parent's deadline and fraction-capped allocation. Same-provider children use an atomic parent sub-reservation; cross-provider children require different providers and backends plus a strict `broker-api-key` target and use a crash-atomic linked hold over the parent and target provider quotas. The lead cannot forge the parent linkage or grant a child native credentials, and a cross-provider target bearer is minted once and never persisted.
 
 Read and communication tools:
 
