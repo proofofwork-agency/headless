@@ -6,6 +6,7 @@ import { registerBackendDefinition, unregisterBackendDefinition, type BackendDef
 import { ProviderBroker } from "../src/broker/server";
 import { RunRequestSchema, type SerializedRunRequest } from "../src/contracts/run";
 import { JobAdmissionService, daemonFailureResult, delegatedApprovalPolicy } from "../src/daemon/job-admission-service";
+import type { RunExecutionControls } from "../src/daemon/run-execution-service";
 import { JobStore } from "../src/daemon/job-store";
 import { RunEventStore } from "../src/daemon/run-event-store";
 import { TaskStore } from "../src/daemon/task-store";
@@ -16,12 +17,15 @@ import { HeadlessError } from "../src/runtime/headless-error";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { ProjectTrustStore } from "../src/runtime/project-trust-store";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
+import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
 
 const roots: string[] = [];
 const adapters: string[] = [];
+const pricingIds: string[] = [];
 
 afterEach(() => {
   while (adapters.length) unregisterBackendDefinition(adapters.pop()!);
+  while (pricingIds.length) unregisterPricing(pricingIds.pop()!);
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -323,6 +327,168 @@ describe("job admission service", () => {
     fixture.service.dispose();
   });
 
+  test("admits one cross-provider child through canonical linked holds and hands off one unretained target bearer", async () => {
+    const fixture = createFixture({ maxConcurrency: 2, maxQueued: 2 });
+    const parentBackend = `linked-parent-${crypto.randomUUID()}`;
+    const childBackend = `linked-child-${crypto.randomUUID()}`;
+    registerBackendDefinition(adapter(parentBackend, { provider: "anthropic", strictAuth: "broker-api-key" }));
+    registerBackendDefinition(adapter(childBackend, { provider: "openai", strictAuth: "broker-api-key" }));
+    adapters.push(parentBackend, childBackend);
+    for (const [id, provider, model, rate] of [
+      [`parent-pricing-${crypto.randomUUID()}`, "anthropic", "parent-model", 1_000],
+      [`child-pricing-${crypto.randomUUID()}`, "openai", "child-model", 1],
+    ] as const) {
+      registerPricing({ id, provider, model, effectiveFrom: 0, inputUsdPerMillion: rate, outputUsdPerMillion: rate });
+      pricingIds.push(id);
+    }
+    const oldAnthropic = process.env.ANTHROPIC_API_KEY;
+    const oldOpenAi = process.env.OPENAI_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "fixture-parent-key";
+    process.env.OPENAI_API_KEY = "fixture-target-key";
+    try {
+      await fixture.broker.start(0);
+      const parent = fixture.service.submit({
+        ...run(parentBackend, "parent with transferable provider authority", "read-only", 30_000, "bypass"),
+        authMode: "broker",
+        model: "parent-model",
+      }, "coordinator");
+      await waitUntil(() => fixture.jobs.get(parent.id)?.state === "running");
+      fixture.broker.issueLease({
+        runId: parent.id,
+        provider: "anthropic",
+        models: ["parent-model"],
+        endpointClasses: ["messages"],
+        expiresAt: Date.now() + 30_000,
+        maxRequests: 8,
+        maxCostUsd: 5,
+      });
+      const requestId = crypto.randomUUID();
+      const child = fixture.service.admitDelegation({
+        parentJobId: parent.id,
+        requestId,
+        backend: childBackend,
+        model: "child-model",
+        prompt: "bounded cross-provider child",
+        timeoutMs: 5_000,
+        budgetFraction: 0.25,
+      }).job;
+      expect(fixture.service.admitDelegation({
+        parentJobId: parent.id,
+        requestId,
+        backend: childBackend,
+        model: "child-model",
+        prompt: "bounded cross-provider child",
+        timeoutMs: 5_000,
+        budgetFraction: 0.25,
+      })).toMatchObject({ existing: true, job: { id: child.id } });
+
+      const [hold] = fixture.budgets.getState().linkedHolds;
+      expect(hold).toMatchObject({
+        state: "leased",
+        transitionNumber: 4,
+        parentJobId: parent.id,
+        childJobId: child.id,
+        childReservationId: child.id,
+        parentProvider: "anthropic",
+        targetProvider: "openai",
+        parentCarveId: `${hold!.linkId}:parent`,
+        targetQuotaId: `headless-linked-target-${hold!.linkId}`,
+        brokerEvidence: {
+          parentCarveId: `${hold!.linkId}:parent`,
+          targetLeaseId: `${hold!.linkId}:target`,
+          targetTokenHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+          targetQuotaScope: {
+            provider: "openai",
+            runQuotaId: `headless-linked-target-${hold!.linkId}`,
+          },
+        },
+      });
+      expect(fixture.budgets.getReservation(child.id)).toMatchObject({
+        active: true,
+        provider: "openai",
+        parentReservationId: parent.id,
+      });
+      expect(fixture.executionControls.get(child.id)?.linkedBrokerLease).toMatchObject({
+        linkId: hold!.linkId,
+        id: `${hold!.linkId}:target`,
+        provider: "openai",
+      });
+      expect(JSON.stringify(fixture.budgets.getState())).not.toContain("fixture-target-key");
+      expect(JSON.stringify(fixture.budgets.getState())).not.toContain(fixture.executionControls.get(child.id)!.linkedBrokerLease!.token);
+      expect(() => fixture.budgets.commit(child.id)).toThrow("ordinary commit is prohibited");
+
+      fixture.release("bounded cross-provider child");
+      fixture.release("parent with transferable provider authority");
+      await fixture.service.waitForIdle();
+      fixture.service.dispose();
+    } finally {
+      await fixture.broker.stop();
+      restoreEnv("ANTHROPIC_API_KEY", oldAnthropic);
+      restoreEnv("OPENAI_API_KEY", oldOpenAi);
+    }
+  });
+
+  test("keeps broker-authenticated same-provider delegation on the v1 reservation and carve path", async () => {
+    const fixture = createFixture({ maxConcurrency: 2, maxQueued: 2 });
+    const parentBackend = `same-provider-parent-${crypto.randomUUID()}`;
+    const childBackend = `same-provider-child-${crypto.randomUUID()}`;
+    registerBackendDefinition(adapter(parentBackend, { provider: "openai", strictAuth: "broker-api-key" }));
+    registerBackendDefinition(adapter(childBackend, { provider: "openai", strictAuth: "broker-api-key" }));
+    adapters.push(parentBackend, childBackend);
+    for (const [id, model, rate] of [
+      [`same-parent-pricing-${crypto.randomUUID()}`, "same-parent-model", 1_000],
+      [`same-child-pricing-${crypto.randomUUID()}`, "same-child-model", 1],
+    ] as const) {
+      registerPricing({ id, provider: "openai", model, effectiveFrom: 0, inputUsdPerMillion: rate, outputUsdPerMillion: rate });
+      pricingIds.push(id);
+    }
+    const oldOpenAi = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "fixture-same-provider-key";
+    try {
+      await fixture.broker.start(0);
+      const parent = fixture.service.submit({
+        ...run(parentBackend, "same-provider parent", "read-only", 30_000, "auto"),
+        authMode: "broker",
+        model: "same-parent-model",
+      }, "coordinator");
+      await waitUntil(() => fixture.jobs.get(parent.id)?.state === "running");
+      fixture.broker.issueLease({
+        runId: parent.id,
+        provider: "openai",
+        models: ["same-parent-model"],
+        endpointClasses: ["responses"],
+        expiresAt: Date.now() + 30_000,
+        maxRequests: 8,
+        maxCostUsd: 5,
+      });
+      const child = fixture.service.admitDelegation({
+        parentJobId: parent.id,
+        requestId: crypto.randomUUID(),
+        backend: childBackend,
+        model: "same-child-model",
+        prompt: "same-provider child",
+        timeoutMs: 5_000,
+        budgetFraction: 0.25,
+      }).job;
+
+      expect(fixture.budgets.getState().linkedHolds).toEqual([]);
+      expect(fixture.budgets.getReservation(child.id)).toMatchObject({
+        provider: "openai",
+        parentReservationId: parent.id,
+        budgetIds: fixture.budgets.getReservation(parent.id)!.budgetIds,
+      });
+      expect(fixture.executionControls.get(child.id)?.linkedBrokerLease).toBeUndefined();
+
+      fixture.release("same-provider child");
+      fixture.release("same-provider parent");
+      await fixture.service.waitForIdle();
+      fixture.service.dispose();
+    } finally {
+      await fixture.broker.stop();
+      restoreEnv("OPENAI_API_KEY", oldOpenAi);
+    }
+  });
+
   test("fails delegation immediately when maxConcurrency one is occupied by its parent", async () => {
     const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
     const targetBackend = `capacity-child-${crypto.randomUUID()}`;
@@ -458,7 +624,10 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
   const started: string[] = [];
   const approvedTurns: string[] = [];
   const aborted: string[] = [];
+  const executionControls = new Map<string, RunExecutionControls>();
   const releases = new Map<string, () => void>();
+
+  const broker = new ProviderBroker();
 
   const service = new JobAdmissionService({
     projectId: paths.projectId,
@@ -472,10 +641,11 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
     trust: new ProjectTrustStore(paths),
     authority: new AuthorityStore(paths, { coordinator: "coordinator" }),
     budgets,
-    broker: new ProviderBroker(),
+    broker,
     activeLeadBackend: () => null,
     isStopping: () => false,
     execute: async (jobId, request, controls) => {
+      executionControls.set(jobId, controls);
       jobs.claim(jobId, "test-daemon", request.timeoutMs);
       jobs.transition(jobId, "running");
       started.push(request.prompt);
@@ -506,12 +676,14 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
     tasks,
     events,
     budgets,
+    broker,
     approvals,
     sessions,
     service,
     started,
     approvedTurns,
     aborted,
+    executionControls,
     release(prompt: string) {
       const resolve = releases.get(prompt);
       if (!resolve) throw new Error(`No active fixture execution for ${prompt}.`);
@@ -539,7 +711,7 @@ function run(
   } satisfies Partial<SerializedRunRequest>;
 }
 
-function adapter(id: string): BackendDefinition {
+function adapter(id: string, options: { provider?: string; strictAuth?: "broker-api-key" | "credential-free" } = {}): BackendDefinition {
   return {
     id,
     metadata: {
@@ -559,11 +731,11 @@ function adapter(id: string): BackendDefinition {
       cancellation: true,
       tools: false,
       effort: false,
-      brokerCompatible: false,
+      brokerCompatible: options.strictAuth === "broker-api-key",
     },
     security: {
       outerContainmentRequired: true,
-      strictAuth: "credential-free",
+      strictAuth: options.strictAuth ?? "credential-free",
       disablesProjectConfig: true,
       disablesHooks: true,
       disablesMcp: true,
@@ -578,6 +750,7 @@ function adapter(id: string): BackendDefinition {
     },
     stdinPrompt: false,
     credentialPrefixes: [],
+    provider: options.provider,
     prepareCommand: () => ["/usr/bin/true"],
     decodeOutput: () => ({
       output: "",
@@ -589,6 +762,11 @@ function adapter(id: string): BackendDefinition {
       rawEvents: [],
     }),
   };
+}
+
+function restoreEnv(name: string, value: string | undefined) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
 }
 
 async function waitUntil(check: () => boolean, timeoutMs = 1_000) {

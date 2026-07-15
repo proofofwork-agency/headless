@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BudgetSchema, type Budget } from "../contracts/durable";
 import { BackendIdSchema, IdentifierSchema, MAX_RUN_PROMPT_BYTES, PrincipalIdSchema, ProjectIdSchema, TimestampSchema } from "../contracts/common";
 import { LinkedHoldEnvelopeSchema, LinkedHoldRecordSchema, type LinkedHoldRecord } from "../contracts/linked-hold";
 import { HeadlessError } from "./headless-error";
+import { linkedProviderHoldId, linkedProviderOperationIds } from "./linked-provider-ids";
 import { ensureProjectStateDirectories, type ProjectStatePaths } from "./project-state";
 import { readOwnerOnlyJson, writeOwnerOnlyJson } from "./owner-json";
 
@@ -203,7 +204,7 @@ export class BudgetStore {
   /** Persist a cross-provider delegation intent without moving any authority. */
   prepareLinkedProviderHold(value: PrepareLinkedProviderHoldInput) {
     const input = PrepareLinkedProviderHoldSchema.parse(value);
-    const linkId = linkedHoldId(this.projectId, input.parentJobId, input.requestId);
+    const linkId = linkedProviderHoldId(this.projectId, input.parentJobId, input.requestId);
     const existing = this.state.linkedHolds.find((hold) => hold.linkId === linkId);
     if (existing) {
       if (linkedPlanIdentity(existing) !== linkedPlanIdentity(input)) {
@@ -237,8 +238,8 @@ export class BudgetStore {
       depth: 1,
       parentBudgetIds: [...parent.budgetIds],
       targetBudgetIds: targetBudgets.map((budget) => budget.id),
-      parentCarveId: linkedOperationId("parent", linkId),
-      targetQuotaId: linkedOperationId("target", linkId),
+      parentCarveId: linkedProviderOperationIds(linkId).parentOperationId,
+      targetQuotaId: linkedProviderOperationIds(linkId).targetRunQuotaId,
       state: "intent",
       transitionNumber: 0,
       createdAt: now,
@@ -333,6 +334,65 @@ export class BudgetStore {
     next.updatedAt = now;
     this.persistReplacement(next);
     return { allowed: true as const, hold: LinkedHoldRecordSchema.parse(nextHold), reservation: BudgetReservationSchema.parse(child), existing: false, reasons: [] as string[] };
+  }
+
+  getLinkedProviderHold(linkId: string) {
+    const hold = this.state.linkedHolds.find((candidate) => candidate.linkId === linkId);
+    return hold ? LinkedHoldRecordSchema.parse(hold) : null;
+  }
+
+  linkedProviderHoldForReservation(reservationId: string) {
+    const hold = this.state.linkedHolds.find((candidate) => candidate.childReservationId === reservationId);
+    return hold ? LinkedHoldRecordSchema.parse(hold) : null;
+  }
+
+  markLinkedParentCarved(linkId: string, carveId: string) {
+    const ids = linkedProviderOperationIds(linkId);
+    if (carveId !== ids.parentOperationId) throw new HeadlessError("CONFLICT", "Linked parent carve id is not canonical for its hold.");
+    return this.transitionLinkedHold(linkId, "held", "parent_carved", (hold) => {
+      if (hold.parentCarveId !== ids.parentOperationId || hold.targetQuotaId !== ids.targetRunQuotaId) {
+        throw new HeadlessError("CONFLICT", "Linked budget and broker operation identifiers disagree.");
+      }
+      hold.brokerEvidence.parentCarveId = carveId;
+    });
+  }
+
+  markLinkedAdmitted(linkId: string, childJobId: string) {
+    return this.transitionLinkedHold(linkId, "parent_carved", "admitted", (hold) => {
+      if (hold.childReservationId !== childJobId) throw new HeadlessError("CONFLICT", "Linked child job id must equal its durable reservation id.");
+      hold.childJobId = childJobId;
+    });
+  }
+
+  markLinkedLeased(linkId: string, evidence: {
+    targetLeaseId: string;
+    targetTokenHash: string;
+    targetIssuedAt: number;
+    targetQuotaScope: {
+      provider: string;
+      runQuotaId: string;
+      budgetQuotaIds: string[];
+      maxRequests: number;
+      maxInputTokens: number | null;
+      maxOutputTokens: number | null;
+      maxCostUsd: number | null;
+    };
+    targetExpiresAt: number;
+  }) {
+    return this.transitionLinkedHold(linkId, "admitted", "leased", (hold) => {
+      const ids = linkedProviderOperationIds(linkId);
+      if (evidence.targetLeaseId !== ids.targetOperationId
+        || evidence.targetQuotaScope.runQuotaId !== ids.targetRunQuotaId
+        || hold.targetQuotaId !== ids.targetRunQuotaId
+        || evidence.targetQuotaScope.provider !== hold.targetProvider) {
+        throw new HeadlessError("CONFLICT", "Linked target lease evidence disagrees with the canonical hold identifiers.");
+      }
+      hold.brokerEvidence.targetLeaseId = evidence.targetLeaseId;
+      hold.brokerEvidence.targetTokenHash = evidence.targetTokenHash;
+      hold.brokerEvidence.targetLeaseIssuedAt = evidence.targetIssuedAt;
+      hold.brokerEvidence.targetQuotaScope = evidence.targetQuotaScope;
+      hold.brokerEvidence.targetExpiresAt = evidence.targetExpiresAt;
+    });
   }
 
   upsertBudget(value: Budget) {
@@ -518,6 +578,9 @@ export class BudgetStore {
     const actual = CommitUsageSchema.parse(value);
     const index = this.state.reservations.findIndex((candidate) => candidate.id === reservationId);
     if (index === -1) throw new Error(`Unknown budget reservation: ${reservationId}`);
+    if (this.linkedProviderHoldForReservation(reservationId)) {
+      throw new Error("Cross-provider linked reservations require linked settlement; ordinary commit is prohibited.");
+    }
     const [reservation] = this.state.reservations.splice(index, 1);
 
     if (reservation.parentReservationId !== null) {
@@ -572,6 +635,9 @@ export class BudgetStore {
   failClosedAfterInterruption(reservationId: string) {
     const index = this.state.reservations.findIndex((candidate) => candidate.id === reservationId);
     if (index === -1) throw new Error(`Unknown budget reservation: ${reservationId}`);
+    if (this.linkedProviderHoldForReservation(reservationId)) {
+      throw new Error("Cross-provider linked reservations require linked recovery; ordinary interruption accounting is prohibited.");
+    }
     const [reservation] = this.state.reservations.splice(index, 1);
 
     if (reservation.parentReservationId !== null) {
@@ -670,6 +736,8 @@ export class BudgetStore {
       usedInputTokens: number;
       maxOutputTokens: number | null;
       usedOutputTokens: number;
+      maxCostUsd: number | null;
+      usedCostUsd: number;
     }> = [];
     for (const budgetId of reservation.budgetIds) {
       const budget = this.state.budgets.find((candidate) => candidate.id === budgetId);
@@ -695,7 +763,7 @@ export class BudgetStore {
       if (budget.maxOutputTokens !== null && budget.usedUsage.output === null) {
         throw new Error(`${budget.id}: remaining broker output token usage is unknown under a configured limit.`);
       }
-      if (budget.maxRequests !== null || budget.maxInputTokens !== null || budget.maxOutputTokens !== null) {
+      if (budget.maxRequests !== null || budget.maxInputTokens !== null || budget.maxOutputTokens !== null || budget.maxCostUsd !== null) {
         budgetQuotas.push({
           id: budget.id,
           maxRequests: budget.maxRequests,
@@ -704,6 +772,8 @@ export class BudgetStore {
           usedInputTokens: budget.usedUsage.input ?? 0,
           maxOutputTokens: budget.maxOutputTokens,
           usedOutputTokens: budget.usedUsage.output ?? 0,
+          maxCostUsd: budget.maxCostUsd,
+          usedCostUsd: budget.usedCost.amountUsd ?? 0,
         });
       }
     }
@@ -718,6 +788,9 @@ export class BudgetStore {
   release(reservationId: string) {
     const index = this.state.reservations.findIndex((candidate) => candidate.id === reservationId);
     if (index === -1) return false;
+    if (this.linkedProviderHoldForReservation(reservationId)) {
+      throw new Error("Cross-provider linked reservations require linked settlement; ordinary release is prohibited.");
+    }
     const [reservation] = this.state.reservations.splice(index, 1);
     if (reservation.parentReservationId !== null) {
       const parent = this.state.reservations.find((candidate) => candidate.id === reservation.parentReservationId);
@@ -873,14 +946,26 @@ export class BudgetStore {
     writeOwnerOnlyJson(this.paths.budgetsPath, next);
     this.state = next;
   }
-}
 
-function linkedHoldId(projectId: string, parentJobId: string, requestId: string) {
-  return createHash("sha256").update(`${projectId}\0${parentJobId}\0${requestId}`).digest("hex");
-}
-
-function linkedOperationId(kind: "parent" | "target", linkId: string) {
-  return `linked-${kind}-${linkId}`;
+  private transitionLinkedHold(
+    linkId: string,
+    expected: LinkedHoldRecord["state"],
+    nextState: LinkedHoldRecord["state"],
+    mutate: (hold: LinkedHoldRecord) => void,
+  ) {
+    const next = BudgetStoreStateSchema.parse(this.state);
+    const hold = next.linkedHolds.find((candidate) => candidate.linkId === linkId);
+    if (!hold) throw new Error(`Unknown linked provider hold: ${linkId}`);
+    if (hold.state === nextState) return LinkedHoldRecordSchema.parse(hold);
+    if (hold.state !== expected) throw new HeadlessError("CONFLICT", `Linked provider hold is ${hold.state}, not ${expected}.`);
+    mutate(hold);
+    hold.state = nextState;
+    hold.transitionNumber += 1;
+    hold.updatedAt = this.now();
+    next.updatedAt = hold.updatedAt;
+    this.persistReplacement(next);
+    return LinkedHoldRecordSchema.parse(hold);
+  }
 }
 
 function linkedTargetRequest(
@@ -907,7 +992,9 @@ function emptyBrokerEvidence() {
   return {
     parentCarveId: null,
     targetLeaseId: null,
+    targetTokenHash: null,
     targetLeaseIssuedAt: null,
+    targetQuotaScope: null,
     targetRequests: null,
     targetForwardedRequests: null,
     targetInputTokens: null,

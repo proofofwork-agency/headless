@@ -261,6 +261,8 @@ describe("persistent budgets", () => {
       usedInputTokens: 0,
       maxOutputTokens: null,
       usedOutputTokens: 0,
+      maxCostUsd: 6,
+      usedCostUsd: 0,
     }]);
     expect(secondLimits.budgetQuotas).toEqual(firstLimits.budgetQuotas);
     expect(store.commit("broker-one", { costUsd: 2, observedRequests: 3 }).passed).toBe(true);

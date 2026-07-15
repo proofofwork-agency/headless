@@ -12,6 +12,21 @@ const nullableCount = count.nullable();
 const nullableCost = z.number().nonnegative().finite().nullable();
 const providerId = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/);
 
+export const LinkedHoldTargetQuotaScopeSchema = z.object({
+  provider: providerId,
+  runQuotaId: IdentifierSchema,
+  budgetQuotaIds: z.array(IdentifierSchema).max(256),
+  maxRequests: z.number().int().positive().safe(),
+  maxInputTokens: z.number().int().positive().safe().nullable(),
+  maxOutputTokens: z.number().int().positive().safe().nullable(),
+  maxCostUsd: nullableCost,
+}).strict().superRefine((scope, context) => {
+  requireUnique(scope.budgetQuotaIds, context, ["budgetQuotaIds"], "target budget quota id");
+  if (!scope.budgetQuotaIds.includes(scope.runQuotaId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["runQuotaId"], message: "Target quota scope must include its deterministic run quota." });
+  }
+});
+
 export const LinkedHoldStateSchema = z.enum([
   "intent",
   "held",
@@ -37,7 +52,9 @@ export const LinkedHoldEnvelopeSchema = z.object({
 export const LinkedHoldBrokerEvidenceSchema = z.object({
   parentCarveId: IdentifierSchema.nullable(),
   targetLeaseId: IdentifierSchema.nullable(),
+  targetTokenHash: digest.nullable().default(null),
   targetLeaseIssuedAt: TimestampSchema.nullable(),
+  targetQuotaScope: LinkedHoldTargetQuotaScopeSchema.nullable().default(null),
   targetRequests: count.nullable(),
   targetForwardedRequests: count.nullable(),
   targetInputTokens: count.nullable(),
@@ -109,6 +126,18 @@ export const LinkedHoldRecordSchema = z.object({
   }
   requireUnique(record.parentBudgetIds, context, ["parentBudgetIds"], "parent budget id");
   requireUnique(record.targetBudgetIds, context, ["targetBudgetIds"], "target budget id");
+  const parentCarvedStates = new Set(["parent_carved", "admitted", "leased", "settling", "settled", "exhausted"]);
+  if (parentCarvedStates.has(record.state) && record.brokerEvidence.parentCarveId === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["brokerEvidence", "parentCarveId"], message: "A parent-carved linked hold requires deterministic parent carve evidence." });
+  }
+  const targetLeasedStates = new Set(["leased", "settling", "settled", "exhausted"]);
+  if (targetLeasedStates.has(record.state) && (
+    record.brokerEvidence.targetLeaseId === null
+    || record.brokerEvidence.targetTokenHash === null
+    || record.brokerEvidence.targetQuotaScope === null
+  )) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["brokerEvidence"], message: "A leased linked hold requires complete token-free target evidence." });
+  }
   if (record.usageProjection) {
     requireAtMost(record.usageProjection.requests, record.targetReservation.requests, context, ["usageProjection", "requests"], "request usage");
     requireNullableAtMost(record.usageProjection.inputTokens, record.targetReservation.inputTokens, context, ["usageProjection", "inputTokens"], "input token usage");
@@ -121,6 +150,7 @@ export const LinkedHoldRecordSchema = z.object({
 export type LinkedHoldState = z.infer<typeof LinkedHoldStateSchema>;
 export type LinkedHoldEnvelope = z.infer<typeof LinkedHoldEnvelopeSchema>;
 export type LinkedHoldBrokerEvidence = z.infer<typeof LinkedHoldBrokerEvidenceSchema>;
+export type LinkedHoldTargetQuotaScope = z.infer<typeof LinkedHoldTargetQuotaScopeSchema>;
 export type LinkedHoldUsageProjection = z.infer<typeof LinkedHoldUsageProjectionSchema>;
 export type LinkedHoldRecord = z.infer<typeof LinkedHoldRecordSchema>;
 

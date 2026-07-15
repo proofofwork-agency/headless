@@ -5,6 +5,7 @@ import { HeadlessError } from "../runtime/headless-error";
 import { redactAndTruncate } from "../runtime/redaction";
 import { calculateModelPricedCost } from "../runtime/pricing";
 import { recordRuntimeDiagnostic } from "../runtime/diagnostics";
+import { linkedProviderOperationIds } from "../runtime/linked-provider-ids";
 import { getProvider, type ProviderDefinition } from "./providers";
 
 const DEFAULT_BODY_LIMIT = 4_000_000;
@@ -1102,11 +1103,12 @@ export class ProviderBroker {
 }
 
 function linkedOperationId(linkId: string, kind: "parent" | "target") {
-  return `${digest.parse(linkId)}:${kind}`;
+  const ids = linkedProviderOperationIds(digest.parse(linkId));
+  return kind === "parent" ? ids.parentOperationId : ids.targetOperationId;
 }
 
 function linkedTargetRunQuotaId(linkId: string) {
-  return `headless-linked-target-${digest.parse(linkId)}`;
+  return linkedProviderOperationIds(digest.parse(linkId)).targetRunQuotaId;
 }
 
 function linkedParentIdentity(parentRunId: string, allocation: z.infer<typeof BrokerLinkedAllocationSchema>) {

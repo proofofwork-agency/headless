@@ -43,6 +43,17 @@ describe("cross-provider linked-hold persistence contracts", () => {
       ...linkedHold(),
       usageProjection: usageProjection({ requests: 3 }),
     })).toThrow("exceeds its target reservation");
+    expect(() => LinkedHoldRecordSchema.parse({
+      ...linkedHold(),
+      state: "leased",
+      transitionNumber: 4,
+      brokerEvidence: { ...linkedHold().brokerEvidence, parentCarveId: "parent-carve" },
+    })).toThrow("complete token-free target evidence");
+    const legacyIntentEvidence = { ...linkedHold().brokerEvidence } as Record<string, unknown>;
+    delete legacyIntentEvidence.targetTokenHash;
+    delete legacyIntentEvidence.targetQuotaScope;
+    expect(LinkedHoldRecordSchema.parse({ ...linkedHold(), brokerEvidence: legacyIntentEvidence }).brokerEvidence)
+      .toMatchObject({ targetTokenHash: null, targetQuotaScope: null });
   });
 
   test("chains version-two migration through version three without changing its established reservation shape", () => {
@@ -105,7 +116,9 @@ describe("cross-provider linked-hold persistence contracts", () => {
       brokerEvidence: {
         parentCarveId: "parent-carve",
         targetLeaseId: "target-lease",
+        targetTokenHash: "e".repeat(64),
         targetLeaseIssuedAt: 1_200,
+        targetQuotaScope: targetQuotaScope(),
         targetRequests: 1,
         targetForwardedRequests: 1,
         targetInputTokens: 400,
@@ -479,7 +492,9 @@ function linkedHold(overrides: Partial<LinkedHoldRecord> = {}): LinkedHoldRecord
     brokerEvidence: {
       parentCarveId: null,
       targetLeaseId: null,
+      targetTokenHash: null,
       targetLeaseIssuedAt: null,
+      targetQuotaScope: null,
       targetRequests: null,
       targetForwardedRequests: null,
       targetInputTokens: null,
@@ -492,6 +507,18 @@ function linkedHold(overrides: Partial<LinkedHoldRecord> = {}): LinkedHoldRecord
     terminalSettlementDigest: null,
     usageProjection: null,
     ...overrides,
+  };
+}
+
+function targetQuotaScope() {
+  return {
+    provider: "openai",
+    runQuotaId: `headless-linked-target-${"a".repeat(64)}`,
+    budgetQuotaIds: [`headless-linked-target-${"a".repeat(64)}`, "target-budget"],
+    maxRequests: 2,
+    maxInputTokens: 1_000,
+    maxOutputTokens: 200,
+    maxCostUsd: 1,
   };
 }
 
