@@ -3,6 +3,11 @@ import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { terminateProcessTree } from "../process-tree";
 import { cleanupWithDiagnostic, recordRuntimeDiagnostic } from "../diagnostics";
+import {
+  CLAUDE_SETUP_TOKEN_ENV,
+  CLAUDE_SETUP_TOKEN_LOGICAL_ENTRY,
+  CLAUDE_SETUP_TOKEN_PATTERN,
+} from "../native-auth-capsule";
 import type {
   SessionAuthProbeRequest,
   SessionAuthProbeResult,
@@ -147,6 +152,20 @@ export class BunSessionExecutor implements SessionExecutor {
   }
 
   async probeAuth(input: SessionAuthProbeRequest): Promise<SessionAuthProbeResult> {
+    if (input.backend === "claude-code" && input.env[CLAUDE_SETUP_TOKEN_ENV] !== undefined) {
+      const token = input.env[CLAUDE_SETUP_TOKEN_ENV]!;
+      if (!CLAUDE_SETUP_TOKEN_PATTERN.test(token)) {
+        return { available: false, reason: "Claude setup-token environment is invalid.", profileFingerprint: null };
+      }
+      const fingerprint = createHash("sha256")
+        .update(input.backend)
+        .update("\0")
+        .update(CLAUDE_SETUP_TOKEN_LOGICAL_ENTRY)
+        .update("\0")
+        .update(token)
+        .digest("hex");
+      return { available: true, reason: "Claude setup-token capsule is present.", profileFingerprint: fingerprint };
+    }
     const file = authFile(input.backend, input.env);
     if (file && existsSync(file)) {
       const info = lstatSync(file);

@@ -4,6 +4,7 @@ const MAX_TEXT_LENGTH = 20_000;
 
 export const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----)/g, "$1\n[REDACTED_PRIVATE_KEY]\n$2"],
+  [/(?<![A-Za-z0-9_-])(sk-ant-oat[A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])/g, "[REDACTED_CLAUDE_SETUP_TOKEN]"],
   [/\b(sk-[A-Za-z0-9_-]{16,})\b/g, "[REDACTED_OPENAI_KEY]"],
   [/\b(anthropic-[A-Za-z0-9_-]{16,})\b/g, "[REDACTED_ANTHROPIC_KEY]"],
   [/\b(xai-[A-Za-z0-9_-]{16,})\b/g, "[REDACTED_XAI_KEY]"],

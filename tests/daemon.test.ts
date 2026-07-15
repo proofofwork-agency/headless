@@ -20,6 +20,7 @@ import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runt
 import { JobStore } from "../src/daemon/job-store";
 import { LedgerV2 } from "../src/runtime/ledger-v2";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
+import { recordArtifact } from "../src/runtime/ledger-api";
 import { WorktreeLeaseStore } from "../src/runtime/worktree-leases";
 import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { parseGrokJsonl } from "../src/backends/grok";
@@ -1416,7 +1417,7 @@ console.log(JSON.stringify({type:"text",text}));`);
 
   test("persists redacted run events and task terminal state across a daemon restart", async () => {
     const fixture = createFixture();
-    const secret = "sk-1234567890abcdefghijkl";
+    const secret = `sk-ant-oat${"R".repeat(31)}-`;
     installBackend(fixture.bin, `await Bun.sleep(150); console.log(JSON.stringify({type:"text",text:"event ${secret}"}));`);
     const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48), principal: "coordinator" });
     daemons.push(daemon);
@@ -1438,14 +1439,25 @@ console.log(JSON.stringify({type:"text",text}));`);
       afterCursor: first.latestCursor,
       timeoutMs: 5_000,
     }, 10_000);
-    const [, updates] = await Promise.all([
+    const [completed, updates] = await Promise.all([
       client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 5_000 }),
       waiting,
     ]);
     expect(updates.events.length).toBeGreaterThan(0);
     const terminal = await client.call<Task>("task.status", { taskId: task.id });
     expect(terminal.state).toBe("completed");
+    expect(JSON.stringify(completed.result)).not.toContain(secret);
     expect(readFileSync(daemon.state.runEventsPath, "utf8")).not.toContain(secret);
+    expect(readFileSync(join(daemon.state.jobsDir, `${submitted.id}.job.json`), "utf8")).not.toContain(secret);
+    recordArtifact({
+      cwd: fixture.project,
+      state: fixture.state,
+      kind: "test_report",
+      title: "Claude setup-token redaction proof",
+      summary: `backend echoed ${secret}`,
+      status: "passed",
+    });
+    expect(readFileSync(daemon.state.ledgerPath, "utf8")).not.toContain(secret);
 
     await daemon.stop();
     daemons.splice(daemons.indexOf(daemon), 1);

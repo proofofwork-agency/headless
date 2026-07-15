@@ -24,6 +24,8 @@ export interface WorkerEnvironmentPaths {
 
 export interface WorkerEnvironment extends WorkerEnvironmentPaths {
   env: NodeJS.ProcessEnv;
+  /** Deliberate capsule credentials that adapters may inject only after baseline env scrubbing. */
+  credentialEnv: NodeJS.ProcessEnv;
   cleanup: () => void;
 }
 
@@ -56,12 +58,15 @@ export function createWorkerEnvironment(options: WorkerEnvironmentOptions = {}):
     }
 
     let cleaned = false;
+    const credentialEnv: NodeJS.ProcessEnv = {};
     return {
       ...paths,
       env: buildWorkerEnvironment(options.sourceEnv ?? process.env, paths),
+      credentialEnv,
       cleanup: () => {
         if (cleaned) return;
         cleaned = true;
+        for (const key of Object.keys(credentialEnv)) delete credentialEnv[key];
         rmSync(root, { recursive: true, force: true });
       },
     };

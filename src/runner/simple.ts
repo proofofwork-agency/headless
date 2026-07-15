@@ -767,7 +767,11 @@ export async function terminateProcessTree(process: Subprocess, graceMs = TERMIN
 function adapterEnvironment(adapter: BackendDefinition, worker: WorkerEnvironment, options: InternalRunOptions) {
   const base = { ...worker.env, HEADLESS_DEPTH: process.env.HEADLESS_DEPTH ?? "0" };
   const env: NodeJS.ProcessEnv = adapter.buildEnv ? adapter.buildEnv(base, options) : base;
-  adapter.prepareEnvironment?.(env, { worker, platform: process.platform });
+  adapter.prepareEnvironment?.(env, {
+    worker,
+    platform: process.platform,
+    authMode: options.authMode ?? "broker",
+  });
   if (options.broker) applyBrokerEnvironment(env, options.broker);
   return env;
 }

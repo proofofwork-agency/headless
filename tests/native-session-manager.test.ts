@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { getBackendDefinition } from "../src/backends/registry";
 import { NativeSessionManager, prepareNativeSessionEnvironment } from "../src/runtime/native-session-manager";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
+import { CLAUDE_SETUP_TOKEN_ENV } from "../src/runtime/native-auth-capsule";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { createWorkerEnvironment } from "../src/runtime/worker-environment";
 
@@ -62,6 +63,42 @@ describe("native session manager", () => {
       for (const env of [codex, claude, opencode]) {
         expect(Object.keys(env).some((key) => /(?:API_KEY|AUTH_TOKEN|OAUTH_TOKEN|SOCKET)$/i.test(key))).toBe(false);
       }
+    } finally {
+      worker.cleanup();
+    }
+  });
+
+  test("injects a deliberate Claude setup-token only into native-login environments", () => {
+    const fixture = createFixture(false);
+    const token = `sk-ant-oat${"E".repeat(32)}`;
+    const worker = createWorkerEnvironment({
+      baseDir: fixture.runtime,
+      sourceEnv: { PATH: process.env.PATH, CLAUDE_CODE_OAUTH_TOKEN: "ambient-must-be-scrubbed" },
+    });
+    try {
+      expect(worker.env[CLAUDE_SETUP_TOKEN_ENV]).toBeUndefined();
+      worker.credentialEnv[CLAUDE_SETUP_TOKEN_ENV] = token;
+      const adapter = getBackendDefinition("claude-code")!;
+      const common = {
+        backend: "claude-code",
+        prompt: "",
+        cwd: fixture.project,
+        mode: "read-only" as const,
+        containment: "required" as const,
+        approvalPolicy: "ask" as const,
+      };
+      const native = prepareNativeSessionEnvironment(adapter, worker, {
+        ...common,
+        authMode: "native-login",
+      }, "darwin");
+      const broker = prepareNativeSessionEnvironment(adapter, worker, {
+        ...common,
+        authMode: "broker",
+      }, "darwin");
+
+      expect(native[CLAUDE_SETUP_TOKEN_ENV]).toBe(token);
+      expect(broker[CLAUDE_SETUP_TOKEN_ENV]).toBeUndefined();
+      expect(native.CLAUDE_CODE_TMPDIR).toBe(worker.temp);
     } finally {
       worker.cleanup();
     }

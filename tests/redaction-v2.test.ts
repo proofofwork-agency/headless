@@ -19,6 +19,13 @@ describe("stream-safe redaction", () => {
     expect(result.text).not.toContain(token);
   });
 
+  test("redacts Claude setup-tokens with their complete base64url alphabet", () => {
+    const token = `sk-ant-oat${"C".repeat(31)}-`;
+    const result = redactAndTruncate(`worker printed ${token}`);
+    expect(result.text).toContain("[REDACTED_CLAUDE_SETUP_TOKEN]");
+    expect(result.text).not.toContain(token);
+  });
+
   test("consumes trailing base64url dashes from daemon-issued credentials", () => {
     const brokerToken = `hls_${"B".repeat(63)}-`;
     const runToolToken = `hlt_${"R".repeat(63)}-`;
@@ -67,6 +74,7 @@ describe("stream-safe redaction", () => {
       `hlt_${"R".repeat(64)}`,
       `hlt_${"R".repeat(63)}-`,
       `sk-${"c".repeat(32)}`,
+      `sk-ant-oat${"c".repeat(31)}-`,
       `anthropic-${"d".repeat(32)}`,
       `Bearer ${"e".repeat(40)}`,
       `api_key=${"f".repeat(40)}`,
