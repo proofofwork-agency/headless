@@ -3,12 +3,14 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { tool } from "@opencode-ai/plugin";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { connectOrStartDaemon } from "../src/daemon/connect";
 import { HeadlessDaemon } from "../src/daemon/server";
 import {
   __handleCallToolForTest,
   __handleListToolsForTest,
+  __normalizeMcpInputSchemaForTest,
   mcpToolDefinitions,
   mcpToolsForScopes,
   server,
@@ -53,11 +55,30 @@ describe("MCP server surface", () => {
     expect(server).toBeDefined();
   });
 
-  test("matches the OpenCode plugin tool surface", async () => {
+  test("matches the OpenCode plugin tool names, schemas, and defaults", async () => {
     const names = mcpToolDefinitions.map((tool) => tool.name).sort();
     expect(names).toEqual([...MCP_EXPECTED_TOOLS].sort());
     const plugin = await openCodePluginServer({} as never);
-    expect(names).toEqual(Object.keys(plugin.tool ?? {}).sort());
+    const pluginTools = plugin.tool ?? {};
+    expect(names).toEqual(Object.keys(pluginTools).sort());
+    const mcpSchemas = Object.fromEntries(mcpToolDefinitions.map((definition) => [
+      definition.name,
+      canonicalSchema(definition.inputSchema),
+    ]));
+    const pluginSchemas = Object.fromEntries(Object.entries(pluginTools).map(([name, definition]) => [
+      name,
+      canonicalSchema(toolSchema(definition)),
+    ]));
+    expect(pluginSchemas).toEqual(mcpSchemas);
+    expect(mcpSchemas.headless_deliberate).toMatchObject({
+      properties: {
+        backends: { default: "opencode,codex" },
+        authMode: { default: "native-login" },
+        contextRefs: { type: "string" },
+        mode: { default: "read-only" },
+      },
+    });
+    expect(mcpSchemas.headless_record_task_claim).toMatchObject({ properties: { leaseMs: { default: 300_000 } } });
   });
 
   test("advertises only tools and actions available to the authenticated scope set", () => {
@@ -130,8 +151,14 @@ describe("MCP authenticated daemon integration", () => {
     const listed = ListToolsResultSchema.parse(await __handleListToolsForTest());
     expect(listed.tools.length).toBeGreaterThan(0);
     expect(listed.tools.every((tool) => tool.inputSchema.type === "object")).toBe(true);
-    const composed = listed.tools.find((tool) => tool.name === "headless_goal")?.inputSchema;
-    expect(Array.isArray(composed?.anyOf)).toBe(true);
+    const composed = __normalizeMcpInputSchemaForTest({
+      oneOf: [
+        { type: "object", properties: { action: { const: "start" } } },
+        { type: "object", properties: { action: { const: "status" } } },
+      ],
+    });
+    expect(composed.type).toBe("object");
+    expect(composed.oneOf).toHaveLength(2);
   });
 
   test("persists a redacted durable message and drains it without a host-channel fallback", async () => {
@@ -199,6 +226,18 @@ describe("MCP authenticated daemon integration", () => {
 });
 
 type ToolResponse = Awaited<ReturnType<typeof __handleCallToolForTest>>;
+
+function toolSchema(definition: { args: Record<string, unknown> }) {
+  return tool.schema.toJSONSchema(tool.schema.object(definition.args), { io: "input" });
+}
+
+function canonicalSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalSchema);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => key !== "$schema")
+    .map(([key, entry]) => [key, canonicalSchema(entry)]));
+}
 
 function callTool(name: string, args: Record<string, unknown>): Promise<ToolResponse> {
   return __handleCallToolForTest({ params: { name, arguments: args } });

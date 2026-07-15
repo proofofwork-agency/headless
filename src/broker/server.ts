@@ -3,7 +3,7 @@ import { chmodSync, existsSync, rmSync } from "node:fs";
 import { z } from "zod";
 import { HeadlessError } from "../runtime/headless-error";
 import { redactAndTruncate } from "../runtime/redaction";
-import { calculateModelPricedCost } from "../runtime/pricing";
+import { calculateModelPricedCost, listPricing } from "../runtime/pricing";
 import { recordRuntimeDiagnostic } from "../runtime/diagnostics";
 import { linkedProviderOperationIds } from "../runtime/linked-provider-ids";
 import { getProvider, type ProviderDefinition } from "./providers";
@@ -235,6 +235,7 @@ export type ProviderBrokerOptions = {
   persistBudgetQuota?: (quota: BrokerBudgetQuota, expiresAt?: number) => void;
   initialLinkedOperations?: BrokerLinkedOperation[];
   persistLinkedOperation?: (operation: BrokerLinkedOperation) => void;
+  warning?: (message: string) => void;
 };
 
 export class ProviderBroker {
@@ -249,9 +250,11 @@ export class ProviderBroker {
   private readonly persistBudgetQuota?: ProviderBrokerOptions["persistBudgetQuota"];
   private readonly linkedOperations = new Map<string, BrokerLinkedOperation>();
   private readonly persistLinkedOperation?: ProviderBrokerOptions["persistLinkedOperation"];
+  private readonly warning?: ProviderBrokerOptions["warning"];
   private readonly logs: BrokerRequestLog[] = [];
   private activeRequests = 0;
   private inFlightBodyBytes = 0;
+  private pricingWarningEmitted = false;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private unixServer: ReturnType<typeof Bun.serve> | null = null;
   readonly unixSocketPath: string | null;
@@ -269,6 +272,7 @@ export class ProviderBroker {
       this.budgetQuotas.set(parsed.id, parsed);
     }
     this.persistLinkedOperation = options.persistLinkedOperation;
+    this.warning = options.warning;
     for (const operation of options.initialLinkedOperations ?? []) {
       const parsed = BrokerLinkedOperationSchema.parse(operation);
       if (this.linkedOperations.has(parsed.operationId)) throw new Error(`Duplicate linked broker operation: ${parsed.operationId}`);
@@ -325,6 +329,7 @@ export class ProviderBroker {
     if (this.leases.has(id)) throw new Error(`Provider broker lease already exists: ${id}`);
     const scope = BrokerLeaseScopeSchema.parse(input);
     if (scope.expiresAt <= Date.now()) throw new Error("Broker lease expiry must be in the future.");
+    this.warnAboutUnpricedCostCap(scope);
     this.registerBudgetQuotas(scope.budgetQuotas, scope.expiresAt);
     const token = `hls_${randomBytes(32).toString("base64url")}`;
     this.leases.set(id, {
@@ -690,6 +695,21 @@ export class ProviderBroker {
     }
     this.persistLinkedOperation?.(value);
     this.linkedOperations.set(value.operationId, value);
+  }
+
+  private warnAboutUnpricedCostCap(scope: BrokerLeaseScope) {
+    if (
+      this.pricingWarningEmitted
+      || !this.warning
+      || listPricing().length > 0
+      || (scope.maxCostUsd === null && scope.budgetQuotas.every((quota) => quota.maxCostUsd === null))
+    ) return;
+    this.pricingWarningEmitted = true;
+    try {
+      this.warning("Headless pricing registry is empty while a broker cost cap is active; cost attribution is unavailable and cost-capped requests will fail closed. Register trusted pricing through a daemon extension.");
+    } catch (error) {
+      recordRuntimeDiagnostic("state", "broker.pricing-warning", error, "warning");
+    }
   }
 
   private syncLinkedTargetObservation(lease: Lease, throwOnFailure = false) {

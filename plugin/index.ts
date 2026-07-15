@@ -1,19 +1,24 @@
-import { type Plugin, type ToolContext, tool } from "@opencode-ai/plugin";
+import { type Plugin, type ToolContext, type ToolResult, tool } from "@opencode-ai/plugin";
 import {
   LeadDaemonClientPool,
   MAX_DAEMON_TRANSPORT_TIMEOUT_MS,
   type HeadlessDaemonClient,
 } from "@proofofwork-agency/headless/daemon";
-import { getCooperationInstructions, splitList, type Job } from "@proofofwork-agency/headless/experimental";
+import {
+  DEFAULT_DELIBERATION_BACKENDS,
+  getCooperationInstructions,
+  headlessToolDefinition,
+  splitList,
+  type HeadlessToolInput,
+  type HeadlessToolName,
+  type Job,
+} from "@proofofwork-agency/headless/experimental";
 
 export const id = "headless";
 
 export const server: Plugin = async () => ({
   tool: {
-    headless_run: tool({
-      description: "Submit a daemon-owned contained run and return its complete structured result.",
-      args: runArgs(),
-      async execute(args, context) {
+    headless_run: registryTool("headless_run", async (args, context) => {
         const client = await daemon(context);
         const submitted = await client.call<Job>("run.submit", {
           backend: args.backend,
@@ -22,7 +27,7 @@ export const server: Plugin = async () => ({
           model: args.model,
           agent: args.agent,
           timeoutMs: args.timeoutMs,
-          sessionId: runtimeSessionId(context),
+          sessionId: runtimeSessionId(context, args.sessionId),
           containment: args.containment,
           authMode: args.authMode,
           approvalPolicy: args.approvalPolicy,
@@ -30,71 +35,30 @@ export const server: Plugin = async () => ({
         const waits = runWaitTimeouts(args.timeoutMs ?? 180_000);
         const completed = submitted.result ? submitted : await client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: waits.server }, waits.transport);
         return result("headless_run", { jobId: completed.id, sessionId: completed.sessionId, result: completed.result });
-      },
     }),
-    headless_append_note: tool({
-      description: "Append a note through the authenticated project daemon.",
-      args: { text: tool.schema.string(), handlesHandoffId: tool.schema.string().optional() },
-      async execute(args, context) {
-        return result("headless_append_note", await call(context, "ledger.note", { ...args, sessionId: runtimeSessionId(context) }));
-      },
+    headless_append_note: registryTool("headless_append_note", async (args, context) => {
+        return result("headless_append_note", await call(context, "ledger.note", { ...args, sessionId: runtimeSessionId(context, args.sessionId) }));
     }),
-    headless_record_artifact: tool({
-      description: "Record a structured artifact through the project daemon.",
-      args: artifactArgs(),
-      async execute(args, context) {
-        return result("headless_record_artifact", await call(context, "ledger.artifact", { ...args, evidence: splitList(args.evidence), sessionId: runtimeSessionId(context) }));
-      },
+    headless_record_artifact: registryTool("headless_record_artifact", async (args, context) => {
+        return result("headless_record_artifact", await call(context, "ledger.artifact", { ...args, evidence: splitList(args.evidence), sessionId: runtimeSessionId(context, args.sessionId) }));
     }),
-    headless_read_context: tool({
-      description: "Read the daemon-maintained verified ledger projection.",
-      args: { view: tool.schema.enum(["summary", "recent", "raw"]).optional().default("summary"), limit: tool.schema.number().int().positive().optional() },
-      async execute(args, context) {
-        return result("headless_read_context", await call(context, "ledger.context", { ...args, sessionId: runtimeSessionId(context) }));
-      },
+    headless_read_context: registryTool("headless_read_context", async (args, context) => {
+        return result("headless_read_context", await call(context, "ledger.context", { ...args, sessionId: runtimeSessionId(context, args.sessionId) }));
     }),
-    headless_task_state: tool({
-      description: "List durable daemon tasks and their claim/lease state.",
-      args: {
-        jobId: tool.schema.string().optional(),
-        state: tool.schema.enum(["pending", "claimed", "completed", "failed", "cancelled"]).optional(),
-      },
-      async execute(args, context) {
+    headless_task_state: registryTool("headless_task_state", async (args, context) => {
         return result("headless_task_state", await call(context, "task.list", args));
-      },
     }),
-    headless_propose_final: tool({
-      description: "Record a finality proposal for later enforced decision.",
-      args: {
-        summary: tool.schema.string(),
-        evidence: tool.schema.string(),
-        remainingRisk: tool.schema.string().optional(),
-        handlesHandoffIds: tool.schema.string().optional(),
-      },
-      async execute(args, context) {
-        return result("headless_propose_final", await call(context, "ledger.proposeFinal", { ...args, handlesHandoffIds: splitList(args.handlesHandoffIds), sessionId: runtimeSessionId(context) }));
-      },
+    headless_propose_final: registryTool("headless_propose_final", async (args, context) => {
+        return result("headless_propose_final", await call(context, "ledger.proposeFinal", { ...args, handlesHandoffIds: splitList(args.handlesHandoffIds), sessionId: runtimeSessionId(context, args.sessionId) }));
     }),
-    headless_deliberate: tool({
-      description: "Run a bounded daemon fan-out and return every structured result.",
-      args: {
-        question: tool.schema.string(),
-        backends: tool.schema.string().optional(),
-        contextRefs: tool.schema.string().optional(),
-        timeoutMs: tool.schema.number().int().positive().max(86_400_000).optional(),
-        mode: tool.schema.enum(["read-only", "write"]).optional().default("read-only"),
-        authMode: authModeSchema(),
-        approvalPolicy: approvalPolicySchema(),
-      },
-      async execute(args, context) {
+    headless_deliberate: registryTool("headless_deliberate", async (args, context) => {
         if (args.mode === "write") throw new Error("Use council_deliberate for reviewed write deliberation.");
         const client = await daemon(context);
         const prompt = `${args.question}${args.contextRefs ? `\n\nContext refs:\n${args.contextRefs}` : ""}`;
-        const jobs = await Promise.all((splitList(args.backends) ?? ["opencode"]).map((backend) => client.call<Job>("run.submit", { backend, prompt, mode: "read-only", containment: "required", authMode: args.authMode, approvalPolicy: args.approvalPolicy, timeoutMs: args.timeoutMs, sessionId: runtimeSessionId(context) })));
+        const jobs = await Promise.all((splitList(args.backends) ?? [...DEFAULT_DELIBERATION_BACKENDS]).map((backend) => client.call<Job>("run.submit", { backend, prompt, mode: "read-only", containment: "required", authMode: args.authMode, approvalPolicy: args.approvalPolicy, timeoutMs: args.timeoutMs, sessionId: runtimeSessionId(context, args.sessionId) })));
         const waits = runWaitTimeouts(args.timeoutMs ?? 180_000);
         const completed = await Promise.all(jobs.map((job) => job.result ? job : client.call<Job>("run.wait", { jobId: job.id, timeoutMs: waits.server }, waits.transport)));
         return result("headless_deliberate", { jobs: completed });
-      },
     }),
     headless_project_trust: projectTrustTool(),
     headless_fleet_profile: fleetProfileTool(),
@@ -103,86 +67,37 @@ export const server: Plugin = async () => ({
     headless_collaboration: collaborationTool(),
     headless_approval: approvalTool(),
     headless_candidate: candidateTool(),
-    headless_ask_for_work: cooperationTool("headless_ask_for_work"),
-    ask_for_backup: tool({
-      description: "Ask the authenticated fleet for bounded backup help.",
-      args: { problem: tool.schema.string(), neededStrength: tool.schema.string().optional() },
-      async execute(args, context) {
-        return result("ask_for_backup", await event(context, "ask_for_backup", { content: args.problem, meta: { neededStrength: args.neededStrength } }));
-      },
+    headless_ask_for_work: cooperationTool(),
+    ask_for_backup: registryTool("ask_for_backup", async (args, context) => {
+        return result("ask_for_backup", await event(context, "ask_for_backup", { content: args.problem, meta: { neededStrength: args.neededStrength } }, args.sessionId));
     }),
-    headless_record_task_claim: tool({
-      description: "Claim a durable daemon task under the authenticated principal.",
-      args: {
-        taskId: tool.schema.string(),
-        leaseMs: tool.schema.number().int().positive().max(86_400_000).optional().default(300_000),
-      },
-      async execute(args, context) {
+    headless_record_task_claim: registryTool("headless_record_task_claim", async (args, context) => {
         return result("headless_record_task_claim", await call(context, "task.claim", args));
-      },
     }),
-    headless_record_consensus_vote: tool({
-      description: "Record an attributable consensus vote.",
-      args: { proposal: tool.schema.string(), vote: tool.schema.enum(["yes", "no", "consensus"]), rationale: tool.schema.string().optional() },
-      async execute(args, context) {
-        return result("headless_record_consensus_vote", await event(context, "consensus_vote", { content: `${args.vote}: ${args.proposal}`, meta: args }));
-      },
+    headless_record_consensus_vote: registryTool("headless_record_consensus_vote", async (args, context) => {
+        return result("headless_record_consensus_vote", await event(context, "consensus_vote", { content: `${args.vote}: ${args.proposal}`, meta: args }, args.sessionId));
     }),
-    send_message: tool({
-      description: "Send a redacted structured message through the daemon ledger.",
-      args: { to: tool.schema.string(), content: tool.schema.string() },
-      async execute(args, context) {
-        return result("send_message", await event(context, "message", { content: args.content, message: { to: args.to, content: args.content, kind: "direct" } }));
-      },
+    send_message: registryTool("send_message", async (args, context) => {
+        return result("send_message", await event(context, "message", { content: args.content, message: { to: args.to, content: args.content, kind: "direct" } }, args.sessionId));
     }),
-    wait_for_handoff: tool({
-      description: "Wait for a daemon-ledger event that handles a handoff.",
-      args: { handoffId: tool.schema.string(), timeoutMs: tool.schema.number().int().positive().optional() },
-      async execute(args, context) {
-        return result("wait_for_handoff", await waitForHandoff(context, args.handoffId, args.timeoutMs ?? 90_000));
-      },
+    wait_for_handoff: registryTool("wait_for_handoff", async (args, context) => {
+        return result("wait_for_handoff", await waitForHandoff(context, args.handoffId, args.timeoutMs ?? 90_000, args.sessionId));
     }),
-    get_messages: tool({
-      description: "Pull redacted messages for this OpenCode session.",
-      args: { limit: tool.schema.number().int().positive().optional() },
-      async execute(args, context) {
+    get_messages: registryTool("get_messages", async (args, context) => {
         const { messages } = await call<{ messages: Array<{ id: string; chatId: string; content: string; createdAt: number }> }>(
           context,
           "messages.pull",
-          { chatId: runtimeSessionId(context), limit: Math.min(args.limit ?? 20, 50) },
+          { chatId: runtimeSessionId(context, args.sessionId), limit: Math.min(args.limit ?? 20, 50) },
         );
         return result("get_messages", { messages });
-      },
+      }),
+    council_deliberate: registryTool("council_deliberate", async (args, context) => {
+        return result("council_deliberate", await call(context, "council.run", { question: args.question, agents: splitList(args.agents), mode: args.mode, containment: "required", authMode: args.authMode, approvalPolicy: args.approvalPolicy, timeoutMs: args.timeoutMs, sessionId: runtimeSessionId(context, args.sessionId) }, boundedTransportTimeout((args.timeoutMs ?? 180_000) * 4 + 90_000)));
     }),
-    council_deliberate: tool({
-      description: "Run typed proposal, execution, review, vote, and decision phases through the daemon.",
-      args: {
-        question: tool.schema.string(),
-        agents: tool.schema.string().optional(),
-        mode: tool.schema.enum(["read-only", "write"]).optional().default("read-only"),
-        authMode: authModeSchema(),
-        approvalPolicy: approvalPolicySchema(),
-        timeoutMs: tool.schema.number().int().positive().max(86_400_000).optional(),
-      },
-      async execute(args, context) {
-        return result("council_deliberate", await call(context, "council.run", { question: args.question, agents: splitList(args.agents), mode: args.mode, containment: "required", authMode: args.authMode, approvalPolicy: args.approvalPolicy, timeoutMs: args.timeoutMs }, boundedTransportTimeout((args.timeoutMs ?? 180_000) * 4 + 90_000)));
-      },
-    }),
-    headless_workflow_run: tool({
-      description: "Start a durable required-containment workflow DAG from a v0.2 JSON definition.",
-      args: { definition: tool.schema.string() },
-      async execute(args, context) {
+    headless_workflow_run: registryTool("headless_workflow_run", async (args, context) => {
         return result("headless_workflow_run", await call(context, "workflow.run", workflowDefinition(args.definition)));
-      },
     }),
-    headless_workflow_status: tool({
-      description: "List, inspect, wait for, or cancel a durable workflow.",
-      args: {
-        action: tool.schema.enum(["list", "status", "wait", "cancel"]),
-        workflowId: tool.schema.string().optional(),
-        timeoutMs: tool.schema.number().int().positive().max(86_400_000).optional(),
-      },
-      async execute(args, context) {
+    headless_workflow_status: registryTool("headless_workflow_status", async (args, context) => {
         if (args.action === "list") return result("headless_workflow_status", await call(context, "workflow.list", {}));
         if (!args.workflowId) throw new Error("workflowId is required for status, wait, and cancel.");
         const method = args.action === "wait" ? "workflow.wait" : args.action === "cancel" ? "workflow.cancel" : "workflow.status";
@@ -192,113 +107,46 @@ export const server: Plugin = async () => ({
           { workflowId: args.workflowId, timeoutMs: args.timeoutMs },
           args.action === "wait" ? boundedTransportTimeout((args.timeoutMs ?? 180_000) + 5_000) : undefined,
         ));
-      },
     }),
-    headless_record_idle_action: tool({
-      description: "Record a structured autonomous action result.",
-      args: artifactArgs(),
-      async execute(args, context) {
-        return result("headless_record_idle_action", await event(context, "idle_action_result", { content: args.summary, artifact: { ...args, evidence: splitList(args.evidence) } }));
-      },
+    headless_record_idle_action: registryTool("headless_record_idle_action", async (args, context) => {
+        const { sessionId, ...artifact } = args;
+        return result("headless_record_idle_action", await event(context, "idle_action_result", { content: args.summary, artifact: { ...artifact, evidence: splitList(args.evidence) } }, sessionId));
     }),
-    headless_record_release_gate: tool({
-      description: "Record a release gate artifact.",
-      args: { summary: tool.schema.string(), status: tool.schema.enum(["passed", "failed", "blocked", "unknown", "skipped", "timed_out"]).optional(), evidence: tool.schema.string().optional() },
-      async execute(args, context) {
-        return result("headless_record_release_gate", await call(context, "ledger.artifact", { kind: "release_gate", title: "Release gate", summary: args.summary, status: args.status ?? "unknown", evidence: splitList(args.evidence), sessionId: runtimeSessionId(context) }));
-      },
+    headless_record_release_gate: registryTool("headless_record_release_gate", async (args, context) => {
+        return result("headless_record_release_gate", await call(context, "ledger.artifact", { kind: "release_gate", title: "Release gate", summary: args.summary, status: args.status ?? "unknown", evidence: splitList(args.evidence), sessionId: runtimeSessionId(context, args.sessionId) }));
     }),
-    headless_gate: tool({
-      description: "Run bounded release checks through the project daemon.",
-      args: { checks: tool.schema.array(tool.schema.string()).optional(), timeoutMs: tool.schema.number().int().positive().max(86_400_000).optional() },
-      async execute(args, context) {
-        return result("headless_gate", await call(context, "gate.run", { checks: args.checks, timeoutMs: args.timeoutMs, sessionId: runtimeSessionId(context) }, boundedTransportTimeout((args.timeoutMs ?? 120_000) + 10_000)));
-      },
+    headless_gate: registryTool("headless_gate", async (args, context) => {
+        return result("headless_gate", await call(context, "gate.run", { checks: args.checks, timeoutMs: args.timeoutMs, sessionId: runtimeSessionId(context, args.sessionId) }, boundedTransportTimeout((args.timeoutMs ?? 120_000) + 10_000)));
     }),
-    headless_get_cooperation_instructions: tool({
-      description: "Return the fleet cooperation contract.",
-      args: {},
-      async execute() {
+    headless_get_cooperation_instructions: registryTool("headless_get_cooperation_instructions", async () => {
         return result("headless_get_cooperation_instructions", getCooperationInstructions("opencode"));
-      },
     }),
   },
 });
 
 export default { id, server };
 
-function runArgs() {
-  return {
-    backend: tool.schema.string().default("opencode"),
-    prompt: tool.schema.string(),
-    mode: tool.schema.enum(["read-only", "write"]).optional().default("read-only"),
-    model: tool.schema.string().optional(),
-    agent: tool.schema.string().optional(),
-    timeoutMs: tool.schema.number().int().positive().max(86_400_000).optional(),
-    containment: tool.schema.enum(["required", "unsafe"]).optional().default("required"),
-    authMode: authModeSchema(),
-    approvalPolicy: approvalPolicySchema(),
-  };
-}
-
 function projectTrustTool() {
-  return tool({
-    description: "Inspect native-login trust for the daemon-owned project.",
-    args: { action: tool.schema.literal("status") },
-    async execute(_args, context) {
+  return registryTool("headless_project_trust", async (_args, context) => {
       return result("headless_project_trust", await call(context, "project.trust.status", {}));
-    },
   });
 }
 
 function fleetProfileTool() {
-  return tool({
-    description: "Inspect or list durable collaborative fleet profiles.",
-    args: {
-      action: tool.schema.enum(["get", "list"]),
-      profileId: tool.schema.string().optional(),
-    },
-    async execute(args, context) {
+  return registryTool("headless_fleet_profile", async (args, context) => {
       if (args.action === "list") return result("headless_fleet_profile", await call(context, "fleet.profile.list", {}));
       return result("headless_fleet_profile", await call(context, "fleet.profile.get", { profileId: required(args.profileId, "profileId") }));
-    },
   });
 }
 
 function fleetHealthTool() {
-  return tool({
-    description: "Inspect backend login, health, rate-limit, load, and failover state.",
-    args: { profileId: tool.schema.string().optional() },
-    async execute(args, context) {
+  return registryTool("headless_fleet_health", async (args, context) => {
       return result("headless_fleet_health", await call(context, "fleet.health", compact(args)));
-    },
   });
 }
 
 function goalTool() {
-  const synthesizer = tool.schema.object({
-    kind: tool.schema.enum(["agent", "automatic", "election"]),
-    agentId: tool.schema.string().optional(),
-  });
-  return tool({
-    description: "Start, message, inspect, list, cancel, or retrieve a durable collaborative goal.",
-    args: {
-      action: tool.schema.enum(["start", "send", "status", "list", "cancel", "result"]),
-      goalId: tool.schema.string().optional(),
-      objective: tool.schema.string().optional(),
-      mode: tool.schema.enum(["read-only", "write"]).optional().default("read-only"),
-      fleetProfileId: tool.schema.string().optional(),
-      synthesizer: synthesizer.optional(),
-      // Goal-level security controls intentionally have no client-side
-      // default: omission inherits the selected fleet profile in the daemon.
-      authMode: optionalAuthModeSchema(),
-      approvalPolicy: optionalApprovalPolicySchema(),
-      autonomous: tool.schema.boolean().optional().default(false),
-      timeoutMs: tool.schema.number().int().positive().max(86_400_000).optional().default(3_600_000),
-      detach: tool.schema.boolean().optional().default(false),
-      text: tool.schema.string().optional(),
-    },
-    async execute(args, context) {
+  return registryTool("headless_goal", async (args, context) => {
       if (args.action === "list") return result("headless_goal", await call(context, "goal.list", {}));
       if (args.action === "start") {
         return result("headless_goal", await call(context, "goal.start", compact({
@@ -323,22 +171,11 @@ function goalTool() {
           ? "goal.cancel"
           : "goal.result";
       return result("headless_goal", await call(context, method, { goalId }));
-    },
   });
 }
 
 function collaborationTool() {
-  return tool({
-    description: "Read goal turns or addressed messages and acknowledge consumed messages.",
-    args: {
-      action: tool.schema.enum(["turns", "messages", "acknowledge"]),
-      goalId: tool.schema.string(),
-      afterSequence: tool.schema.number().int().nonnegative().optional().default(0),
-      limit: tool.schema.number().int().positive().max(1_000).optional().default(200),
-      messageIds: tool.schema.array(tool.schema.string()).optional(),
-      prune: tool.schema.boolean().optional().default(true),
-    },
-    async execute(args, context) {
+  return registryTool("headless_collaboration", async (args, context) => {
       if (args.action === "acknowledge") {
         return result("headless_collaboration", await call(context, "collaboration.messages.acknowledge", {
           goalId: args.goalId,
@@ -352,71 +189,95 @@ function collaborationTool() {
         afterSequence: args.afterSequence,
         limit: args.limit,
       }));
-    },
   });
 }
 
 function approvalTool() {
-  return tool({
-    description: "List approval requests visible to the attached foreground lead.",
-    args: {
-      action: tool.schema.literal("list"),
-      goalId: tool.schema.string().optional(),
-      status: tool.schema.enum(["pending", "approved", "rejected", "cancelled", "expired"]).optional(),
-    },
-    async execute(args, context) {
+  return registryTool("headless_approval", async (args, context) => {
       return result("headless_approval", await call(context, "approval.list", compact({ goalId: args.goalId, status: args.status })));
-    },
   });
 }
 
 function candidateTool() {
-  return tool({
-    description: "Inspect a gated candidate decision. Integration remains a CLI or finite-grant operation.",
-    args: {
-      action: tool.schema.literal("inspect"),
-      candidateId: tool.schema.string(),
-    },
-    async execute(args, context) {
+  return registryTool("headless_candidate", async (args, context) => {
       return result("headless_candidate", await call(context, "candidate.inspect", { candidateId: args.candidateId }));
-    },
+  });
+}
+function cooperationTool() {
+  return registryTool("headless_ask_for_work", async (args, context) => {
+    return result("headless_ask_for_work", await event(context, "ask_for_more_work", { content: args.reason ?? "Ready for more work.", meta: { completed: args.completed } }, args.sessionId));
   });
 }
 
-function authModeSchema() {
-  return tool.schema.enum(["native-login", "broker"]).optional().default("native-login");
-}
+type PluginShape = NonNullable<Parameters<typeof tool.schema.object>[0]>;
+type PluginSchema = PluginShape[string];
 
-function approvalPolicySchema() {
-  return tool.schema.enum(["ask", "auto", "bypass"]).optional().default("ask");
-}
-
-function optionalAuthModeSchema() {
-  return tool.schema.enum(["native-login", "broker"]).optional();
-}
-
-function optionalApprovalPolicySchema() {
-  return tool.schema.enum(["ask", "auto", "bypass"]).optional();
-}
-
-function artifactArgs() {
-  return {
-    kind: tool.schema.string(),
-    title: tool.schema.string(),
-    summary: tool.schema.string(),
-    status: tool.schema.enum(["passed", "failed", "blocked", "unknown", "skipped", "timed_out"]).optional().default("unknown"),
-    evidence: tool.schema.string().optional(),
-  };
-}
-
-function cooperationTool(name: string) {
+function registryTool<Name extends HeadlessToolName>(
+  name: Name,
+  execute: (args: HeadlessToolInput<Name>, context: ToolContext) => Promise<ToolResult>,
+) {
+  const definition = headlessToolDefinition(name);
   return tool({
-    description: "Signal that the authenticated worker is ready for more work.",
-    args: { completed: tool.schema.string().optional(), reason: tool.schema.string().optional() },
+    description: definition.description,
+    args: pluginToolArgs(definition.inputSchema),
     async execute(args, context) {
-      return result(name, await event(context, "ask_for_more_work", { content: args.reason ?? "Ready for more work.", meta: { completed: args.completed } }));
+      return execute(args as HeadlessToolInput<Name>, context);
     },
   });
+}
+
+function pluginToolArgs(inputSchema: Record<string, unknown>): PluginShape {
+  const properties = recordValue(inputSchema.properties, "Headless tool schema properties");
+  const required = new Set(Array.isArray(inputSchema.required) ? inputSchema.required.filter((value): value is string => typeof value === "string") : []);
+  return Object.fromEntries(Object.entries(properties).map(([name, schema]) => [
+    name,
+    pluginValueSchema(recordValue(schema, `Headless tool property ${name}`), required.has(name)),
+  ])) as PluginShape;
+}
+
+function pluginValueSchema(value: Record<string, unknown>, required: boolean): PluginSchema {
+  let schema: PluginSchema;
+  if (value.const !== undefined) {
+    if (typeof value.const !== "string") throw new Error("Headless plugin supports only string literal tool fields.");
+    schema = tool.schema.literal(value.const);
+  } else if (Array.isArray(value.enum)) {
+    const values = value.enum.filter((entry): entry is string => typeof entry === "string");
+    if (values.length !== value.enum.length || values.length === 0) throw new Error("Headless plugin tool enums must contain strings.");
+    schema = tool.schema.enum(values as [string, ...string[]]);
+  } else if (value.type === "string") {
+    let text = tool.schema.string();
+    if (typeof value.minLength === "number") text = text.min(value.minLength);
+    if (typeof value.maxLength === "number") text = text.max(value.maxLength);
+    if (typeof value.pattern === "string") text = text.regex(new RegExp(value.pattern));
+    schema = text;
+  } else if (value.type === "number" || value.type === "integer") {
+    let number = tool.schema.number();
+    if (value.type === "integer") number = number.int();
+    if (typeof value.minimum === "number") number = number.min(value.minimum);
+    if (typeof value.exclusiveMinimum === "number") number = number.gt(value.exclusiveMinimum);
+    if (typeof value.maximum === "number") number = number.max(value.maximum);
+    if (typeof value.exclusiveMaximum === "number") number = number.lt(value.exclusiveMaximum);
+    schema = number;
+  } else if (value.type === "boolean") {
+    schema = tool.schema.boolean();
+  } else if (value.type === "array") {
+    const items = recordValue(value.items, "Headless plugin array items");
+    let array = tool.schema.array(pluginValueSchema(items, true));
+    if (typeof value.minItems === "number") array = array.min(value.minItems);
+    if (typeof value.maxItems === "number") array = array.max(value.maxItems);
+    schema = array;
+  } else if (value.type === "object") {
+    schema = tool.schema.object(pluginToolArgs(value));
+  } else {
+    throw new Error(`Unsupported Headless plugin tool field schema type: ${String(value.type)}`);
+  }
+  if (value.default !== undefined) return schema.default(value.default);
+  return required ? schema : schema.optional();
+}
+
+function recordValue(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
+  return value as Record<string, unknown>;
 }
 
 const leadClients = new LeadDaemonClientPool();
@@ -447,15 +308,15 @@ async function call<T = unknown>(context: ToolContext, method: Parameters<Headle
   return (await daemon(context)).call<T>(method, params, timeoutMs);
 }
 
-function event(context: ToolContext, type: string, payload: Record<string, unknown>) {
-  return call(context, "ledger.event", { type, payload, sessionId: runtimeSessionId(context) });
+function event(context: ToolContext, type: string, payload: Record<string, unknown>, sessionId?: string) {
+  return call(context, "ledger.event", { type, payload, sessionId: runtimeSessionId(context, sessionId) });
 }
 
-async function waitForHandoff(context: ToolContext, handoffId: string, timeoutMs: number) {
+async function waitForHandoff(context: ToolContext, handoffId: string, timeoutMs: number, sessionId?: string) {
   const client = await daemon(context);
   const deadline = Date.now() + Math.min(timeoutMs, 300_000);
   while (Date.now() < deadline) {
-    const read = await client.call<{ entries?: Array<Record<string, unknown>> }>("ledger.context", { view: "raw", limit: 200, sessionId: runtimeSessionId(context) });
+    const read = await client.call<{ entries?: Array<Record<string, unknown>> }>("ledger.context", { view: "raw", limit: 200, sessionId: runtimeSessionId(context, sessionId) });
     const handled = (read.entries ?? []).filter((entry) => entry.handlesHandoffId === handoffId || (Array.isArray(entry.handlesHandoffIds) && entry.handlesHandoffIds.includes(handoffId)));
     if (handled.length) return handled;
     await Bun.sleep(50);
@@ -467,8 +328,8 @@ function runtimeCwd(context: ToolContext) {
   return context.directory || context.worktree || process.cwd();
 }
 
-function runtimeSessionId(context: ToolContext) {
-  return context.sessionID;
+function runtimeSessionId(context: ToolContext, requested?: string) {
+  return requested ?? context.sessionID;
 }
 
 function compact(value: Record<string, unknown>) {

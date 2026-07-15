@@ -29,6 +29,8 @@ Plain `grant` records project trust without allowing backend-native credentials.
 | Cost | Broker-observed and reconciled where pricing is known | `amountUsd: null` unless the CLI reports a real charge |
 | Trust requirement | Existing daemon policy/grant requirements | Project trust plus explicit unrestricted-egress acknowledgement |
 
+Headless does not embed provider list prices. Broker USD attribution requires a trusted dated pricing entry supplied by a daemon extension. With an empty pricing registry, costs remain `amountUsd: null`; a configured USD ceiling fails closed because the broker cannot safely prove the request fits it, and the daemon emits one bounded operator warning when the first affected lease is issued. Request, token, artifact, concurrency, and deadline bounds remain enforceable without USD pricing.
+
 The authentication mode is part of every run and persisted execution record. Select native mode with `--auth-mode native-login`; omission selects broker. Experimental orchestration objects retain the same field but are outside the first beta contract. A goal's execution mode is separate: `read-only` is the default, while write mode requests the leased-worktree and integration-gate path.
 
 ## Minimal auth capsules
