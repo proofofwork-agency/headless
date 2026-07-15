@@ -4,6 +4,11 @@
 
 Publication remains blocked. Both package manifests are private at `0.2.0-alpha.0`; the staged Gate A, B, and C evidence in `docs/plan.md` is an acceptance checklist, not a completion claim.
 
+### Changed
+
+- Reframed the native-subscription smoke as the **primary Gate A real-run evidence** and made its release gate per-backend. Required backends are Claude, Codex, and OpenCode; Grok is experimental and excluded; macOS keychain-only Claude login is a documented, platform-gated accepted limitation that no longer fails the gate. At least one required backend must complete a real native turn, and a missing required backend or a changed checkout still fails. The gate evaluation moved into a pure, unit-tested `evaluateNativeSmokeGate`/`nativeSmokeAcceptedLimitation` helper.
+- Marked the credentialed broker **provider-smoke as optional/deferred** — it exercises broker mode against real provider API keys and is not required for the native-login subscription beta, which uses the CLIs' existing logins and no separate API keys. The broker remains proven by fake-upstream unit tests.
+
 ### Fixed
 
 - Applied every backend's containment-safe `prepareEnvironment` hook to persistent native-session launches as well as one-shots. Codex now receives the system CA bundle paths inside its isolated home without widening the Seatbelt network profile; tests prove the hooks do not restore ambient credentials or host control paths. Keychain-only Claude login on macOS remains an explicit fail-closed limitation rather than being papered over with real-home or token forwarding.

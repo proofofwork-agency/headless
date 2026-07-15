@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } fr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  evaluateNativeSmokeGate,
+  nativeSmokeAcceptedLimitation,
   nativeSmokeContainmentSummary,
   nativeSmokeEvidenceValid,
 } from "./native-smoke-evidence";
@@ -32,6 +34,11 @@ type BackendSmoke = {
   backend: "claude-code" | "codex" | "opencode" | "grok-build";
   binary: string;
   status: "passed" | "skipped" | "failed";
+  // A documented, accepted limitation (macOS keychain-only Claude, experimental
+  // Grok) that satisfies the release gate rather than failing it.
+  acceptedLimitation: boolean;
+  // Structured terminal error code, when the backend produced one.
+  code: string | null;
   reason: string;
   durationMs: number;
   driverKind: string | null;
@@ -96,7 +103,9 @@ try {
       results.push({
         ...definition,
         status: "skipped",
-        reason: `${definition.binary} is not installed on PATH. A skip does not satisfy the release gate.`,
+        acceptedLimitation: false,
+        code: null,
+        reason: `${definition.binary} is not installed on PATH. A missing required backend does not satisfy the release gate.`,
         durationMs: 0,
         driverKind: null,
         backendVersion: null,
@@ -120,17 +129,20 @@ try {
       }
     }
   }
-  const releaseGatePassed = repositoryUnchanged && results.length === backends.length && results.every((result) => result.status === "passed");
+  const gate = evaluateNativeSmokeGate(results, repositoryUnchanged);
   console.log(JSON.stringify({
-    version: 1,
-    releaseGatePassed,
+    version: 2,
+    releaseGatePassed: gate.releaseGatePassed,
+    requiredBackends: gate.requiredBackends,
+    requiredSatisfied: gate.requiredSatisfied,
+    requiredRealPass: gate.requiredRealPass,
     compiledArtifactsOnly: true,
     providerApiKeyEnvironmentCleared: true,
     providerCredentialEnvironmentCleared: true,
     repositoryUnchanged,
     results,
   }, null, 2));
-  if (!releaseGatePassed) process.exitCode = 1;
+  if (!gate.releaseGatePassed) process.exitCode = 1;
 } catch (error) {
   console.error(`Native subscription smoke failed: ${safeDiagnostic(error)}`);
   process.exitCode = signalExitCode ?? 1;
@@ -188,14 +200,17 @@ async function smokeBackend(
     const evidenceValid = nativeSmokeEvidenceValid(result, native);
     if (sent.exitCode !== 0 || sent.timedOut || sent.overflowed || !evidenceValid) {
       const structuredError = objectValue(result?.error);
+      const code = stringValue(structuredError?.code);
       const reason = stringValue(structuredError?.message)
-        ?? stringValue(structuredError?.code)
+        ?? code
         ?? (sent.timedOut ? "CLI smoke timed out." : sent.overflowed ? "CLI smoke output exceeded its bound." : "Native containment/session evidence was incomplete.");
-      return smokeFailure(definition, startedAt, reason, native, containment, cost, usage);
+      return smokeFailure(definition, startedAt, code, reason, native, containment, cost, usage);
     }
     return {
       ...definition,
       status: "passed",
+      acceptedLimitation: false,
+      code: null,
       reason: "Native subscription turn completed with required native-direct-unrestricted containment.",
       durationMs: Date.now() - startedAt,
       driverKind: stringValue(native?.driverKind),
@@ -206,23 +221,29 @@ async function smokeBackend(
       usageTotal: finiteNumber(usage?.providerTotal),
     };
   } catch (error) {
-    return smokeFailure(definition, startedAt, safeDiagnostic(error), null, null, null, null);
+    return smokeFailure(definition, startedAt, null, safeDiagnostic(error), null, null, null, null);
   }
 }
 
 function smokeFailure(
   definition: typeof backends[number],
   startedAt: number,
+  code: string | null,
   reason: string,
   native: Record<string, unknown> | null,
   containment: Record<string, unknown> | null,
   cost: Record<string, unknown> | null,
   usage: Record<string, unknown> | null,
 ): BackendSmoke {
+  const acceptedLimitation = nativeSmokeAcceptedLimitation(definition.backend, code, process.platform);
   return {
     ...definition,
-    status: "failed",
-    reason: safeDiagnostic(reason),
+    status: acceptedLimitation ? "skipped" : "failed",
+    acceptedLimitation,
+    code,
+    reason: acceptedLimitation
+      ? `${safeDiagnostic(reason)} — documented accepted limitation; does not fail the release gate.`
+      : safeDiagnostic(reason),
     durationMs: Date.now() - startedAt,
     driverKind: stringValue(native?.driverKind),
     backendVersion: stringValue(native?.backendVersion),

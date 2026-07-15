@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+  evaluateNativeSmokeGate,
+  nativeSmokeAcceptedLimitation,
   nativeSmokeContainmentSummary,
   nativeSmokeEvidenceValid,
 } from "../scripts/native-smoke-evidence";
+
+function smokeResult(backend: string, status: string, acceptedLimitation = false) {
+  return { backend, status, acceptedLimitation };
+}
 
 describe("native subscription smoke harness", () => {
   test("accepts only canonical native-direct containment evidence", () => {
@@ -64,5 +70,70 @@ describe("native subscription smoke harness", () => {
     expect(stdout).toBe("");
     expect(stderr).toContain("Native subscription smoke is disabled");
     expect(stderr).toContain("HEADLESS_NATIVE_SMOKE=1");
+  });
+});
+
+describe("native subscription per-backend release gate", () => {
+  test("macOS keychain-only Claude is an accepted limitation and still passes the gate", () => {
+    expect(nativeSmokeAcceptedLimitation("claude-code", "NATIVE_AUTH_UNAVAILABLE", "darwin")).toBe(true);
+    const gate = evaluateNativeSmokeGate([
+      smokeResult("claude-code", "skipped", true),
+      smokeResult("codex", "passed"),
+      smokeResult("opencode", "passed"),
+      smokeResult("grok-build", "failed"),
+    ], true);
+    expect(gate.releaseGatePassed).toBe(true);
+    expect(gate.requiredBackends).toEqual(["claude-code", "codex", "opencode"]);
+  });
+
+  test("Claude auth-unavailable is NOT accepted off macOS and fails the gate", () => {
+    expect(nativeSmokeAcceptedLimitation("claude-code", "NATIVE_AUTH_UNAVAILABLE", "linux")).toBe(false);
+    const gate = evaluateNativeSmokeGate([
+      smokeResult("claude-code", "failed"),
+      smokeResult("codex", "passed"),
+      smokeResult("opencode", "passed"),
+    ], true);
+    expect(gate.releaseGatePassed).toBe(false);
+    expect(gate.requiredSatisfied).toBe(false);
+  });
+
+  test("Grok is experimental and never affects the gate", () => {
+    expect(nativeSmokeAcceptedLimitation("grok-build", "BACKEND_UNSUPPORTED", "linux")).toBe(true);
+    const gate = evaluateNativeSmokeGate([
+      smokeResult("claude-code", "passed"),
+      smokeResult("codex", "passed"),
+      smokeResult("opencode", "passed"),
+      smokeResult("grok-build", "skipped", true),
+    ], true);
+    expect(gate.releaseGatePassed).toBe(true);
+  });
+
+  test("all accepted-skips prove nothing: at least one required backend must really pass", () => {
+    const gate = evaluateNativeSmokeGate([
+      smokeResult("claude-code", "skipped", true),
+      smokeResult("codex", "skipped", true),
+      smokeResult("opencode", "skipped", true),
+    ], true);
+    expect(gate.requiredSatisfied).toBe(true);
+    expect(gate.requiredRealPass).toBe(false);
+    expect(gate.releaseGatePassed).toBe(false);
+  });
+
+  test("a missing required backend fails the gate", () => {
+    const gate = evaluateNativeSmokeGate([
+      smokeResult("codex", "passed"),
+      smokeResult("opencode", "passed"),
+    ], true);
+    expect(gate.releaseGatePassed).toBe(false);
+    expect(gate.requiredSatisfied).toBe(false);
+  });
+
+  test("a changed primary checkout fails the gate even when every backend passed", () => {
+    const gate = evaluateNativeSmokeGate([
+      smokeResult("claude-code", "passed"),
+      smokeResult("codex", "passed"),
+      smokeResult("opencode", "passed"),
+    ], false);
+    expect(gate.releaseGatePassed).toBe(false);
   });
 });
