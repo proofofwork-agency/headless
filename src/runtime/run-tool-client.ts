@@ -9,7 +9,7 @@ export type RunToolWorkerAccess = {
   expiresAt: number;
   jobId: string;
   sessionId: string;
-  operations?: RunToolOperation[];
+  operations: RunToolOperation[];
 };
 
 export const DEFAULT_RUN_TOOL_TIMEOUT_MS = 5_000;
@@ -39,7 +39,7 @@ export function installRunToolClient(worker: WorkerEnvironment, access: RunToolW
     HEADLESS_RUN_JOB_ID: access.jobId,
     HEADLESS_RUN_SESSION_ID: access.sessionId,
     HEADLESS_RUN_TOOL_TIMEOUT_MS: String(runToolCallTimeoutMs()),
-    HEADLESS_RUN_TOOL_OPERATIONS: (access.operations ?? []).join(","),
+    HEADLESS_RUN_TOOL_OPERATIONS: access.operations.join(","),
   } satisfies NodeJS.ProcessEnv;
 }
 
@@ -72,9 +72,14 @@ const relayHost = process.env.HEADLESS_RUN_TOOL_HOST;
 const relayPort = Number(process.env.HEADLESS_RUN_TOOL_PORT);
 const token = process.env.HEADLESS_RUN_TOOL_TOKEN;
 const operation = process.argv[2];
+const allowedOperations = (process.env.HEADLESS_RUN_TOOL_OPERATIONS || "").split(",").filter(Boolean);
 const hasRelay = relayHost === "127.0.0.1" && Number.isSafeInteger(relayPort) && relayPort > 0 && relayPort <= 65535;
 if ((!socketPath && !hasRelay) || !token || !operation) {
   console.error("usage: headless-run-tool <operation> '<json-params>'");
+  process.exit(2);
+}
+if (!allowedOperations.includes(operation)) {
+  console.error(\`run tool operation is not allowed by this credential: \${operation}\`);
   process.exit(2);
 }
 let params = {};
@@ -90,6 +95,7 @@ const request = JSON.stringify({ version: 1, id, token, operation, params }) + "
 const socket = hasRelay ? createConnection({ host: relayHost, port: relayPort }) : createConnection(socketPath);
 socket.setEncoding("utf8");
 let buffer = "";
+let settled = false;
 const configuredTimeoutMs = Number(process.env.HEADLESS_RUN_TOOL_TIMEOUT_MS);
 const baseTimeoutMs = Number.isSafeInteger(configuredTimeoutMs)
   ? Math.max(${MIN_RUN_TOOL_TIMEOUT_MS}, Math.min(${MAX_RUN_TOOL_TIMEOUT_MS}, configuredTimeoutMs))
@@ -102,10 +108,12 @@ const timeoutMs = operation === "run.delegate"
 const timeout = setTimeout(() => socket.destroy(new Error("run tool timeout")), timeoutMs);
 socket.once("connect", () => socket.write(request));
 socket.on("data", (chunk) => {
+  if (settled) return;
   buffer += chunk;
   if (Buffer.byteLength(buffer) > 524288) socket.destroy(new Error("run tool response exceeded limit"));
   const newline = buffer.indexOf("\\n");
   if (newline < 0) return;
+  settled = true;
   clearTimeout(timeout);
   socket.end();
   try {
@@ -113,15 +121,24 @@ socket.on("data", (chunk) => {
     if (response.id !== id) throw new Error("response id mismatch");
     if (!response.ok) throw new Error(response.error?.message || "run tool call failed");
     console.log(JSON.stringify(response.result ?? null));
-    process.exit(0);
+    process.exitCode = 0;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
+    process.exitCode = 1;
   }
 });
 socket.once("error", (error) => {
+  if (settled) return;
+  settled = true;
   clearTimeout(timeout);
   console.error(\`run tool unavailable: \${error.message}\`);
-  process.exit(1);
+  process.exitCode = 1;
+});
+socket.once("close", () => {
+  if (settled) return;
+  settled = true;
+  clearTimeout(timeout);
+  console.error("run tool unavailable: connection closed before a response");
+  process.exitCode = 1;
 });
 `;

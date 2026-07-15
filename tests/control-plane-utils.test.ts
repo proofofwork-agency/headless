@@ -11,6 +11,7 @@ import { resumableNativeSessionId } from "../src/daemon/run-execution-service";
 import { HeadlessError, toHeadlessError, toStructuredError } from "../src/runtime/headless-error";
 import { signalProcessTree, terminateProcessTree, type KillableChild } from "../src/runtime/process-tree";
 import { positiveTimeout, safeOption, supportedPlatform, UnsupportedPlatformError } from "../src/runtime/validation";
+import { schedulingWindow } from "./support/timing";
 
 const temporaryPaths: string[] = [];
 const descendantPids: number[] = [];
@@ -309,7 +310,7 @@ function temporaryDirectory(prefix: string) {
 }
 
 async function waitForFile(path: string, timeoutMs: number) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + schedulingWindow(timeoutMs);
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
     await Bun.sleep(10);

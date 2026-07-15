@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -18,6 +18,7 @@ import {
   runMcpInstall,
 } from "../src/cli";
 import { parseBudgetCommand } from "../src/cli/commands/budget";
+import { schedulingWindow } from "./support/timing";
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const cliSharedUrl = new URL("../src/cli/shared.ts", import.meta.url).href;
@@ -205,7 +206,7 @@ describe("v0.2 CLI contracts", () => {
     await Promise.race([
       readyPromise,
       child.exited.then((exitCode) => { throw new Error(`daemon exited before readiness with ${exitCode}`); }),
-      Bun.sleep(5_000).then(() => { throw new Error("daemon readiness timed out"); }),
+      Bun.sleep(schedulingWindow(5_000)).then(() => { throw new Error("daemon readiness timed out"); }),
     ]);
     child.kill("SIGTERM");
     const [exitCode, stderr] = await Promise.all([child.exited, stderrPromise]);
@@ -240,7 +241,7 @@ describe("v0.2 CLI contracts", () => {
     await Promise.race([
       readyPromise,
       child.exited.then((exitCode) => { throw new Error(`daemon exited before readiness with ${exitCode}`); }),
-      Bun.sleep(5_000).then(() => { throw new Error("daemon readiness timed out"); }),
+      Bun.sleep(schedulingWindow(5_000)).then(() => { throw new Error("daemon readiness timed out"); }),
     ]);
 
     const stopped = await runCli(["daemon", "stop", "--cwd", project], env);
@@ -255,7 +256,7 @@ describe("v0.2 CLI contracts", () => {
     expect(absent.stderr).toContain("No Headless daemon is running");
   }, 45_000);
 
-  test("session send waits for the durable daemon job before its embedded daemon exits", async () => {
+  test("session send waits for the durable daemon job and leaves its owned daemon cleanly stoppable", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-cli-session-"));
     const project = join(root, "project");
     const state = join(root, "state");
@@ -266,30 +267,67 @@ describe("v0.2 CLI contracts", () => {
     writeFileSync(backend, "#!/usr/bin/env bun\nconsole.log(JSON.stringify({type:'text',text:'session complete'}));\n");
     chmodSync(backend, 0o700);
     const env = { HEADLESS_STATE_HOME: state, PATH: `${bin}:${process.env.PATH ?? ""}`, OPENAI_API_KEY: "test-only-key" };
-    const created = await runCli(["experimental", "session", "create", "--cwd", project, "--backend", "opencode", "--model", "openai/test-model", "--auth-mode", "broker", "--unsafe-no-sandbox"], env);
-    expect(created.exitCode).toBe(0);
-    const session = JSON.parse(created.stdout) as { id: string };
+    const daemon = Bun.spawn(["bun", cliPath, "daemon", "serve", "--cwd", project, "--experimental-sessions"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...processEnv(), ...env },
+    });
+    const daemonStdout = Bun.readableStreamToText(daemon.stdout);
+    let daemonReady = false;
+    let signalReady: () => void = () => {};
+    const ready = new Promise<void>((resolve) => { signalReady = resolve; });
+    const daemonStderr = (async () => {
+      const decoder = new TextDecoder();
+      let text = "";
+      for await (const chunk of daemon.stderr) {
+        text += decoder.decode(chunk, { stream: true });
+        if (!daemonReady && text.includes("Headless daemon ready")) {
+          daemonReady = true;
+          signalReady();
+        }
+      }
+      return text + decoder.decode();
+    })();
 
-    const sending = runCli([
-      "experimental", "session", "send", "--cwd", project, "--session-id", session.id,
-      "--timeout-ms", "15000", "first request",
-    ], env);
-    const approval = await waitForPendingApproval(project, env);
-    const resolved = await runCli([
-      "experimental", "approval", "resolve", "--cwd", project, "--approval-id", approval.id,
-      "--decision", "approved", "--resolution", "Test fixture pricing is intentionally unknown.",
-    ], env);
-    expect(resolved.exitCode).toBe(0);
-    const sent = await sending;
-    expect(sent.exitCode).toBe(0);
-    const response = JSON.parse(sent.stdout) as { job: { state: string }; result: { output: string } };
-    expect(response.job.state).toBe("succeeded");
-    expect(response.result.output).toBe("session complete");
-  }, 30_000);
+    try {
+      await Promise.race([
+        ready,
+        daemon.exited.then((exitCode) => { throw new Error(`daemon exited before readiness with ${exitCode}`); }),
+        Bun.sleep(schedulingWindow(5_000)).then(() => { throw new Error("daemon readiness timed out"); }),
+      ]);
+      const created = await runCli(["experimental", "session", "create", "--cwd", project, "--backend", "opencode", "--model", "openai/test-model", "--auth-mode", "broker", "--unsafe-no-sandbox"], env);
+      expect(created.exitCode, created.stderr).toBe(0);
+      const session = JSON.parse(created.stdout) as { id: string };
+
+      const sending = runCli([
+        "experimental", "session", "send", "--cwd", project, "--session-id", session.id,
+        "--timeout-ms", "15000", "first request",
+      ], env);
+      const approval = await waitForPendingApproval(project, env);
+      const resolved = await runCli([
+        "experimental", "approval", "resolve", "--cwd", project, "--approval-id", approval.id,
+        "--decision", "approved", "--resolution", "Test fixture pricing is intentionally unknown.",
+      ], env);
+      expect(resolved.exitCode, resolved.stderr).toBe(0);
+      const sent = await sending;
+      expect(sent.exitCode, sent.stderr || sent.stdout).toBe(0);
+      const response = JSON.parse(sent.stdout) as { job: { state: string }; result: { output: string } };
+      expect(response.job.state).toBe("succeeded");
+      expect(response.result.output).toBe("session complete");
+    } finally {
+      const stopped = daemonReady ? await runCli(["daemon", "stop", "--cwd", project], env) : null;
+      const [exitCode, stderr] = await Promise.all([daemon.exited, daemonStderr, daemonStdout]);
+      rmSync(root, { recursive: true, force: true });
+      if (stopped) {
+        expect(stopped.exitCode, stopped.stderr).toBe(0);
+        expect(exitCode, stderr).toBe(143);
+      }
+    }
+  }, 60_000);
 });
 
 async function waitForPendingApproval(project: string, env: Record<string, string>) {
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + schedulingWindow(10_000);
   while (Date.now() < deadline) {
     const listed = await runCli(["experimental", "approval", "list", "--cwd", project, "--status", "pending"], env);
     if (listed.exitCode === 0) {

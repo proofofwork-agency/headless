@@ -21,6 +21,7 @@ import {
   type SessionTransportRequest,
   type SessionTransportResult,
 } from "../src/runtime/session-drivers";
+import { schedulingWindow } from "./support/timing";
 
 describe("session driver selection", () => {
   test("reports native login presence and rejects a missing auth capsule", async () => {
@@ -1274,7 +1275,7 @@ function clock(start: number) {
 }
 
 async function waitFor(predicate: () => boolean) {
-  const deadline = Date.now() + 1_000;
+  const deadline = Date.now() + schedulingWindow(1_000);
   while (!predicate()) {
     if (Date.now() >= deadline)
       throw new Error("Timed out waiting for fake executor.");

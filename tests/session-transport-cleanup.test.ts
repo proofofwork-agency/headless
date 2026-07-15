@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunSessionExecutor } from "../src/runtime/session-drivers";
+import { schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 
@@ -153,7 +154,8 @@ function open(executor: BunSessionExecutor, cwd: string) {
 }
 
 async function waitFor(predicate: () => boolean | Promise<boolean>) {
-  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+  const deadline = Date.now() + schedulingWindow(1_000);
+  while (Date.now() < deadline) {
     if (await predicate()) return;
     await Bun.sleep(1);
   }

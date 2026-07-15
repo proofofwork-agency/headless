@@ -11,6 +11,7 @@ import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { runGitStrict } from "../src/runtime/git";
 import { WorktreeLeaseStore } from "../src/runtime/worktree-leases";
 import { CandidateDecisionStore } from "../src/runtime/candidate-decision-store";
+import { schedulingAttempts } from "./support/timing";
 
 setDefaultTimeout(20_000);
 
@@ -204,7 +205,7 @@ esac
     });
 
     let goal = started.goal;
-    for (let attempt = 0; attempt < 100 && !["succeeded", "failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
+    for (let attempt = 0; attempt < schedulingAttempts(100) && !["succeeded", "failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
       await Bun.sleep(25);
       goal = await client.call<Goal>("goal.status", { goalId: goal.id });
     }
@@ -330,7 +331,7 @@ esac
     });
 
     let goal = started.goal;
-    for (let attempt = 0; attempt < 300 && !["succeeded", "failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
+    for (let attempt = 0; attempt < schedulingAttempts(300) && !["succeeded", "failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
       await Bun.sleep(25);
       goal = await client.call<Goal>("goal.status", { goalId: goal.id });
     }
@@ -408,7 +409,7 @@ esac
 
     let goal = started.goal;
     let toolApproval: { id: string; kind: string; status: string; collaborationId: string } | undefined;
-    for (let attempt = 0; attempt < 300 && !toolApproval && !["failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
+    for (let attempt = 0; attempt < schedulingAttempts(300) && !toolApproval && !["failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
       await Bun.sleep(25);
       goal = await client.call<Goal>("goal.status", { goalId: goal.id });
       const pending = await client.call<Array<{ id: string; kind: string; status: string; collaborationId: string }>>("approval.list", { status: "pending" });
@@ -422,7 +423,7 @@ esac
       resolution: "Approved the contained candidate synthesis turn.",
     });
 
-    for (let attempt = 0; attempt < 300 && goal.state !== "waiting_approval" && !["failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
+    for (let attempt = 0; attempt < schedulingAttempts(300) && goal.state !== "waiting_approval" && !["failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
       await Bun.sleep(25);
       goal = await client.call<Goal>("goal.status", { goalId: goal.id });
     }
@@ -438,7 +439,7 @@ esac
       resolution: "Reviewed the grounded candidate and approved integration.",
     });
 
-    for (let attempt = 0; attempt < 300 && !["succeeded", "failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
+    for (let attempt = 0; attempt < schedulingAttempts(300) && !["succeeded", "failed", "cancelled", "timed_out"].includes(goal.state); attempt += 1) {
       await Bun.sleep(25);
       goal = await client.call<Goal>("goal.status", { goalId: goal.id });
     }
@@ -496,7 +497,7 @@ esac
 
     await client.call("orchestrator.start");
     let oldMessages: DirectedMessage[] = [];
-    for (let attempt = 0; attempt < 50 && oldMessages.length === 0; attempt += 1) {
+    for (let attempt = 0; attempt < schedulingAttempts(50) && oldMessages.length === 0; attempt += 1) {
       await Bun.sleep(25);
       oldMessages = (await client.call<{ messages: DirectedMessage[] }>("collaboration.messages", {
         goalId: oldGoal.id,
@@ -602,7 +603,7 @@ esac
     });
 
     await client.call("orchestrator.start");
-    for (let attempt = 0; attempt < 200 && !existsSync(join(fixture.project, "idle-fixed.txt")); attempt += 1) {
+    for (let attempt = 0; attempt < schedulingAttempts(200) && !existsSync(join(fixture.project, "idle-fixed.txt")); attempt += 1) {
       await Bun.sleep(25);
     }
     expect(

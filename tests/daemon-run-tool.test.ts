@@ -6,13 +6,22 @@ import { registerBackendDefinition, unregisterBackendDefinition, type BackendDef
 import type { Job } from "../src/contracts/durable";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
-import { DARWIN_SANDBOX_EXEC, probeLinuxBwrap, probeLinuxRunToolRelay } from "../src/runtime/os-sandbox";
+import { DARWIN_SANDBOX_EXEC, probeLinuxBwrap } from "../src/runtime/os-sandbox";
 
 const ADAPTER_ID = "run-tool-contained-fixture";
 const DELEGATE_PARENT_ID = "run-tool-delegate-parent";
 const DELEGATE_CHILD_ID = "run-tool-delegate-child";
 const DELEGATE_FAILURE_ID = "run-tool-delegate-failure";
 const DELEGATE_TIMEOUT_ID = "run-tool-delegate-timeout";
+// Linux's bwrap + seccomp + loopback-to-Unix relay starts several Bun
+// processes. Under a loaded two-core runner, a cold round trip has exceeded
+// the macOS/local fixture windows without violating any product deadline.
+// Keep the child-timeout case itself at 1s; only capability fixtures get the
+// larger bounded Linux lifecycle.
+const SIMPLE_RUN_TIMEOUT_MS = process.platform === "linux" ? 60_000 : 10_000;
+const DELEGATION_PARENT_TIMEOUT_MS = process.platform === "linux" ? 180_000 : 30_000;
+const DELEGATION_CHILD_TIMEOUT_MS = process.platform === "linux" ? 120_000 : 10_000;
+const COOPERATION_TEST_TIMEOUT_MS = process.platform === "linux" ? 240_000 : 45_000;
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];
 
@@ -49,9 +58,9 @@ describe("daemon-owned worker cooperation", () => {
       backend: ADAPTER_ID,
       prompt: "Use authenticated cooperation.",
       containment: "required",
-      timeoutMs: 10_000,
+      timeoutMs: SIMPLE_RUN_TIMEOUT_MS,
     });
-    const completed = await client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 }, 15_000);
+    const completed = await client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: SIMPLE_RUN_TIMEOUT_MS }, SIMPLE_RUN_TIMEOUT_MS + 10_000);
 
     // Include the full structured result so a hosted-CI-only failure is
     // diagnosable from the log (fixture run; bounded and already redacted).
@@ -77,7 +86,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(unsafeCompleted.result?.status).toBe("failed");
     expect(preparedPrompt).toBe("Unsafe local escape hatch does not receive daemon authority.");
     expect(readdirSync(daemon.state.daemonRuntimeDir).filter((name) => name.endsWith(".tool.sock"))).toEqual([]);
-  }, 30_000);
+  }, COOPERATION_TEST_TIMEOUT_MS);
 
   test.skipIf(!strictContainmentAvailable())("runs one depth-one child and omits delegation from the child credential", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-"));
@@ -99,13 +108,13 @@ describe("daemon-owned worker cooperation", () => {
       backend: DELEGATE_PARENT_ID,
       prompt: "Delegate one bounded read.",
       containment: "required",
-      timeoutMs: 30_000,
+      timeoutMs: DELEGATION_PARENT_TIMEOUT_MS,
     });
-    const completed = await client.call<Job>("run.wait", { jobId: parent.id, timeoutMs: 30_000 }, 35_000);
+    const completed = await client.call<Job>("run.wait", { jobId: parent.id, timeoutMs: DELEGATION_PARENT_TIMEOUT_MS }, DELEGATION_PARENT_TIMEOUT_MS + 10_000);
 
     expect(completed.result?.status, JSON.stringify(completed.result, null, 2)).toBe("succeeded");
     const reply = JSON.parse(completed.result?.output ?? "null") as { ok: boolean; childJobId: string; result: { output: string } };
-    expect(reply.ok).toBe(true);
+    expect(reply.ok, JSON.stringify(reply, null, 2)).toBe(true);
     expect(reply.result.output).toContain("child completed");
     expect(reply.result.output).toContain("delegate-hidden");
     const child = daemon.jobs.get(reply.childJobId);
@@ -118,7 +127,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(ledger).toContain("worker_spawned");
     expect(ledger).toContain(reply.childJobId);
     expect(ledger).not.toContain("Child must inspect");
-  }, 45_000);
+  }, COOPERATION_TEST_TIMEOUT_MS);
 
   test.skipIf(!strictContainmentAvailable())("returns child failure as tool data and lets the parent finish", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-failure-"));
@@ -135,13 +144,13 @@ describe("daemon-owned worker cooperation", () => {
     daemons.push(daemon);
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: project, state, token });
-    const parent = await client.call<Job>("run.submit", { backend: DELEGATE_PARENT_ID, prompt: "Handle child failure.", containment: "required", timeoutMs: 30_000 });
-    const completed = await client.call<Job>("run.wait", { jobId: parent.id, timeoutMs: 30_000 }, 35_000);
-    expect(completed.result?.status).toBe("succeeded");
+    const parent = await client.call<Job>("run.submit", { backend: DELEGATE_PARENT_ID, prompt: "Handle child failure.", containment: "required", timeoutMs: DELEGATION_PARENT_TIMEOUT_MS });
+    const completed = await client.call<Job>("run.wait", { jobId: parent.id, timeoutMs: DELEGATION_PARENT_TIMEOUT_MS }, DELEGATION_PARENT_TIMEOUT_MS + 10_000);
+    expect(completed.result?.status, JSON.stringify(completed.result, null, 2)).toBe("succeeded");
     const reply = JSON.parse(completed.result?.output ?? "null") as { ok: boolean; childJobId: string; result: { status: string }; error: { code: string } };
     expect(reply).toMatchObject({ ok: false, result: { status: "failed" }, error: { code: "PROCESS_ERROR" } });
     expect(daemon.jobs.get(reply.childJobId)?.state).toBe("failed");
-  }, 45_000);
+  }, COOPERATION_TEST_TIMEOUT_MS);
 
   test.skipIf(!strictContainmentAvailable())("returns child timeout as tool data inside the parent deadline", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-timeout-"));
@@ -158,12 +167,12 @@ describe("daemon-owned worker cooperation", () => {
     daemons.push(daemon);
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: project, state, token });
-    const parent = await client.call<Job>("run.submit", { backend: DELEGATE_PARENT_ID, prompt: "Handle child timeout.", containment: "required", timeoutMs: 30_000 });
-    const completed = await client.call<Job>("run.wait", { jobId: parent.id, timeoutMs: 30_000 }, 35_000);
-    expect(completed.result?.status).toBe("succeeded");
+    const parent = await client.call<Job>("run.submit", { backend: DELEGATE_PARENT_ID, prompt: "Handle child timeout.", containment: "required", timeoutMs: DELEGATION_PARENT_TIMEOUT_MS });
+    const completed = await client.call<Job>("run.wait", { jobId: parent.id, timeoutMs: DELEGATION_PARENT_TIMEOUT_MS }, DELEGATION_PARENT_TIMEOUT_MS + 10_000);
+    expect(completed.result?.status, JSON.stringify(completed.result, null, 2)).toBe("succeeded");
     const reply = JSON.parse(completed.result?.output ?? "null") as { ok: boolean; result: { status: string }; error: { code: string } };
     expect(reply).toMatchObject({ ok: false, result: { status: "timed_out" }, error: { code: "TIMED_OUT" } });
-  }, 45_000);
+  }, COOPERATION_TEST_TIMEOUT_MS);
 });
 
 function fixtureAdapter(capturePrompt: (prompt: string) => void): BackendDefinition {
@@ -200,7 +209,7 @@ console.log(JSON.stringify({ task: results[0], note: results[1], leaked: process
   };
 }
 
-function delegatingParentAdapter(target = DELEGATE_CHILD_ID, timeoutMs = 10_000): BackendDefinition {
+function delegatingParentAdapter(target = DELEGATE_CHILD_ID, timeoutMs = DELEGATION_CHILD_TIMEOUT_MS): BackendDefinition {
   const script = String.raw`
 const child = Bun.spawn(["headless-run-tool", "run.delegate", JSON.stringify({ backend: "${target}", prompt: "Child must inspect the project without mutation.", timeoutMs: ${timeoutMs} })], { stdout: "pipe", stderr: "pipe" });
 const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
@@ -238,6 +247,9 @@ function delegationFixture(id: string, script: string): BackendDefinition {
 
 function strictContainmentAvailable() {
   if (process.platform === "darwin") return existsSync(DARWIN_SANDBOX_EXEC);
-  if (process.platform === "linux") return probeLinuxBwrap().ok && probeLinuxRunToolRelay().ok;
+  // The real cooperation tests below are the transport proof. Re-running the
+  // diagnostic relay probe once per test both duplicates that proof and made
+  // test registration consume four independent 15s windows under CI load.
+  if (process.platform === "linux") return probeLinuxBwrap().ok;
   return false;
 }
