@@ -101,5 +101,6 @@ export type DaemonRouteContext = {
   pauseLoop: (loopId: string, credential: AuthenticatedCredential) => unknown;
   resumeLoop: (loopId: string, credential: AuthenticatedCredential) => unknown;
   cancelLoop: (loopId: string, credential: AuthenticatedCredential) => unknown;
+  verifyLedger: (evidence: boolean) => unknown;
   repairLedgerTail: (principal: string) => unknown;
 };

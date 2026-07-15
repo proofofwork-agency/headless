@@ -24,7 +24,7 @@ import { JobStore } from "./job-store";
 import { ProviderBroker } from "../broker/server";
 import { getProvider } from "../broker/providers";
 import { PersistentSessionStore } from "../runtime/persistent-sessions";
-import { ledgerIntegrityOptionsFromEnv, repairLedgerPartialTail } from "../runtime/ledger-v2";
+import { ledgerIntegrityOptionsFromEnv, repairLedgerPartialTail, verifyLedgerChain } from "../runtime/ledger-v2";
 import { NativeSessionManager } from "../runtime/native-session-manager";
 import { ProjectTrustStore } from "../runtime/project-trust-store";
 import { FleetProfileStore } from "../runtime/fleet-profile-store";
@@ -1166,6 +1166,12 @@ export class HeadlessDaemon {
       pauseLoop: (loopId, credential) => this.loopService.pause(loopId, credential.principal),
       resumeLoop: (loopId, credential) => this.loopService.resume(loopId, credential.principal),
       cancelLoop: (loopId, credential) => this.loopService.cancel(loopId, credential.principal),
+      verifyLedger: (evidence) => verifyLedgerChain({
+        ledgerPath: this.state.ledgerPath,
+        projectId: this.state.projectId,
+        ...ledgerIntegrityOptionsFromEnv(),
+        ...(evidence ? { evidenceRoot: this.state.canonicalProjectRoot } : {}),
+      }),
       repairLedgerTail: (principal) => repairLedgerPartialTail({
         ledgerPath: this.state.ledgerPath,
         readModelPath: this.state.readModelPath,

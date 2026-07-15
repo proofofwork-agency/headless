@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { atomicWriteFile } from "../src/runtime/atomic-write";
+import { join, resolve } from "node:path";
 import {
   evaluateNativeSmokeGate,
   nativeSmokeAcceptedLimitation,
   nativeSmokeContainmentSummary,
   nativeSmokeEvidenceValid,
+  releaseEvidenceProvenance,
+  writeAnchoredReleaseEvidence,
 } from "./native-smoke-evidence";
 
 const OPT_IN_ENV = "HEADLESS_NATIVE_SMOKE";
@@ -145,9 +146,15 @@ try {
     repositoryUnchanged,
     results,
   };
-  mkdirSync(dirname(EVIDENCE_PATH), { recursive: true, mode: 0o700 });
-  atomicWriteFile(EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
-  console.log(JSON.stringify(evidence, null, 2));
+  const recorded = await writeAnchoredReleaseEvidence({
+    path: EVIDENCE_PATH,
+    evidence,
+    provenance: releaseEvidenceProvenance({
+      backendVersions: Object.fromEntries(results.map((result) => [result.backend, result.backendVersion])),
+    }),
+  });
+  console.log(JSON.stringify(recorded.document, null, 2));
+  console.error(`release evidence anchored at ledger sequence ${recorded.receipt.sequence} (${recorded.receipt.hash})`);
   if (!gate.releaseGatePassed) process.exitCode = 1;
 } catch (error) {
   console.error(`Native subscription smoke failed: ${safeDiagnostic(error)}`);

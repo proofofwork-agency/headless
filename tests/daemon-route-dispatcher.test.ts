@@ -74,6 +74,7 @@ describe("typed daemon route dispatcher", () => {
       "ledger.note": { text: "note" },
       "ledger.artifact": { kind: "test", title: "Artifact", summary: "summary" },
       "ledger.context": {},
+      "ledger.verify": {},
       "ledger.task": {},
       "ledger.proposeFinal": { summary: "done", evidence: "tests" },
       "ledger.event": { type: "message", payload: { content: "hello" } },

@@ -30,5 +30,6 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | `launch` | Experimental | — | `experimental launch <backend> [options]        Compatibility one-shot routed through the daemon.` |
 | `skill` | Experimental | skills | `experimental skill | skills <list|inspect|import|enable|use|revoke> [options]` |
 | `loop` | Experimental | — | `experimental loop <start|list|status|pause|resume|cancel> --confirm [finite policy options]` |
-| `ledger` | Experimental | — | `experimental ledger repair-tail --confirm [--cwd dir]   Admin-only partial-tail recovery.` |
+| `verify` | Beta 1 | — | `verify [--evidence] [--json] [--cwd dir]   Verify the tamper-evident ledger and optional evidence files.` |
+| `ledger` | Experimental | — | `experimental ledger <verify [--evidence] [--json] | repair-tail --confirm> [--cwd dir]` |
 | `budget` | Experimental | — | `experimental budget <list|upsert|linked-hold inspect|linked-hold quarantine> [options] [--cwd dir]` |

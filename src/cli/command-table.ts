@@ -17,7 +17,7 @@ import { runWorkflowCommand } from "./commands/workflow";
 import { COMMAND_SPECS, resolveCommandSpec, type CliCommandName } from "./command-specs";
 import { runSkillCommand } from "./commands/skill";
 import { runLoopCommand } from "./commands/loop";
-import { runLedgerCommand } from "./commands/ledger";
+import { runLedgerCommand, runVerifyCommand } from "./commands/ledger";
 import { runLeadCommand } from "./commands/lead";
 import { runBudgetCommand } from "./commands/budget";
 import { UNIFIED_COMMAND_REGISTRY } from "../command-registry";
@@ -54,6 +54,7 @@ const handlers = {
   ledger: runLedgerCommand,
   lead: runLeadCommand,
   budget: runBudgetCommand,
+  verify: runVerifyCommand,
 } satisfies Record<CliCommandName, CliCommandHandler>;
 
 export const COMMAND_TABLE = new Map(UNIFIED_COMMAND_REGISTRY.cli.map(({ source: spec }) => [spec.name, {

@@ -1,3 +1,122 @@
+import { createHash } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { platform as osPlatform, arch } from "node:process";
+import { spawnSync } from "node:child_process";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { connectOrStartDaemon } from "../src/daemon/connect";
+import { atomicWriteFile } from "../src/runtime/atomic-write";
+import {
+  ReleaseEvidenceProvenanceSchema,
+  releaseEvidenceArtifact,
+  type ReleaseEvidenceProvenance,
+} from "../src/runtime/release-evidence-anchor";
+import { HEADLESS_VERSION } from "../src/version";
+
+const REPOSITORY_ROOT = resolve(import.meta.dir, "..");
+const BACKEND_BINARIES = {
+  "claude-code": "claude",
+  codex: "codex",
+  opencode: "opencode",
+  "grok-build": "grok",
+} as const;
+
+export function releaseEvidenceProvenance(options: {
+  repositoryRoot?: string;
+  generatedAt?: string;
+  commit?: string | null;
+  backendVersions?: Record<string, string | null>;
+} = {}): ReleaseEvidenceProvenance {
+  const repositoryRoot = options.repositoryRoot ?? REPOSITORY_ROOT;
+  return ReleaseEvidenceProvenanceSchema.parse({
+    generatedAt: options.generatedAt ?? new Date().toISOString(),
+    commit: options.commit === undefined ? repositoryCommit(repositoryRoot) : options.commit,
+    platform: `${osPlatform}-${arch}`,
+    headlessVersion: HEADLESS_VERSION,
+    backendVersions: boundedBackendVersions(options.backendVersions ?? probeBackendVersions()),
+  });
+}
+
+export function writeReleaseEvidenceFile<T extends Record<string, unknown>>(options: {
+  path: string;
+  evidence: T;
+  provenance?: ReleaseEvidenceProvenance;
+  repositoryRoot?: string;
+}) {
+  const provenance = options.provenance ?? releaseEvidenceProvenance({ repositoryRoot: options.repositoryRoot });
+  const document = { ...options.evidence, provenance };
+  const bytes = `${JSON.stringify(document, null, 2)}\n`;
+  mkdirSync(dirname(options.path), { recursive: true, mode: 0o700 });
+  atomicWriteFile(options.path, bytes, { mode: 0o600 });
+  return {
+    document,
+    bytes,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+export async function writeAnchoredReleaseEvidence<T extends Record<string, unknown>>(options: {
+  path: string;
+  evidence: T & { releaseGatePassed: boolean };
+  repositoryRoot?: string;
+  anchorRoot?: string;
+  provenance?: ReleaseEvidenceProvenance;
+}) {
+  const repositoryRoot = resolve(options.repositoryRoot ?? REPOSITORY_ROOT);
+  const anchorRoot = resolve(options.anchorRoot ?? process.env.HEADLESS_EVIDENCE_ANCHOR_ROOT ?? repositoryRoot);
+  const written = writeReleaseEvidenceFile({
+    path: options.path,
+    evidence: options.evidence,
+    provenance: options.provenance,
+    repositoryRoot,
+  });
+  const relativePath = relative(anchorRoot, resolve(options.path)).split(sep).join("/");
+  if (!relativePath || relativePath.startsWith("../") || isAbsolute(relativePath)) {
+    throw new Error(`Release-evidence path must be inside its explicit anchor root: ${options.path}`);
+  }
+  // Deliberately do not pass the smoke's disposable child environment. This
+  // authenticates to (or starts) the repository project's normal daemon and
+  // leaves that operator-owned daemon running after the opt-in smoke exits.
+  const client = await connectOrStartDaemon({ projectRoot: anchorRoot });
+  const anchor = releaseEvidenceArtifact({
+    relativePath,
+    sha256: written.sha256,
+    provenance: written.document.provenance,
+    releaseGatePassed: options.evidence.releaseGatePassed,
+  });
+  const receipt = await client.call<{ sequence: number; hash: string }>("ledger.artifact", anchor);
+  return { ...written, relativePath, receipt };
+}
+
+function repositoryCommit(repositoryRoot: string) {
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    timeout: 2_000,
+    maxBuffer: 16_384,
+  });
+  const value = result.status === 0 ? result.stdout.trim().toLowerCase() : "";
+  return /^[a-f0-9]{40,64}$/.test(value) ? value : null;
+}
+
+function probeBackendVersions() {
+  return Object.fromEntries(Object.entries(BACKEND_BINARIES).map(([backend, binary]) => {
+    const result = spawnSync(binary, ["--version"], {
+      encoding: "utf8",
+      timeout: 2_000,
+      maxBuffer: 16_384,
+    });
+    const value = result.status === 0 ? `${result.stdout}\n${result.stderr}`.trim().slice(0, 256) : "";
+    return [backend, value || null];
+  }));
+}
+
+function boundedBackendVersions(values: Record<string, string | null>) {
+  return Object.fromEntries(Object.entries(values).slice(0, 32).map(([backend, version]) => [
+    backend.slice(0, 128),
+    version === null ? null : version.slice(0, 256),
+  ]));
+}
+
 export function nativeSmokeEvidenceValid(
   result: Record<string, unknown> | null,
   native: Record<string, unknown> | null,

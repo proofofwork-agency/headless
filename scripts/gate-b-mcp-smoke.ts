@@ -1,13 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { RunEvent, RunResult } from "../src/contracts/run";
 import type { Job } from "../src/contracts/durable";
 import { connectExistingDaemon } from "../src/daemon/connect";
-import { atomicWriteFile } from "../src/runtime/atomic-write";
+import { writeAnchoredReleaseEvidence, writeReleaseEvidenceFile } from "./native-smoke-evidence";
 
 const OPT_IN_ENV = "HEADLESS_GATE_B_SMOKE";
 const LEAD_HOST = "codex";
@@ -236,7 +236,7 @@ async function main() {
         observerTerminalCompletionsMatched: 0,
       },
     };
-    writeEvidence(evidence);
+    writeProvisionalEvidence(evidence);
     const traceEvidence = [
       `lead=${LEAD_HOST}`,
       ...deliberation.jobs.map((job) => `deliberation:${job.jobId}:${job.backend}:${job.result.status}`),
@@ -303,8 +303,9 @@ async function main() {
       observerEventsMatched: projection.matchedJobs,
       observerTerminalCompletionsMatched: projection.terminalJobs,
     };
-    writeEvidence(evidence);
-    console.log(JSON.stringify(evidence, null, 2));
+    const recorded = await writeAnchoredReleaseEvidence({ path: EVIDENCE_PATH, evidence });
+    console.log(JSON.stringify(recorded.document, null, 2));
+    console.error(`release evidence anchored at ledger sequence ${recorded.receipt.sequence} (${recorded.receipt.hash})`);
   } catch (error) {
     console.error(`Gate B MCP smoke failed: ${safeDiagnostic(error)}`);
     process.exitCode = signalExitCode ?? 1;
@@ -552,9 +553,8 @@ export function daemonStopExitWasGraceful(exitCode: number | null, signalCode: s
   return exitCode === 0 || exitCode === 143 || signalCode === "SIGTERM";
 }
 
-function writeEvidence(evidence: GateBEvidence) {
-  mkdirSync(dirname(EVIDENCE_PATH), { recursive: true, mode: 0o700 });
-  atomicWriteFile(EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+function writeProvisionalEvidence(evidence: GateBEvidence) {
+  writeReleaseEvidenceFile({ path: EVIDENCE_PATH, evidence });
 }
 
 async function cleanupOwnedDaemon(daemon: ReturnType<typeof startDaemon>, timeoutMs: number) {

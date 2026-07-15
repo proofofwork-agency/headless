@@ -47,7 +47,7 @@ describe("v0.2 CLI contracts", () => {
     const help = renderHelp();
     const experimentalHelp = renderHelp(true);
     for (const spec of COMMAND_SPECS) if ("valueFlags" in spec) for (const flag of spec.valueFlags) expect(VALUE_FLAGS.has(flag)).toBe(true);
-    for (const command of ["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp", "tui"]) {
+    for (const command of ["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp", "tui", "verify"]) {
       const spec = COMMAND_SPECS.find((candidate) => candidate.name === command);
       expect(spec && "help" in spec ? help : "").toContain(`  ${spec && "help" in spec ? spec.help : ""}`);
     }
@@ -60,6 +60,7 @@ describe("v0.2 CLI contracts", () => {
     expect(parseCliInvocation(["experimental", "session"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "session")! });
     expect(parseCliInvocation(["mcp", "status", "codex"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "mcp")! });
     expect(parseCliInvocation(["tui"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "tui")! });
+    expect(parseCliInvocation(["verify", "--evidence"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "verify")! });
     expect(parseCliInvocation(["exec", "--version", "--help"])).toEqual({ kind: "help" });
     expect(parseCliInvocation(["missing"])).toEqual({ kind: "unknown", name: "missing" });
   });

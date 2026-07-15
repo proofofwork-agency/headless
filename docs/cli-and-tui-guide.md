@@ -47,6 +47,18 @@ headless doctor --cwd "$PROJECT"
 
 External state is keyed by the canonical project path. `init` must not edit the checkout or `.gitignore`.
 
+## Verify the ledger and recorded evidence
+
+```bash
+headless verify --cwd "$PROJECT"
+headless verify --evidence --json --cwd "$PROJECT"
+```
+
+The fast form verifies the complete sequence/hash/project/HMAC chain. The
+evidence form also hashes each release-evidence file named by its latest
+authenticated ledger anchor. Both exit non-zero on failure; `--json` emits the
+structured first break or evidence mismatch for auditors and automation.
+
 ## Configure and attach the foreground lead
 
 The recommended Codex path initializes external state, installs MCP, then binds the lead:

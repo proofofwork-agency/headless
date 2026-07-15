@@ -19,6 +19,7 @@ import { ProjectIdSchema } from "../contracts/common";
 import { redactDeep } from "./redaction";
 import { safeJsonParse } from "./safe-json";
 import { atomicAppendFile, atomicWriteFile } from "./atomic-write";
+import { verifyReleaseEvidenceAnchors, type ReleaseEvidenceVerification } from "./release-evidence-anchor";
 
 const MAX_LEDGER_EVENT_BYTES = 1_000_000;
 const LOCK_TIMEOUT_MS = 10_000;
@@ -108,6 +109,16 @@ export type LedgerV2Options = {
   activeHmacKeyId?: string;
 };
 
+export type LedgerVerificationVerdict = {
+  ok: boolean;
+  recordsChecked: number;
+  head: { sequence: number; hash: string } | null;
+  integrity: { algorithm: "sha256" | "hmac-sha256"; keyIds: string[] };
+  firstBreakAt?: { sequence: number; reason: string };
+  reason?: string;
+  evidence?: ReleaseEvidenceVerification;
+};
+
 export function ledgerIntegrityOptionsFromEnv(env: NodeJS.ProcessEnv = process.env) {
   let hmacKeyring: Record<string, string> | undefined;
   if (env.HEADLESS_LEDGER_KEYS) {
@@ -127,9 +138,12 @@ type LedgerIntegrityKeys = {
 };
 
 export class LedgerV2IntegrityError extends Error {
-  constructor(message: string) {
+  readonly breakSequence?: number;
+
+  constructor(message: string, breakSequence?: number) {
     super(message);
     this.name = "LedgerV2IntegrityError";
+    this.breakSequence = breakSequence;
   }
 }
 
@@ -555,23 +569,109 @@ export function repairLedgerPartialTail(options: LedgerV2Options & { backupPath?
   return { backupPath: repair.backupPath, truncatedBytes: repair.truncatedBytes, recovery };
 }
 
+/**
+ * Auditor-facing full-chain verification. Integrity failures are data, not
+ * exceptions; filesystem failures still throw so callers cannot mistake an
+ * unreadable ledger for a broken or empty one.
+ */
+export function verifyLedgerChain(
+  options: Pick<LedgerV2Options, "ledgerPath" | "projectId" | "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId"> & {
+    evidenceRoot?: string;
+  },
+): LedgerVerificationVerdict {
+  let keys: LedgerIntegrityKeys;
+  try {
+    keys = ledgerIntegrityKeys(options);
+  } catch (error) {
+    return brokenLedgerVerdict([], 1, messageOf(error));
+  }
+  if (!existsSync(options.ledgerPath)) return intactLedgerVerdict([], options.evidenceRoot);
+
+  const text = readFileSync(options.ledgerPath, "utf8");
+  const lines = text.split("\n");
+  const partial = lines.pop() ?? "";
+  const records: LedgerRecordV2[] = [];
+  try {
+    scanVerifiedLedgerLines(lines, options.projectId, keys, (record) => records.push(record));
+  } catch (error) {
+    if (!(error instanceof LedgerV2IntegrityError)) {
+      return brokenLedgerVerdict(records, records.length + 1, messageOf(error));
+    }
+    return brokenLedgerVerdict(records, error.breakSequence ?? records.length + 1, error.message);
+  }
+  if (partial.length > 0) {
+    return brokenLedgerVerdict(records, records.length + 1, "Ledger ends with an incomplete JSON line.");
+  }
+  return intactLedgerVerdict(records, options.evidenceRoot);
+}
+
+function intactLedgerVerdict(records: LedgerRecordV2[], evidenceRoot?: string): LedgerVerificationVerdict {
+  const evidence = evidenceRoot === undefined ? undefined : verifyReleaseEvidenceAnchors(records, evidenceRoot);
+  const evidenceOk = evidence === undefined
+    || (evidence.mismatched === 0 && evidence.missing === 0 && evidence.malformed === 0);
+  return {
+    ok: evidenceOk,
+    recordsChecked: records.length,
+    head: records.length === 0 ? null : { sequence: records.at(-1)!.sequence, hash: records.at(-1)!.hash },
+    integrity: ledgerIntegritySummary(records),
+    ...(evidence ? { evidence } : {}),
+    ...(!evidenceOk ? { reason: "One or more release-evidence files do not match their latest durable ledger anchor." } : {}),
+  };
+}
+
+function brokenLedgerVerdict(records: LedgerRecordV2[], sequence: number, reason: string): LedgerVerificationVerdict {
+  return {
+    ok: false,
+    recordsChecked: records.length,
+    head: records.length === 0 ? null : { sequence: records.at(-1)!.sequence, hash: records.at(-1)!.hash },
+    integrity: ledgerIntegritySummary(records),
+    firstBreakAt: { sequence, reason },
+    reason,
+  };
+}
+
+function ledgerIntegritySummary(records: readonly LedgerRecordV2[]) {
+  const keyIds = [...new Set(records.flatMap((record) => record.integrity.keyId ? [record.integrity.keyId] : []))];
+  return {
+    algorithm: records.some((record) => record.integrity.algorithm === "hmac-sha256")
+      ? "hmac-sha256" as const
+      : "sha256" as const,
+    keyIds,
+  };
+}
+
 function scanVerifiedLedgerText(text: string, projectId: string, keys: LedgerIntegrityKeys) {
+  return scanVerifiedLedgerLines(text.split("\n"), projectId, keys);
+}
+
+function scanVerifiedLedgerLines(
+  lines: readonly string[],
+  projectId: string,
+  keys: LedgerIntegrityKeys,
+  onRecord?: (record: LedgerRecordV2) => void,
+) {
   let sequence = 0;
   let previousHash: string | null = null;
-  for (const line of text.split("\n")) {
+  let hmacSeen = false;
+  for (const line of lines) {
     if (!line.trim()) continue;
     if (Buffer.byteLength(line) > MAX_LEDGER_EVENT_BYTES) {
-      throw new LedgerV2IntegrityError(`Ledger line exceeds ${MAX_LEDGER_EVENT_BYTES} bytes.`);
+      throw new LedgerV2IntegrityError(`Ledger line exceeds ${MAX_LEDGER_EVENT_BYTES} bytes.`, sequence + 1);
     }
     let record: LedgerRecordV2;
     try {
       record = LedgerRecordV2Schema.parse(safeJsonParse(line));
     } catch (error) {
-      throw new LedgerV2IntegrityError(`Invalid v2 ledger record after sequence ${sequence}: ${messageOf(error)}`);
+      throw new LedgerV2IntegrityError(`Invalid v2 ledger record after sequence ${sequence}: ${messageOf(error)}`, sequence + 1);
     }
     verifyRecord(record, sequence + 1, previousHash, projectId, keys);
+    if (hmacSeen && record.integrity.algorithm === "sha256") {
+      throw new LedgerV2IntegrityError(`Refusing unsigned SHA downgrade at sequence ${record.sequence}.`, record.sequence);
+    }
+    if (record.integrity.algorithm === "hmac-sha256") hmacSeen = true;
     sequence = record.sequence;
     previousHash = record.hash;
+    onRecord?.(record);
   }
   return sequence;
 }
@@ -583,12 +683,12 @@ function verifyRecord(
   projectId: string,
   keys: LedgerIntegrityKeys,
 ) {
-  if (record.sequence !== expectedSequence) throw new LedgerV2IntegrityError(`Expected sequence ${expectedSequence}, got ${record.sequence}.`);
-  if (record.previousHash !== expectedPreviousHash) throw new LedgerV2IntegrityError(`Previous hash mismatch at sequence ${record.sequence}.`);
-  if (record.projectId !== projectId) throw new LedgerV2IntegrityError(`Project ID mismatch at sequence ${record.sequence}.`);
+  if (record.sequence !== expectedSequence) throw new LedgerV2IntegrityError(`Expected sequence ${expectedSequence}, got ${record.sequence}.`, expectedSequence);
+  if (record.previousHash !== expectedPreviousHash) throw new LedgerV2IntegrityError(`Previous hash mismatch at sequence ${record.sequence}.`, record.sequence);
+  if (record.projectId !== projectId) throw new LedgerV2IntegrityError(`Project ID mismatch at sequence ${record.sequence}.`, record.sequence);
   const { hash, ...withoutHash } = record;
   const key = integrityKey(record.integrity, keys, record.sequence);
-  if (hash !== hashRecord(withoutHash, key)) throw new LedgerV2IntegrityError(`Hash mismatch at sequence ${record.sequence}.`);
+  if (hash !== hashRecord(withoutHash, key)) throw new LedgerV2IntegrityError(`Hash mismatch at sequence ${record.sequence}.`, record.sequence);
 }
 
 function hashRecord(record: LedgerRecordWithoutHash, hmacKey?: string) {
@@ -623,17 +723,18 @@ function integrityKey(
 ) {
   if (integrity.algorithm === "sha256") {
     if (integrity.keyId !== null) {
-      throw new LedgerV2IntegrityError(`SHA record${sequence ? ` at sequence ${sequence}` : ""} must not declare a key id.`);
+      throw new LedgerV2IntegrityError(`SHA record${sequence ? ` at sequence ${sequence}` : ""} must not declare a key id.`, sequence);
     }
     return undefined;
   }
   if (!integrity.keyId) {
-    throw new LedgerV2IntegrityError(`HMAC record${sequence ? ` at sequence ${sequence}` : ""} is missing its key id.`);
+    throw new LedgerV2IntegrityError(`HMAC record${sequence ? ` at sequence ${sequence}` : ""} is missing its key id.`, sequence);
   }
   const key = keys.keyring.get(integrity.keyId);
   if (!key) {
     throw new LedgerV2IntegrityError(
       `HMAC record${sequence ? ` at sequence ${sequence}` : ""} declares unknown key id ${integrity.keyId}.`,
+      sequence,
     );
   }
   return key;
@@ -918,28 +1019,13 @@ function scanVerifiedLedger(path: string, projectId: string, keys: LedgerIntegri
   const text = readFileSync(path, "utf8");
   const lines = text.split("\n");
   lines.pop(); // A partial final line is buffered by refresh and is not visible.
-  let sequence = 0;
-  let previousHash: string | null = null;
   const seen = new Set<string>();
   const events: LedgerRecordV2[] = [];
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    if (Buffer.byteLength(line) > MAX_LEDGER_EVENT_BYTES) {
-      throw new LedgerV2IntegrityError(`Ledger line exceeds ${MAX_LEDGER_EVENT_BYTES} bytes.`);
-    }
-    let record: LedgerRecordV2;
-    try {
-      record = LedgerRecordV2Schema.parse(safeJsonParse(line));
-    } catch (error) {
-      throw new LedgerV2IntegrityError(`Invalid v2 ledger record after sequence ${sequence}: ${messageOf(error)}`);
-    }
-    verifyRecord(record, sequence + 1, previousHash, projectId, keys);
-    sequence = record.sequence;
-    previousHash = record.hash;
-    if (seen.has(record.eventId)) continue;
+  scanVerifiedLedgerLines(lines, projectId, keys, (record) => {
+    if (seen.has(record.eventId)) return;
     seen.add(record.eventId);
     events.push(record);
-  }
+  });
   return events;
 }
 

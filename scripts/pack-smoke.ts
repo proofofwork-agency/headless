@@ -125,10 +125,11 @@ try {
   ].join(" ")], installRoot);
 
   await verifyInstalledTui(installRoot);
+  await verifyInstalledLedgerVerifier(installRoot, scratch);
 
   await verifyInstalledExtensionDaemon(installRoot, scratch);
 
-  console.log(`pack smoke passed: ${rootEntries.length} root files, ${pluginEntries.length} plugin files, installed CLI/npm-link/doctor/TUI/MCP/plugin/extensions verified`);
+  console.log(`pack smoke passed: ${rootEntries.length} root files, ${pluginEntries.length} plugin files, installed CLI/npm-link/doctor/verifier/TUI/MCP/plugin/extensions verified`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }
@@ -223,6 +224,26 @@ async function verifyInstalledTui(installRoot: string) {
   const tui = await import(`${moduleUrl}?pack-smoke=${randomUUID()}`) as Record<string, unknown>;
   if (typeof tui.App !== "function" || typeof tui.runTui !== "function") {
     throw new Error("Packed TUI module does not export App and runTui functions.");
+  }
+}
+
+async function verifyInstalledLedgerVerifier(installRoot: string, scratch: string) {
+  const project = join(scratch, "verify-project");
+  const stateHome = join(scratch, "verify-state");
+  const runtimeHome = join("/tmp", `headless-pack-verify-${process.pid}-${randomUUID().slice(0, 8)}`);
+  mkdirSync(project, { recursive: true });
+  mkdirSync(runtimeHome, { recursive: true, mode: 0o700 });
+  const binary = join(installRoot, "node_modules", ".bin", "headless");
+  const env = { HEADLESS_STATE_HOME: stateHome, HEADLESS_RUNTIME_HOME: runtimeHome };
+  try {
+    const output = await run([binary, "verify", "--json", "--cwd", project], installRoot, 15_000, undefined, env);
+    const verdict = JSON.parse(output) as { ok?: unknown; recordsChecked?: unknown };
+    if (verdict.ok !== true || typeof verdict.recordsChecked !== "number") {
+      throw new Error("Installed stable verifier did not return a clean structured verdict.");
+    }
+  } finally {
+    await run([binary, "daemon", "stop", "--cwd", project], installRoot, 10_000, undefined, env).catch(() => {});
+    rmSync(runtimeHome, { recursive: true, force: true });
   }
 }
 

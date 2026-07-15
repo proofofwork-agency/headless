@@ -131,6 +131,8 @@ export async function runIsolatedCliAudit(): Promise<AuditResult[]> {
     { id: "mcp:status-grok", command: "mcp", args: ["mcp", "status", "grok"], expected: "PASS" },
     { id: "skill:list", command: "skill", args: ["experimental", "skill", "list", "--cwd", project], expected: "PASS" },
     { id: "loop:list", command: "loop", args: ["experimental", "loop", "list", "--cwd", project], expected: "PASS" },
+    { id: "verify", command: "verify", args: ["verify", "--json", "--cwd", project], expected: "PASS" },
+    { id: "ledger:verify", command: "ledger", args: ["experimental", "ledger", "verify", "--json", "--cwd", project], expected: "PASS" },
     { id: "ledger:confirmation", command: "ledger", args: ["experimental", "ledger", "repair-tail", "--cwd", project], expected: "EXPECTED_REJECTION", expectedError: "--confirm" },
     { id: "budget:upsert", command: "budget", args: ["experimental", "budget", "upsert", "--id", "audit-budget", "--max-requests", "8", "--max-cost-usd", "5", "--cwd", project], expected: "PASS" },
     { id: "budget:list", command: "budget", args: ["experimental", "budget", "list", "--cwd", project], expected: "PASS" },
