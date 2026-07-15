@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BudgetSchema, type Budget } from "../contracts/durable";
 import { IdentifierSchema, PrincipalIdSchema, ProjectIdSchema, TimestampSchema } from "../contracts/common";
+import { LinkedHoldRecordSchema } from "../contracts/linked-hold";
 import { ensureProjectStateDirectories, type ProjectStatePaths } from "./project-state";
 import { readOwnerOnlyJson, writeOwnerOnlyJson } from "./owner-json";
 
@@ -77,7 +78,7 @@ const LegacyBudgetStoreStateSchema = z.object({
   updatedAt: TimestampSchema,
 }).strict();
 
-const BudgetStoreStateSchema = z.object({
+const BudgetStoreStateV3Schema = z.object({
   version: z.literal(3),
   projectId: ProjectIdSchema,
   budgets: z.array(BudgetSchema),
@@ -85,7 +86,16 @@ const BudgetStoreStateSchema = z.object({
   updatedAt: TimestampSchema,
 }).strict();
 
-const PersistedBudgetStoreStateSchema = z.union([LegacyBudgetStoreStateSchema, BudgetStoreStateSchema]);
+export const BudgetStoreStateSchema = z.object({
+  version: z.literal(4),
+  projectId: ProjectIdSchema,
+  budgets: z.array(BudgetSchema),
+  reservations: z.array(BudgetReservationSchema),
+  linkedHolds: z.array(LinkedHoldRecordSchema).default([]),
+  updatedAt: TimestampSchema,
+}).strict();
+
+const PersistedBudgetStoreStateSchema = z.union([LegacyBudgetStoreStateSchema, BudgetStoreStateV3Schema, BudgetStoreStateSchema]);
 
 export type BudgetScope = z.input<typeof BudgetScopeSchema>;
 export type BudgetReservationRequest = z.input<typeof ReservationRequestSchema>;
@@ -133,16 +143,19 @@ export class BudgetStore {
       if (existing.projectId !== this.projectId) {
         throw new Error(`Budget project mismatch: expected ${this.projectId}, got ${existing.projectId}`);
       }
-      this.state = existing.version === 3 ? existing : migrateV2(existing);
-      if (existing.version === 2) this.persist();
+      this.state = existing.version === 4
+        ? existing
+        : migrateV3(existing.version === 3 ? existing : migrateV2(existing));
+      if (existing.version !== 4) this.persist();
       return;
     }
 
     this.state = BudgetStoreStateSchema.parse({
-      version: 3,
+      version: 4,
       projectId: this.projectId,
       budgets: [],
       reservations: [],
+      linkedHolds: [],
       updatedAt: this.now(),
     });
     this.persist();
@@ -647,8 +660,8 @@ function projectedNullable(current: number | null, reserved: Array<number | null
   return current + next + reserved.reduce<number>((total, value) => total + (value ?? 0), 0);
 }
 
-function migrateV2(state: z.infer<typeof LegacyBudgetStoreStateSchema>): BudgetStoreState {
-  return BudgetStoreStateSchema.parse({
+function migrateV2(state: z.infer<typeof LegacyBudgetStoreStateSchema>): z.infer<typeof BudgetStoreStateV3Schema> {
+  return BudgetStoreStateV3Schema.parse({
     version: 3,
     projectId: state.projectId,
     budgets: state.budgets,
@@ -660,6 +673,14 @@ function migrateV2(state: z.infer<typeof LegacyBudgetStoreStateSchema>): BudgetS
       envelope: initialEnvelope(reservation),
     })),
     updatedAt: state.updatedAt,
+  });
+}
+
+function migrateV3(state: z.infer<typeof BudgetStoreStateV3Schema>): BudgetStoreState {
+  return BudgetStoreStateSchema.parse({
+    ...state,
+    version: 4,
+    linkedHolds: [],
   });
 }
 

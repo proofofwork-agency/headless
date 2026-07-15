@@ -397,7 +397,8 @@ describe("persistent budgets", () => {
       updatedAt: 1,
     })}\n`, { mode: 0o600 });
     const upgraded = new BudgetStore(paths).getState();
-    expect(upgraded.version).toBe(3);
+    expect(upgraded.version).toBe(4);
+    expect(upgraded.linkedHolds).toEqual([]);
     expect(upgraded.reservations[0]).toMatchObject({
       id: "legacy-parent",
       parentReservationId: null,
