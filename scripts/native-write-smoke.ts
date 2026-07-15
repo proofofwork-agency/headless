@@ -1,22 +1,32 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  evaluateNativeSmokeGate,
+  evaluateNativeWriteSmokeGate,
+  isNativeWriteMergeOutcome,
   nativeSmokeAcceptedLimitation,
   nativeSmokeContainmentSummary,
-  nativeSmokeEvidenceValid,
+  nativeWriteSmokeContainmentValid,
 } from "./native-smoke-evidence";
 
-const OPT_IN_ENV = "HEADLESS_NATIVE_SMOKE";
+const OPT_IN_ENV = "HEADLESS_NATIVE_WRITE_SMOKE";
 const CLI_TIMEOUT_MS = 90_000;
+const EXEC_RUN_TIMEOUT_MS = 120_000;
+const EXEC_WALL_CLOCK_MS = 180_000;
 const DAEMON_START_TIMEOUT_MS = 10_000;
 const DAEMON_STOP_TIMEOUT_MS = 10_000;
 const MAX_CHILD_OUTPUT_BYTES = 1_000_000;
 
+// A single deterministic edit the write turn must make. The whole point of the
+// smoke is that this exact line reaches primary only through an authorized
+// candidate integration, never before.
+const WRITE_SMOKE_FILE = "WRITE_SMOKE.md";
+const WRITE_SMOKE_MARKER = "headless native write smoke OK";
+const WRITE_TASK = `Create a new file named ${WRITE_SMOKE_FILE} in the repository root. Its entire contents must be exactly this one line: ${WRITE_SMOKE_MARKER}. Do not modify, create, or delete any other file, and do not run any shell command or tool other than the single file edit.`;
+
 if (process.env[OPT_IN_ENV] !== "1") {
-  console.error(`Native subscription smoke is disabled. Set ${OPT_IN_ENV}=1 only on a trusted host with intentionally logged-in CLIs.`);
+  console.error(`Native write smoke is disabled. Set ${OPT_IN_ENV}=1 only on a trusted host with intentionally logged-in CLIs.`);
   process.exit(2);
 }
 
@@ -30,7 +40,7 @@ type CommandResult = {
   overflowed: boolean;
 };
 
-type BackendSmoke = {
+type BackendWriteSmoke = {
   backend: "claude-code" | "codex" | "opencode" | "grok-build";
   binary: string;
   status: "passed" | "skipped" | "failed";
@@ -41,16 +51,22 @@ type BackendSmoke = {
   code: string | null;
   reason: string;
   durationMs: number;
-  driverKind: string | null;
-  backendVersion: string | null;
-  authProfileFingerprint: string | null;
+  candidateId: string | null;
+  candidateCommit: string | null;
+  mergedInline: boolean;
+  integrationOutcome: string | null;
+  resultingCommit: string | null;
+  // The safety invariant: null when the backend never reached the preserved
+  // stage; true/false once a preserved candidate has been observed against
+  // primary before any authorized integration.
+  primaryUnchangedBeforeIntegration: boolean | null;
+  primaryAdvanced: boolean;
+  editPresentOnPrimary: boolean;
   containment: {
     mechanism: string | null;
     network: string | null;
     credentialAccess: string | null;
   } | null;
-  costAmountUsd: number | null;
-  usageTotal: number | null;
 };
 
 const backends = [
@@ -60,15 +76,15 @@ const backends = [
   { backend: "grok-build", binary: "grok" },
 ] as const;
 
-const root = mkdtempSync(join(tmpdir(), "headless-native-smoke-"));
+const root = mkdtempSync(join(tmpdir(), "headless-native-write-smoke-"));
 const project = join(root, "project");
 const stateHome = join(root, "state");
 // macOS Unix-domain sockets have a short path limit; TMPDIR commonly expands
 // under /var/folders far beyond it. Keep this disposable owner-only runtime at
 // the release platforms' canonical short temporary root.
-const runtimeHome = mkdtempSync(join("/tmp", "hns-runtime-"));
+const runtimeHome = mkdtempSync(join("/tmp", "hnw-runtime-"));
 const cliPath = resolve(import.meta.dir, "../dist/cli.js");
-const env = nativeSmokeEnvironment(process.env, stateHome, runtimeHome);
+const env = nativeWriteSmokeEnvironment(process.env, stateHome, runtimeHome);
 const controller = new AbortController();
 let signalExitCode: number | null = null;
 let daemon: Child | null = null;
@@ -86,7 +102,6 @@ try {
   mkdirSync(project, { mode: 0o700 });
   mkdirSync(stateHome, { mode: 0o700 });
   await initializeFixture(project, env, controller.signal);
-  const baseline = await repositorySnapshot(project, env, controller.signal);
 
   const started = startDaemon(cliPath, project, env, controller.signal);
   daemon = started.child;
@@ -96,9 +111,9 @@ try {
   // acknowledgement; the disposable smoke project opts in for its lifetime.
   await runCheckedCli(cliPath, ["project", "trust", "grant", "--allow-native-direct-unrestricted", "--cwd", project], env, controller.signal);
 
-  const results: BackendSmoke[] = [];
+  const results: BackendWriteSmoke[] = [];
   for (const definition of backends) {
-    if (controller.signal.aborted) throw new Error(`Native smoke interrupted by ${String(controller.signal.reason)}.`);
+    if (controller.signal.aborted) throw new Error(`Native write smoke interrupted by ${String(controller.signal.reason)}.`);
     if (!Bun.which(definition.binary)) {
       results.push({
         ...definition,
@@ -107,31 +122,29 @@ try {
         code: null,
         reason: `${definition.binary} is not installed on PATH. A missing required backend does not satisfy the release gate.`,
         durationMs: 0,
-        driverKind: null,
-        backendVersion: null,
-        authProfileFingerprint: null,
+        candidateId: null,
+        candidateCommit: null,
+        mergedInline: false,
+        integrationOutcome: null,
+        resultingCommit: null,
+        primaryUnchangedBeforeIntegration: null,
+        primaryAdvanced: false,
+        editPresentOnPrimary: false,
         containment: null,
-        costAmountUsd: null,
-        usageTotal: null,
       });
       continue;
     }
-    results.push(await smokeBackend(cliPath, project, env, definition, controller.signal));
+    results.push(await smokeWriteBackend(cliPath, project, env, definition, controller.signal));
   }
 
-  const after = await repositorySnapshot(project, env, controller.signal);
-  const repositoryUnchanged = baseline.head === after.head && baseline.status === after.status && after.status === "";
-  if (!repositoryUnchanged) {
-    for (const result of results) {
-      if (result.status === "passed") {
-        result.status = "failed";
-        result.reason = "The primary checkout changed during read-only native smoke.";
-      }
-    }
-  }
-  const gate = evaluateNativeSmokeGate(results, repositoryUnchanged, process.platform);
+  // The write smoke is expected to advance primary once a candidate is
+  // authorized, so the read smoke's primary-unchanged-throughout invariant does
+  // not apply. The write invariant is that no preserved candidate ever mutated
+  // primary before its authorized integration.
+  const primaryPreservedBeforeIntegration = results.every((result) => result.primaryUnchangedBeforeIntegration !== false);
+  const gate = evaluateNativeWriteSmokeGate(results, primaryPreservedBeforeIntegration, process.platform);
   console.log(JSON.stringify({
-    version: 2,
+    version: 1,
     releaseGatePassed: gate.releaseGatePassed,
     requiredBackends: gate.requiredBackends,
     requiredSatisfied: gate.requiredSatisfied,
@@ -140,12 +153,12 @@ try {
     compiledArtifactsOnly: true,
     providerApiKeyEnvironmentCleared: true,
     providerCredentialEnvironmentCleared: true,
-    repositoryUnchanged,
+    primaryUnchangedBeforeIntegration: primaryPreservedBeforeIntegration,
     results,
   }, null, 2));
   if (!gate.releaseGatePassed) process.exitCode = 1;
 } catch (error) {
-  console.error(`Native subscription smoke failed: ${safeDiagnostic(error)}`);
+  console.error(`Native write smoke failed: ${safeDiagnostic(error)}`);
   process.exitCode = signalExitCode ?? 1;
 } finally {
   if (daemon) await stopDaemon(daemon, DAEMON_STOP_TIMEOUT_MS);
@@ -161,81 +174,206 @@ try {
   if (signalExitCode !== null) process.exitCode = signalExitCode;
 }
 
-async function smokeBackend(
+async function smokeWriteBackend(
   cli: string,
   cwd: string,
   childEnv: NodeJS.ProcessEnv,
   definition: typeof backends[number],
   signal: AbortSignal,
-): Promise<BackendSmoke> {
+): Promise<BackendWriteSmoke> {
   const startedAt = Date.now();
   try {
-    const created = await runCheckedCli(cli, [
-      // `session` moved behind the experimental namespace in the Beta 1
-      // surface refocus; the smoke exercises that compatibility surface.
-      "experimental", "session", "create",
-      "--cwd", cwd,
+    const before = await repositorySnapshot(cwd, childEnv, signal);
+
+    // A native-login write turn. Ask-mode keeps the candidate preserved (no inline
+    // merge) so the isolation of primary can be proven before an authorized
+    // integration. The exec exits non-zero for a preserved/blocked candidate, so
+    // the RunResult JSON — not the exit code — is authoritative.
+    const executed = await runBounded([
+      process.execPath, cli,
+      "exec",
       "--backend", definition.backend,
+      "--mode", "write",
       "--auth-mode", "native-login",
       "--approval-policy", "ask",
       "--require-sandbox",
-    ], childEnv, signal);
-    const session = parseObject(created.stdout, `${definition.backend} session.create`);
-    const sessionId = requiredString(session.id, `${definition.backend} session id`);
-    const sent = await runBounded([
-      process.execPath, cli,
-      "experimental", "session", "send",
+      "--json",
       "--cwd", cwd,
-      "--session-id", sessionId,
-      "--timeout-ms", "60000",
+      "--timeout-ms", String(EXEC_RUN_TIMEOUT_MS),
       "--",
-      "Reply with OK only. Do not use tools.",
-    ], { cwd, env: childEnv, timeoutMs: CLI_TIMEOUT_MS, signal });
-    const envelope = parseObject(sent.stdout, `${definition.backend} session.send`);
-    const result = objectValue(envelope.result);
-    const durableSession = objectValue(envelope.session);
-    const native = objectValue(durableSession?.native);
-    const containment = objectValue(result?.containment);
-    const cost = objectValue(result?.cost);
-    const usage = objectValue(result?.usage);
-    const evidenceValid = nativeSmokeEvidenceValid(result, native);
-    if (sent.exitCode !== 0 || sent.timedOut || sent.overflowed || !evidenceValid) {
-      const structuredError = objectValue(result?.error);
-      const code = stringValue(structuredError?.code);
-      const reason = stringValue(structuredError?.message)
-        ?? code
-        ?? (sent.timedOut ? "CLI smoke timed out." : sent.overflowed ? "CLI smoke output exceeded its bound." : "Native containment/session evidence was incomplete.");
-      return smokeFailure(definition, startedAt, code, reason, native, containment, cost, usage);
+      WRITE_TASK,
+    ], { cwd, env: childEnv, timeoutMs: EXEC_WALL_CLOCK_MS, signal });
+
+    const runResult = parseObject(executed.stdout, `${definition.backend} exec --json`);
+    if (isErrorEnvelope(runResult)) {
+      const error = objectValue(runResult.error);
+      return writeFailure(definition, startedAt, stringValue(error?.code), stringValue(error?.message) ?? "Write exec returned a structured error envelope.");
     }
-    return {
+    const containment = objectValue(runResult.containment);
+    const commit = objectValue(runResult.commit);
+    const error = objectValue(runResult.error);
+    const code = stringValue(error?.code);
+    const candidateId = stringValue(runResult.jobId);
+    const candidateCommit = stringValue(commit?.candidate);
+    const mergedInline = commit?.merged === true;
+
+    if (executed.timedOut || executed.overflowed) {
+      return writeFailure(definition, startedAt, code, executed.timedOut ? "Write exec timed out." : "Write exec output exceeded its bound.");
+    }
+    if (!candidateCommit || !candidateId) {
+      // No candidate commit is either a documented accepted limitation
+      // (keychain-only Claude, experimental Grok), a transient rate limit, or a
+      // genuine failure of the write turn.
+      const message = stringValue(error?.message) ?? code ?? "Write turn produced no candidate commit.";
+      return writeFailure(definition, startedAt, code, message);
+    }
+    if (!nativeWriteSmokeContainmentValid(containment)) {
+      return writeFailure(definition, startedAt, code, "Write turn did not report required native-direct-unrestricted containment.");
+    }
+
+    const containmentSummary = nativeSmokeContainmentSummary(containment);
+    const base: BackendWriteSmoke = {
       ...definition,
-      status: "passed",
+      status: "failed",
       acceptedLimitation: false,
-      code: null,
-      reason: "Native subscription turn completed with required native-direct-unrestricted containment.",
+      code,
+      reason: "Write smoke did not complete.",
       durationMs: Date.now() - startedAt,
-      driverKind: stringValue(native?.driverKind),
-      backendVersion: stringValue(native?.backendVersion),
-      authProfileFingerprint: fingerprintValue(native?.authProfileFingerprint),
-      containment: nativeSmokeContainmentSummary(containment),
-      costAmountUsd: finiteNumber(cost?.amountUsd),
-      usageTotal: finiteNumber(usage?.providerTotal),
+      candidateId,
+      candidateCommit,
+      mergedInline,
+      integrationOutcome: null,
+      resultingCommit: stringValue(commit?.result),
+      primaryUnchangedBeforeIntegration: null,
+      primaryAdvanced: false,
+      editPresentOnPrimary: false,
+      containment: containmentSummary,
+    };
+
+    // With ask-mode the candidate must be preserved; prove primary is byte-for-byte
+    // untouched between the write turn and any authorized integration.
+    if (!mergedInline) {
+      const afterExec = await repositorySnapshot(cwd, childEnv, signal);
+      const preserved = afterExec.head === before.head && afterExec.status === before.status;
+      base.primaryUnchangedBeforeIntegration = preserved;
+      if (!preserved) {
+        return {
+          ...base,
+          status: "failed",
+          reason: "Preserved candidate mutated primary before an authorized integration.",
+          durationMs: Date.now() - startedAt,
+        };
+      }
+    }
+
+    if (mergedInline) {
+      // Defensive: ask-mode is not expected to auto-merge, but an inline merge is
+      // still an authorized integration. Verify primary advanced to the reported
+      // resulting commit and the edit is present.
+      const merged = await verifyPrimaryIntegrated(cwd, childEnv, before.head, stringValue(commit?.result), signal);
+      return {
+        ...base,
+        status: merged.ok ? "passed" : "failed",
+        integrationOutcome: "merged_inline",
+        resultingCommit: merged.head,
+        primaryAdvanced: merged.advanced,
+        editPresentOnPrimary: merged.editPresent,
+        reason: merged.ok
+          ? "Native-login write auto-merged inline under required containment and reached primary."
+          : merged.reason,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
+    // Resolve the ask-mode merge approval as root, then integrate the preserved
+    // candidate through the experimental candidate surface.
+    const approvalId = stringValue(objectValue(error?.details)?.approvalId);
+    if (approvalId) {
+      await runCheckedCli(cli, [
+        "experimental", "approval", "resolve",
+        "--approval-id", approvalId,
+        "--decision", "approved",
+        "--resolution", "native write smoke: authorized candidate integration",
+        "--cwd", cwd,
+      ], childEnv, signal);
+    }
+
+    const integrateRun = await runBounded([
+      process.execPath, cli,
+      "experimental", "candidate", "integrate",
+      "--candidate-id", candidateId,
+      "--cwd", cwd,
+      "--json",
+    ], { cwd, env: childEnv, timeoutMs: CLI_TIMEOUT_MS, signal });
+    const integrated = parseObject(integrateRun.stdout, `${definition.backend} candidate.integrate`);
+    if (isErrorEnvelope(integrated)) {
+      const integrateError = objectValue(integrated.error);
+      return {
+        ...base,
+        status: "failed",
+        reason: `candidate integrate failed: ${stringValue(integrateError?.message) ?? stringValue(integrateError?.code) ?? "unknown error"}.`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+    const integrationOutcome = stringValue(integrated.outcome);
+    const resultingCommit = stringValue(integrated.resultingCommit);
+    if (!isNativeWriteMergeOutcome(integrationOutcome)) {
+      return {
+        ...base,
+        status: "failed",
+        integrationOutcome,
+        reason: `candidate integrate did not merge: ${integrationOutcome ?? "no outcome"}.`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
+    const verified = await verifyPrimaryIntegrated(cwd, childEnv, before.head, resultingCommit, signal);
+    return {
+      ...base,
+      status: verified.ok ? "passed" : "failed",
+      integrationOutcome,
+      resultingCommit: verified.head ?? resultingCommit,
+      primaryAdvanced: verified.advanced,
+      editPresentOnPrimary: verified.editPresent,
+      reason: verified.ok
+        ? `Native-login write candidate ${integrationOutcome} to primary after isolated preservation and authorized integration.`
+        : verified.reason,
+      durationMs: Date.now() - startedAt,
     };
   } catch (error) {
-    return smokeFailure(definition, startedAt, null, safeDiagnostic(error), null, null, null, null);
+    return writeFailure(definition, startedAt, null, safeDiagnostic(error));
   }
 }
 
-function smokeFailure(
+async function verifyPrimaryIntegrated(
+  cwd: string,
+  childEnv: NodeJS.ProcessEnv,
+  beforeHead: string,
+  expectedHead: string | null,
+  signal: AbortSignal,
+) {
+  const after = await repositorySnapshot(cwd, childEnv, signal);
+  const advanced = after.head !== beforeHead && after.status === "";
+  const headMatches = expectedHead === null || after.head === expectedHead;
+  const filePath = join(cwd, WRITE_SMOKE_FILE);
+  const editPresent = existsSync(filePath) && readFileSync(filePath, "utf8").includes(WRITE_SMOKE_MARKER);
+  const ok = advanced && headMatches && editPresent;
+  const reason = !advanced
+    ? "Primary did not advance to the integrated commit."
+    : !headMatches
+      ? "Primary advanced to an unexpected commit."
+      : !editPresent
+        ? `Integrated commit did not carry ${WRITE_SMOKE_FILE} with the expected marker.`
+        : "Integrated.";
+  return { ok, advanced: advanced && headMatches, editPresent, head: after.head, reason };
+}
+
+function writeFailure(
   definition: typeof backends[number],
   startedAt: number,
   code: string | null,
   reason: string,
-  native: Record<string, unknown> | null,
-  containment: Record<string, unknown> | null,
-  cost: Record<string, unknown> | null,
-  usage: Record<string, unknown> | null,
-): BackendSmoke {
+): BackendWriteSmoke {
   const acceptedLimitation = nativeSmokeAcceptedLimitation(definition.backend, code, process.platform);
   return {
     ...definition,
@@ -246,19 +384,20 @@ function smokeFailure(
       ? `${safeDiagnostic(reason)} — documented accepted limitation; does not fail the release gate.`
       : safeDiagnostic(reason),
     durationMs: Date.now() - startedAt,
-    driverKind: stringValue(native?.driverKind),
-    backendVersion: stringValue(native?.backendVersion),
-    authProfileFingerprint: fingerprintValue(native?.authProfileFingerprint),
-    containment: nativeSmokeContainmentSummary(containment),
-    costAmountUsd: finiteNumber(cost?.amountUsd),
-    usageTotal: finiteNumber(usage?.providerTotal),
+    candidateId: null,
+    candidateCommit: null,
+    mergedInline: false,
+    integrationOutcome: null,
+    resultingCommit: null,
+    primaryUnchangedBeforeIntegration: null,
+    primaryAdvanced: false,
+    editPresentOnPrimary: false,
+    containment: null,
   };
 }
 
 function startDaemon(cli: string, cwd: string, childEnv: NodeJS.ProcessEnv, signal: AbortSignal) {
-  // The harness's own daemon must opt into experimental persistent sessions
-  // or the `experimental session` namespace refuses to attach to it.
-  const child = Bun.spawn([process.execPath, cli, "daemon", "serve", "--cwd", cwd, "--experimental-sessions"], {
+  const child = Bun.spawn([process.execPath, cli, "daemon", "serve", "--cwd", cwd], {
     cwd,
     env: childEnv,
     stdin: "ignore",
@@ -276,15 +415,15 @@ function startDaemon(cli: string, cwd: string, childEnv: NodeJS.ProcessEnv, sign
 
 async function waitForDaemon(
   cwd: string,
-  stateHome: string,
-  runtimeHome: string,
+  stateDir: string,
+  runtimeDir: string,
   child: Child,
   signal: AbortSignal,
 ) {
   const canonical = realpathSync.native(cwd);
   const projectId = createHash("sha256").update(canonical, "utf8").digest("hex");
-  const socket = join(runtimeHome, `${projectId.slice(0, 32)}.sock`);
-  const token = join(stateHome, "projects", projectId, "daemon", "token");
+  const socket = join(runtimeDir, `${projectId.slice(0, 32)}.sock`);
+  const token = join(stateDir, "projects", projectId, "daemon", "token");
   const deadline = Date.now() + DAEMON_START_TIMEOUT_MS;
   while (!existsSync(socket) || !existsSync(token)) {
     if (signal.aborted) throw new Error(`Daemon startup interrupted by ${String(signal.reason)}.`);
@@ -296,10 +435,20 @@ async function waitForDaemon(
 
 async function initializeFixture(cwd: string, childEnv: NodeJS.ProcessEnv, signal: AbortSignal) {
   await runChecked(["git", "init", "--quiet"], { cwd, env: childEnv, timeoutMs: 10_000, signal });
-  await runChecked(["git", "config", "user.name", "Headless Native Smoke"], { cwd, env: childEnv, timeoutMs: 10_000, signal });
-  await runChecked(["git", "config", "user.email", "headless-smoke@example.invalid"], { cwd, env: childEnv, timeoutMs: 10_000, signal });
-  await Bun.write(join(cwd, "README.md"), "# Headless native subscription smoke\n");
-  await runChecked(["git", "add", "README.md"], { cwd, env: childEnv, timeoutMs: 10_000, signal });
+  await runChecked(["git", "config", "user.name", "Headless Native Write Smoke"], { cwd, env: childEnv, timeoutMs: 10_000, signal });
+  await runChecked(["git", "config", "user.email", "headless-write-smoke@example.invalid"], { cwd, env: childEnv, timeoutMs: 10_000, signal });
+  // The default write gate runs `bun run check` and `bun run build` inside the
+  // candidate worktree; the disposable project ships trivially passing scripts so
+  // a valid tiny edit reaches finality instead of failing the gate. `.headless/`
+  // is ignored so daemon/worktree bookkeeping never dirties primary.
+  await Bun.write(join(cwd, ".gitignore"), ".headless/\n");
+  await Bun.write(join(cwd, "README.md"), "# Headless native write smoke\n");
+  await Bun.write(join(cwd, "package.json"), `${JSON.stringify({
+    name: "headless-native-write-smoke-fixture",
+    private: true,
+    scripts: { check: "true", build: "true" },
+  }, null, 2)}\n`);
+  await runChecked(["git", "add", "--all"], { cwd, env: childEnv, timeoutMs: 10_000, signal });
   await runChecked(["git", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"], { cwd, env: childEnv, timeoutMs: 10_000, signal });
 }
 
@@ -426,7 +575,7 @@ function exitsWithin(child: Child, timeoutMs: number) {
   ]);
 }
 
-function nativeSmokeEnvironment(source: NodeJS.ProcessEnv, state: string, runtime: string) {
+function nativeWriteSmokeEnvironment(source: NodeJS.ProcessEnv, state: string, runtime: string) {
   const childEnv = { ...source };
   for (const key of Object.keys(childEnv)) {
     if (isProviderCredentialEnvironmentKey(key)) delete childEnv[key];
@@ -448,6 +597,10 @@ function assertCompiledCli(path: string) {
   }
 }
 
+function isErrorEnvelope(value: Record<string, unknown>) {
+  return value.ok === false && "error" in value && !("containment" in value);
+}
+
 function parseObject(text: string, label: string) {
   try {
     const parsed: unknown = JSON.parse(text);
@@ -464,21 +617,6 @@ function objectValue(value: unknown) {
 
 function stringValue(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function requiredString(value: unknown, label: string) {
-  const result = stringValue(value);
-  if (!result) throw new Error(`${label} was missing.`);
-  return result;
-}
-
-function finiteNumber(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-function fingerprintValue(value: unknown) {
-  const fingerprint = stringValue(value);
-  return fingerprint && /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : null;
 }
 
 function safeDiagnostic(error: unknown) {

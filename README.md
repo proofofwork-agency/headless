@@ -46,7 +46,7 @@ Broker authentication is the default. Supply the provider credential to the daem
 
 The broker gives every run finite ceilings even when no narrower project budget exists: 8 requests, 200,000 aggregate input tokens, 32,000 aggregate output tokens, and a $5 cap when trusted pricing is available. Unknown pricing stays `null` and requires explicit per-run approval; it is never treated as zero.
 
-Native login is a separate, explicit risk choice. It can contact arbitrary outbound IP addresses, so enable it only for a trusted disposable project after acknowledging that limitation:
+If your CLIs are already logged in on a paid subscription, native login runs Headless through those existing logins with **no separate provider API keys** — this is the subscription-user path, and its opt-in `smoke:native` gate (not the credentialed broker provider-smoke) is the primary real-run evidence. Native login is a separate, explicit risk choice. It can contact arbitrary outbound IP addresses, so enable it only for a trusted disposable project after acknowledging that limitation:
 
 ```bash
 ./dist/cli.js project trust grant \
