@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parseApprovalCommand } from "../src/cli/commands/approval";
 import { parseCandidateCommand } from "../src/cli/commands/candidate";
 import { parseCollaborationCommand } from "../src/cli/commands/collaboration";
-import { parseFleetCommand } from "../src/cli/commands/fleet";
+import { normalizeProfileDefinition, parseFleetCommand } from "../src/cli/commands/fleet";
 import { parseGoalCommand } from "../src/cli/commands/goal";
 import { parseProjectCommand } from "../src/cli/commands/project";
 import {
@@ -62,6 +62,49 @@ describe("fleet CLI protocol parity", () => {
       method: "fleet.profile.get",
       params: { profileId: "default-fleet" },
     });
+  });
+
+  test("round-trips daemon profile output and supports standalone active-profile overrides", async () => {
+    const persisted = {
+      id: "native-fleet",
+      projectId: "project-owned",
+      name: "Native fleet",
+      authMode: "broker",
+      approvalPolicy: "ask",
+      active: true,
+      createdAt: 100,
+      updatedAt: 200,
+      agents: [{
+        id: "codex-worker",
+        backend: "codex",
+        name: "Codex",
+        authMode: "broker",
+        approvalPolicy: "ask",
+        createdAt: 100,
+        updatedAt: 200,
+      }],
+    };
+    const normalized = normalizeProfileDefinition(persisted);
+    expect(normalized).not.toHaveProperty("projectId");
+    expect(normalized).not.toHaveProperty("active");
+    expect(normalized).not.toHaveProperty("createdAt");
+    expect(normalized.agents).toEqual([expect.not.objectContaining({ createdAt: expect.anything(), updatedAt: expect.anything() })]);
+    expect(FleetProfileUpsertParamsSchema.parse(normalized)).toMatchObject({ id: "native-fleet" });
+
+    const call = await parseFleetCommand([
+      "fleet", "profile", "upsert", "--auth-mode", "native-login", "--approval-policy", "auto",
+    ], persisted);
+    expect(FleetProfileUpsertParamsSchema.parse(call.params)).toMatchObject({
+      id: "native-fleet",
+      authMode: "native-login",
+      approvalPolicy: "auto",
+      agents: [{ id: "codex-worker", authMode: "native-login", approvalPolicy: "auto" }],
+    });
+    expect(() => FleetProfileUpsertParamsSchema.parse({ ...call.params, unexpected: true })).toThrow();
+  });
+
+  test("requires a file or an explicit partial fleet-profile override", async () => {
+    await expect(parseFleetCommand(["fleet", "profile", "upsert"])).rejects.toThrow("--file is required");
   });
 
   test("maps durable goal start, detached run, coordinator chat, follow, and lifecycle actions", () => {

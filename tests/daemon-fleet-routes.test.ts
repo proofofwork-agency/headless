@@ -25,6 +25,42 @@ afterEach(async () => {
 });
 
 describe("daemon fleet and collaboration routes", () => {
+  test("distinguishes missing native project trust from missing provider login state", async () => {
+    const fixture = createFixture();
+    registerBackendDefinition(goalAdapter("/usr/bin/true"));
+    const daemon = await start(fixture);
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: fixture.token });
+    await client.call("fleet.profile.upsert", {
+      id: "fleet-native-trust",
+      name: "Native trust diagnostics",
+      authMode: "native-login",
+      approvalPolicy: "auto",
+      agents: [{
+        id: "native-worker",
+        backend: GOAL_BACKEND,
+        name: "Native worker",
+        authMode: "native-login",
+        approvalPolicy: "auto",
+      }],
+      activate: true,
+    });
+
+    const untrusted = await client.call<{ leaderCandidates: Array<{ presentation: { code: string; reason: string; recovery: string } }> }>("fleet.health");
+    expect(untrusted.leaderCandidates[0]?.presentation).toMatchObject({
+      code: "trust_required",
+      reason: "Project trust with native acknowledgement is not granted.",
+      recovery: `headless project trust grant --allow-native-direct-unrestricted --cwd ${JSON.stringify(daemon.state.canonicalProjectRoot)}`,
+    });
+
+    await client.call("project.trust.grant", {
+      nativeLoginAllowed: true,
+      nativeDirectUnrestrictedAcknowledged: true,
+      bypassAllowed: false,
+    });
+    const trustedWithoutLogin = await client.call<{ leaderCandidates: Array<{ presentation: { code: string } }> }>("fleet.health");
+    expect(trustedWithoutLogin.leaderCandidates[0]?.presentation.code).toBe("login_required");
+  });
+
   test("persists trusted fleet profiles and an addressed goal without client identity fields", async () => {
     const fixture = createFixture();
     const script = join(fixture.project, "paused-goal-coder.sh");

@@ -5,6 +5,7 @@ import { resolveCommand } from "./cli/command-table";
 import { parseCliInvocation, renderHelp } from "./cli/command-specs";
 import { CliUsageError, handleSignal } from "./cli/shared";
 import { toStructuredError } from "./runtime/headless-error";
+import { isValidationError, validationErrorDetails, validationErrorMessage } from "./runtime/validation-error";
 
 export { COMMAND_TABLE, resolveCommand } from "./cli/command-table";
 export { COMMAND_SPECS, VALUE_FLAGS, parseCliInvocation, renderHelp, resolveCommandSpec } from "./cli/command-specs";
@@ -48,7 +49,12 @@ if (import.meta.main) {
   process.once("SIGTERM", () => void handleSignal("SIGTERM"));
   process.once("SIGHUP", () => void handleSignal("SIGHUP"));
   main().catch((error) => {
-    const structured = toStructuredError(error);
+    const validation = isValidationError(error);
+    const structured = toStructuredError(error, validation ? {
+      code: "INVALID_REQUEST",
+      safeMessage: validationErrorMessage(error),
+      details: validationErrorDetails(error),
+    } : {});
     const separator = process.argv.indexOf("--");
     const flagArgs = separator < 0 ? process.argv : process.argv.slice(0, separator);
     if (flagArgs.includes("--json")) {
@@ -57,7 +63,11 @@ if (import.meta.main) {
         : structured;
       console.log(JSON.stringify({ ok: false, error: errorValue }, null, 2));
     } else {
-      console.error(error instanceof Error ? error.message : String(error));
+      console.error(validation
+        ? structured.message
+        : error instanceof Error
+          ? error.message
+          : structured.message);
     }
     process.exitCode = 1;
   });

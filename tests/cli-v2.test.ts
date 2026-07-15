@@ -212,6 +212,48 @@ describe("v0.2 CLI contracts", () => {
     expect(stderr).toContain("Headless daemon ready");
   });
 
+  test("daemon stop signals the authenticated socket owner and never autostarts a missing daemon", async () => {
+    const project = mkdtempSync(join(tmpdir(), "headless-cli-daemon-stop-project-"));
+    const state = mkdtempSync(join(tmpdir(), "headless-cli-daemon-stop-state-"));
+    const env = { HEADLESS_STATE_HOME: state };
+    const child = Bun.spawn(["bun", cliPath, "daemon", "serve", "--cwd", project], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...processEnv(), ...env },
+    });
+    let ready = false;
+    let signalReady: () => void = () => {};
+    const readyPromise = new Promise<void>((resolve) => { signalReady = resolve; });
+    const stderrPromise = (async () => {
+      const decoder = new TextDecoder();
+      let text = "";
+      for await (const chunk of child.stderr) {
+        text += decoder.decode(chunk, { stream: true });
+        if (!ready && text.includes("Headless daemon ready")) {
+          ready = true;
+          signalReady();
+        }
+      }
+      return text + decoder.decode();
+    })();
+    await Promise.race([
+      readyPromise,
+      child.exited.then((exitCode) => { throw new Error(`daemon exited before readiness with ${exitCode}`); }),
+      Bun.sleep(5_000).then(() => { throw new Error("daemon readiness timed out"); }),
+    ]);
+
+    const stopped = await runCli(["daemon", "stop", "--cwd", project], env);
+    const [daemonExit, daemonStderr] = await Promise.all([child.exited, stderrPromise]);
+    expect(stopped.exitCode).toBe(0);
+    expect(JSON.parse(stopped.stdout)).toEqual({ stopped: true, pid: child.pid });
+    expect(daemonExit).toBe(143);
+    expect(daemonStderr).toContain("Headless daemon ready");
+
+    const absent = await runCli(["daemon", "stop", "--cwd", project], env);
+    expect(absent.exitCode).toBe(1);
+    expect(absent.stderr).toContain("No Headless daemon is running");
+  }, 45_000);
+
   test("session send waits for the durable daemon job before its embedded daemon exits", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-cli-session-"));
     const project = join(root, "project");

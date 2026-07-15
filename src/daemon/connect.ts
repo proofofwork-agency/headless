@@ -101,6 +101,19 @@ export async function connectOrStartDaemon(options: ConnectDaemonOptions) {
   );
 }
 
+/** Connect to an already-running daemon without ever bootstrapping one. */
+export async function connectExistingDaemon(options: ConnectDaemonOptions) {
+  const state = getProjectStatePaths(options.projectRoot, options.state);
+  const expectedExtensions = extensionConfigurationRequested(options)
+    ? resolveDaemonExtensionConfig({
+        configPath: options.extensionConfigPath,
+        modulePaths: options.extensionModules,
+        env: options.state?.env,
+      })
+    : null;
+  return tryClient(state.canonicalProjectRoot, options, 750, expectedExtensions);
+}
+
 export async function connectLeadDaemon(options: Omit<ConnectDaemonOptions, "credential" | "bootstrapObserver"> & { host: string }) {
   const state = getProjectStatePaths(options.projectRoot, options.state);
   const binding = new LeadBindingStore(state).status();

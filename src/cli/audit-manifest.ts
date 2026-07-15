@@ -12,7 +12,7 @@ export type CliAuditCase = {
 };
 
 const subcommands: Partial<Record<CliCommandName, readonly string[]>> = {
-  daemon: ["serve", "start", "status"],
+  daemon: ["serve", "start", "status", "stop"],
   project: ["trust status", "trust grant", "trust revoke"],
   fleet: ["health", "profile upsert", "profile get", "profile list", "profile remove"],
   goal: ["start", "run", "send", "follow", "status", "list", "cancel", "result"],
