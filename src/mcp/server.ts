@@ -8,7 +8,6 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import type { CredentialScope } from "../runtime/credential-store";
 
 import { splitList } from "../utils/list";
@@ -30,6 +29,13 @@ import {
 } from "../daemon/protocol";
 
 import { HEADLESS_VERSION } from "../version";
+import {
+  DEFAULT_DELIBERATION_BACKENDS,
+  DEFAULT_TASK_LEASE_MS,
+  DEFAULT_TOOL_APPROVAL_POLICY,
+  DEFAULT_TOOL_AUTH_MODE,
+  HEADLESS_TOOL_REGISTRY,
+} from "../contracts/tool-registry";
 
 export const MCP_VERSION = HEADLESS_VERSION;
 
@@ -77,38 +83,7 @@ const McpCollaborationAdvertisedSchema = z.discriminatedUnion("action", [
 const McpApprovalAdvertisedSchema = ApprovalListParamsSchema.extend({ action: z.literal("list") }).strict();
 const McpCandidateAdvertisedSchema = CandidateIdParamsSchema.extend({ action: z.literal("inspect") }).strict();
 
-const RAW_TOOL_DEFINITIONS = [
-  { name: "headless_run", description: "Submit one daemon-owned contained job and return its complete structured result.", inputSchema: zodToJsonSchema(McpRunSchema, { target: "openApi3" }) },
-  { name: "headless_deliberate", description: "Fan out a read-only question to multiple daemon-owned backends and return every structured result.", inputSchema: { type: "object", properties: { question: { type: "string" }, backends: { type: "string", description: "Comma-separated backend IDs." }, authMode: { type: "string", enum: ["native-login", "broker"] }, approvalPolicy: { type: "string", enum: ["ask", "auto", "bypass"] }, timeoutMs: { type: "integer", minimum: 1, maximum: 86_400_000 }, sessionId: { type: "string" } }, required: ["question"] } },
-  { name: "headless_project_trust", description: "Inspect native-login trust for the daemon-owned project.", inputSchema: zodToJsonSchema(McpProjectTrustAdvertisedSchema, { target: "openApi3" }) },
-  { name: "headless_fleet_profile", description: "Inspect or list durable collaborative fleet profiles.", inputSchema: zodToJsonSchema(McpFleetProfileAdvertisedSchema, { target: "openApi3" }) },
-  { name: "headless_fleet_health", description: "Inspect backend login, health, rate-limit, load, and failover state for a fleet profile.", inputSchema: zodToJsonSchema(McpFleetHealthSchema, { target: "openApi3" }) },
-  { name: "headless_goal", description: "Start, message, inspect, list, cancel, or retrieve the result of a durable collaborative goal.", inputSchema: zodToJsonSchema(McpGoalSchema, { target: "openApi3" }) },
-  { name: "headless_collaboration", description: "Read goal turns or addressed messages and acknowledge consumed messages.", inputSchema: zodToJsonSchema(McpCollaborationAdvertisedSchema, { target: "openApi3" }) },
-  { name: "headless_approval", description: "List approval requests visible to the authenticated integration.", inputSchema: zodToJsonSchema(McpApprovalAdvertisedSchema, { target: "openApi3" }) },
-  { name: "headless_candidate", description: "Inspect a gated candidate decision.", inputSchema: zodToJsonSchema(McpCandidateAdvertisedSchema, { target: "openApi3" }) },
-  { name: "headless_append_note", description: "Append note to shared ledger.", inputSchema: { type: "object", properties: { text: { type: "string" }, sessionId: { type: "string" } }, required: ["text"] } },
-  { name: "headless_record_artifact", description: "Record a bounded structured artifact in the authenticated project ledger.", inputSchema: { type: "object", properties: { kind: { type: "string" }, title: { type: "string" }, summary: { type: "string" }, status: { type: "string", enum: ["passed", "failed", "blocked", "unknown", "skipped", "timed_out"] }, evidence: { type: "array", items: { type: "string" } }, sessionId: { type: "string" } }, required: ["kind","title","summary"] } },
-  { name: "headless_read_context", description: "Read the daemon-maintained verified ledger projection.", inputSchema: { type: "object", properties: { view: { type: "string", enum: ["summary", "recent", "raw"] }, limit: { type: "integer", minimum: 1 }, sessionId: { type: "string" } } } },
-  { name: "headless_task_state", description: "List durable daemon tasks and their claim/lease state.", inputSchema: { type: "object", properties: { jobId: { type: "string" }, state: { type: "string", enum: ["pending", "claimed", "completed", "failed", "cancelled"] } } } },
-  { name: "headless_propose_final", description: "Record a completion proposal for an enforced finality decision.", inputSchema: { type: "object", properties: { summary: { type: "string" }, evidence: { type: "string" }, remainingRisk: { type: "string" }, handlesHandoffIds: { type: "array", items: { type: "string" } }, sessionId: { type: "string" } }, required: ["summary","evidence"] } },
-  { name: "headless_ask_for_work", description: "Tell the fleet you are idle/ready. Identity comes from the authenticated MCP credential.", inputSchema: { type: "object", properties: { completed: { type: "string" }, reason: { type: "string" }, sessionId: { type: "string" } } } },
-  { name: "ask_for_backup", description: "Ask another agent for bounded help when stuck.", inputSchema: { type: "object", properties: { problem: { type: "string" }, neededStrength: { type: "string" }, sessionId: { type: "string" } }, required: ["problem"] } },
-  { name: "headless_record_task_claim", description: "Claim a durable daemon task under the authenticated principal.", inputSchema: { type: "object", properties: { taskId: { type: "string" }, leaseMs: { type: "integer", minimum: 1, maximum: 86_400_000 } }, required: ["taskId"] } },
-  { name: "headless_record_consensus_vote", description: "Record an attributable consensus vote under the authenticated principal.", inputSchema: { type: "object", properties: { proposal: { type: "string" }, vote: { type: "string", enum: ["yes", "no", "consensus"] }, rationale: { type: "string" }, sessionId: { type: "string" } }, required: ["proposal", "vote"] } },
-  { name: "headless_record_idle_action", description: "Record autonomous action result.", inputSchema: { type: "object", properties: { kind: { type: "string" }, title: { type: "string" }, summary: { type: "string" } }, required: ["kind","title","summary"] } },
-  { name: "headless_record_release_gate", description: "Record a gate evaluation.", inputSchema: { type: "object", properties: { summary: { type: "string" }, status: { type: "string" } }, required: ["summary"] } },
-  { name: "headless_gate", description: "Run configured contained release-gate checks in the daemon-owned project.", inputSchema: { type: "object", properties: { checks: { type: "array", items: { type: "string" } }, timeoutMs: { type: "integer", minimum: 1, maximum: 86_400_000 }, sessionId: { type: "string" } } } },
-  { name: "headless_get_cooperation_instructions", description: "Fleet cooperation rules.", inputSchema: { type: "object", properties: {} } },
-  { name: "send_message", description: "Send an attributable direct message via the daemon ledger.", inputSchema: { type: "object", properties: { to: { type: "string" }, content: { type: "string" }, sessionId: { type: "string" } }, required: ["to","content"] } },
-  { name: "wait_for_handoff", description: "Wait (with subscription + timeout) for handoff results. Returns handling events for the given handoffId.", inputSchema: { type: "object", properties: { handoffId: { type: "string" }, timeoutMs: { type: "number" }, sessionId: { type: "string" } } } },
-  { name: "get_messages", description: "Pull durable session-scoped messages addressed through Headless.", inputSchema: { type: "object", properties: { limit: { type: "number" }, sessionId: { type: "string" } } } },
-  { name: "council_deliberate", description: "Run daemon-owned proposal, execution, review, vote, and decision phases over actual candidate outputs.", inputSchema: { type: "object", properties: { question: { type: "string" }, agents: { type: "string", description: "Comma-separated backend IDs." }, mode: { type: "string", enum: ["read-only", "write"] }, authMode: { type: "string", enum: ["native-login", "broker"] }, approvalPolicy: { type: "string", enum: ["ask", "auto", "bypass"] }, timeoutMs: { type: "integer", minimum: 1, maximum: 86_400_000 }, sessionId: { type: "string" } }, required: ["question"] } },
-  { name: "headless_workflow_run", description: "Start a durable required-containment workflow DAG from a v0.2 JSON definition.", inputSchema: { type: "object", properties: { definition: { type: "string", maxLength: 2500000, description: "JSON object with steps and optional finality requirements." } }, required: ["definition"] } },
-  { name: "headless_workflow_status", description: "List, inspect, wait for, or cancel an authenticated principal's durable workflow.", inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "status", "wait", "cancel"] }, workflowId: { type: "string" }, timeoutMs: { type: "integer", minimum: 1, maximum: 86400000 } }, required: ["action"] } },
-] as const;
-
-const TOOL_DEFINITIONS = RAW_TOOL_DEFINITIONS.map((tool) => ({
+const TOOL_DEFINITIONS = HEADLESS_TOOL_REGISTRY.map((tool) => ({
   ...tool,
   inputSchema: mcpObjectInputSchema(tool.inputSchema),
 }));
@@ -197,8 +172,8 @@ async function handleCallTool(req: { params: { name: string; arguments?: Record<
         timeoutMs: a.timeoutMs ?? 180_000,
         sessionId: a.sessionId,
         containment: a.containment ?? "required",
-        authMode: a.authMode,
-        approvalPolicy: a.approvalPolicy,
+        authMode: a.authMode ?? DEFAULT_TOOL_AUTH_MODE,
+        approvalPolicy: a.approvalPolicy ?? DEFAULT_TOOL_APPROVAL_POLICY,
       });
       const client = await daemonClient(safeCwd);
       const submitted = await client.call<Job>("run.submit", parsed);
@@ -207,10 +182,11 @@ async function handleCallTool(req: { params: { name: string; arguments?: Record<
       return toolText(JSON.stringify({ sessionId: completed.sessionId, jobId: completed.id, result: completed.result }, null, 2));
     }
     if (name === "headless_deliberate") {
-      const q = s(a.question) || "";
+      if (a.mode === "write") throw new Error("Use council_deliberate for reviewed write deliberation.");
+      const q = `${s(a.question) || ""}${a.contextRefs ? `\n\nContext refs:\n${s(a.contextRefs)}` : ""}`;
       const client = await daemonClient(safeCwd);
-      const selected = arr(a.backends) ?? ["opencode", "codex"];
-      const authMode = a.authMode === "native-login" ? "native-login" : "broker";
+      const selected = arr(a.backends) ?? [...DEFAULT_DELIBERATION_BACKENDS];
+      const authMode = a.authMode === "broker" ? "broker" : DEFAULT_TOOL_AUTH_MODE;
       const approvalPolicy = a.approvalPolicy === "auto" || a.approvalPolicy === "bypass" ? a.approvalPolicy : "ask";
       const jobs = await Promise.all(selected.map((backend) => client.call<Job>("run.submit", { backend, prompt: q, mode: "read-only", containment: "required", authMode, approvalPolicy, timeoutMs: n(a.timeoutMs, 180_000), sessionId: s(a.sessionId) })));
       const waits = runWaitTimeouts(n(a.timeoutMs, 180_000)!);
@@ -273,7 +249,7 @@ async function handleCallTool(req: { params: { name: string; arguments?: Record<
       const params = { candidateId: parsed.candidateId };
       return toolJson(await client.call("candidate.inspect", params));
     }
-    if (name === "headless_append_note") { const client = await daemonClient(safeCwd); return toolText(JSON.stringify(await client.call("ledger.note", { text: s(a.text) || "", sessionId: s(a.sessionId) }))); }
+    if (name === "headless_append_note") { const client = await daemonClient(safeCwd); return toolText(JSON.stringify(await client.call("ledger.note", { text: s(a.text) || "", handlesHandoffId: s(a.handlesHandoffId), sessionId: s(a.sessionId) }))); }
     if (name === "headless_record_artifact") { const client = await daemonClient(safeCwd); return toolText(JSON.stringify(await client.call("ledger.artifact", { kind: s(a.kind) || "note", title: s(a.title) || "", summary: s(a.summary) || "", status: s(a.status), evidence: arr(a.evidence), sessionId: s(a.sessionId) }))); }
     if (name === "headless_read_context") { const client = await daemonClient(safeCwd); return toolText(JSON.stringify(await client.call("ledger.context", { view: s(a.view), limit: n(a.limit), sessionId: s(a.sessionId) }))); }
     if (name === "headless_task_state") { const client = await daemonClient(safeCwd); return toolText(JSON.stringify(await client.call("task.list", { jobId: s(a.jobId), state: s(a.state) }))); }
@@ -288,14 +264,14 @@ async function handleCallTool(req: { params: { name: string; arguments?: Record<
     }
     if (name === "headless_record_task_claim") {
       const client = await daemonClient(safeCwd);
-      return toolText(JSON.stringify(await client.call("task.claim", { taskId: s(a.taskId) || "", leaseMs: n(a.leaseMs, 300_000) })));
+      return toolText(JSON.stringify(await client.call("task.claim", { taskId: s(a.taskId) || "", leaseMs: n(a.leaseMs, DEFAULT_TASK_LEASE_MS) })));
     }
     if (name === "headless_record_consensus_vote") {
       const v = s(a.vote) as "yes" | "no" | "consensus" | undefined;
       const client = await daemonClient(safeCwd);
       return toolText(JSON.stringify(await client.call("ledger.event", { type: "consensus_vote", sessionId: s(a.sessionId), payload: { content: `${v || "yes"}: ${s(a.proposal) || ""}`, meta: { proposal: s(a.proposal), vote: v || "yes", rationale: s(a.rationale) } } })));
     }
-    if (name === "headless_record_idle_action") { const client = await daemonClient(safeCwd); return toolText(JSON.stringify(await client.call("ledger.event", { type: "idle_action_result", sessionId: s(a.sessionId), payload: { content: s(a.summary) || "", artifact: { kind: s(a.kind) || "note", title: s(a.title) || "", summary: s(a.summary) || "", status: "unknown" } } }))); }
+    if (name === "headless_record_idle_action") { const client = await daemonClient(safeCwd); return toolText(JSON.stringify(await client.call("ledger.event", { type: "idle_action_result", sessionId: s(a.sessionId), payload: { content: s(a.summary) || "", artifact: { kind: s(a.kind) || "note", title: s(a.title) || "", summary: s(a.summary) || "", status: s(a.status) || "unknown", evidence: arr(a.evidence) } } }))); }
     if (name === "headless_record_release_gate") { const client = await daemonClient(safeCwd); return toolText(JSON.stringify(await client.call("ledger.artifact", { kind: "release_gate", title: "Release gate", summary: s(a.summary) || "", status: s(a.status) || "unknown", evidence: arr(a.evidence), sessionId: s(a.sessionId) }))); }
     if (name === "headless_gate") {
       const client = await daemonClient(safeCwd);
@@ -323,9 +299,10 @@ async function handleCallTool(req: { params: { name: string; arguments?: Record<
         agents: arr(a.agents),
         mode: a.mode === "write" ? "write" : "read-only",
         containment: "required",
-        authMode: a.authMode === "native-login" ? "native-login" : "broker",
+        authMode: a.authMode === "broker" ? "broker" : DEFAULT_TOOL_AUTH_MODE,
         approvalPolicy: a.approvalPolicy === "auto" || a.approvalPolicy === "bypass" ? a.approvalPolicy : "ask",
         timeoutMs: n(a.timeoutMs, 180_000),
+        sessionId: s(a.sessionId),
       }, boundedTransportTimeout(n(a.timeoutMs, 180_000)! * 4 + 90_000));
       return toolText(JSON.stringify(res, null, 2));
     }
@@ -428,6 +405,7 @@ export { server, TOOL_DEFINITIONS as mcpToolDefinitions };
 // Test-only export to drive full internal tool handler paths + error branches + wait + get_messages + council for coverage of mcp/server.ts
 export const __handleCallToolForTest = handleCallTool;
 export const __handleListToolsForTest = handleListTools;
+export const __normalizeMcpInputSchemaForTest = mcpObjectInputSchema;
 
 function leadHostFromProcess() {
   const index = process.argv.indexOf("--host");

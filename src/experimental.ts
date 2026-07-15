@@ -44,6 +44,17 @@ export {
 export type { ReadContextView, TaskState } from "./runtime/read-model";
 export { getCooperationInstructions } from "./runtime/cooperation";
 export { splitList } from "./utils/list";
+export {
+  DEFAULT_DELIBERATION_BACKENDS,
+  DEFAULT_TASK_LEASE_MS,
+  DEFAULT_TOOL_APPROVAL_POLICY,
+  DEFAULT_TOOL_AUTH_MODE,
+  HEADLESS_TOOL_REGISTRY,
+  headlessToolDefinition,
+  type HeadlessToolDefinition,
+  type HeadlessToolInput,
+  type HeadlessToolName,
+} from "./contracts/tool-registry";
 export { PricingEntrySchema, registerPricing, unregisterPricing, listPricing, resolvePricing, calculatePricedCost, type PricingEntry } from "./runtime/pricing";
 export { Semaphore, withBoundedConcurrency, createLimiter } from "./runtime/concurrency";
 export { safeOption, positiveTimeout, supportedPlatform } from "./runtime/validation";

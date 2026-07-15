@@ -72,6 +72,7 @@ Automatic worker and synthesizer selection excludes the active lead backend. An 
 
 Execution and orchestration:
 
+- MCP and the OpenCode plugin advertise one shared schema/default registry. Direct run, deliberation, and council tools default to `native-login` plus `ask`; goal-level auth remains unset so it can inherit the selected fleet profile.
 - `headless_run` submits one contained daemon job and returns its full structured result.
 - `headless_deliberate` fans out a bounded read-only question. Its default backends are OpenCode and Codex.
 - `council_deliberate` runs daemon-owned proposal, execution, review, vote, and decision phases.

@@ -758,6 +758,11 @@ export class HeadlessDaemon {
       persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
       initialLinkedOperations: brokerQuotas.linkedSnapshot(),
       persistLinkedOperation: (operation) => brokerQuotas.updateLinkedOperation(operation),
+      warning: (message) => {
+        const bounded = redactAndTruncate(message, 2_048).text;
+        console.warn(bounded);
+        recordRuntimeDiagnostic("state", "broker.pricing-registry", bounded, "warning");
+      },
     });
     this.jobs = new JobStore(this.state.jobsDir);
     this.tasks = new TaskStore(this.state.tasksDir, { recoverOnOpen: false });

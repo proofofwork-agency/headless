@@ -17,6 +17,68 @@ afterEach(() => {
 });
 
 describe("provider broker", () => {
+  test("warns once when a cost-capped lease has no trusted pricing", () => {
+    const warnings: string[] = [];
+    const broker = new ProviderBroker({ warning: (message) => warnings.push(message) });
+    broker.start();
+    closers.push(() => broker.stop());
+    const lease = (runId: string, maxCostUsd: number | null) => broker.issueLease({
+      runId,
+      provider: "openai",
+      models: ["gpt-test"],
+      endpointClasses: ["responses"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 1,
+      maxCostUsd,
+    });
+
+    lease("uncapped", null);
+    expect(warnings).toEqual([]);
+    lease("capped", 1);
+    lease("second-cap", 2);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("pricing registry is empty");
+    expect(warnings[0]).toContain("fail closed");
+
+    const nonfatal = new ProviderBroker({ warning: () => { throw new Error("diagnostic sink failed"); } });
+    nonfatal.start();
+    closers.push(() => nonfatal.stop());
+    expect(() => nonfatal.issueLease({
+      runId: "warning-failure",
+      provider: "openai",
+      models: ["gpt-test"],
+      endpointClasses: ["responses"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 1,
+      maxCostUsd: 1,
+    })).not.toThrow();
+
+    const pricingId = "warning-priced-model";
+    pricingIds.push(pricingId);
+    registerPricing({
+      id: pricingId,
+      provider: "openai",
+      model: "gpt-test",
+      effectiveFrom: 0,
+      inputUsdPerMillion: 1,
+      outputUsdPerMillion: 1,
+    });
+    const pricedWarnings: string[] = [];
+    const priced = new ProviderBroker({ warning: (message) => pricedWarnings.push(message) });
+    priced.start();
+    closers.push(() => priced.stop());
+    priced.issueLease({
+      runId: "priced-cap",
+      provider: "openai",
+      models: ["gpt-test"],
+      endpointClasses: ["responses"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 1,
+      maxCostUsd: 1,
+    });
+    expect(pricedWarnings).toEqual([]);
+  });
+
   test("replaces an opaque OpenAI lease with the parent credential", async () => {
     let observedAuthorization = "";
     const upstream = Bun.serve({

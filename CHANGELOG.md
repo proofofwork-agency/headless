@@ -6,6 +6,8 @@ Publication remains blocked. Both package manifests are private at `0.2.0-alpha.
 
 ### Changed
 
+- Unified the MCP server and OpenCode plugin on one shared advertised tool registry, including names, schemas, and defaults. Direct lead tools now consistently default to native-login, deliberation consistently seats OpenCode and Codex, task claims consistently default to a 300-second lease, and goal-level auth remains unset so the selected fleet profile can supply it.
+- Documented that core ships without provider list prices and emits one bounded daemon warning when a broker cost cap is active without extension-supplied trusted pricing. Unknown USD attribution remains null and cost ceilings continue to fail closed rather than treating unknown spend as zero.
 - Reframed the native-subscription smoke as the **primary Gate A real-run evidence** and made its release gate per-backend. Required backends are Claude, Codex, and OpenCode; Grok is experimental and excluded; macOS keychain-only Claude login is a documented, platform-gated accepted limitation that no longer fails the gate. At least one required backend must complete a real native turn, and a missing required backend or a changed checkout still fails. The gate evaluation moved into a pure, unit-tested `evaluateNativeSmokeGate`/`nativeSmokeAcceptedLimitation` helper.
 - Marked the credentialed broker **provider-smoke as optional/deferred** — it exercises broker mode against real provider API keys and is not required for the native-login subscription beta, which uses the CLIs' existing logins and no separate API keys. The broker remains proven by fake-upstream unit tests.
 
