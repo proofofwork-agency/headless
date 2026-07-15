@@ -59,6 +59,53 @@ export function evaluateNativeSmokeGate(
   repositoryUnchanged: boolean,
   platform: NodeJS.Platform,
 ) {
+  return evaluateRequiredNativeBackends(results, repositoryUnchanged, platform);
+}
+
+// The write smoke reuses the containment portion of nativeSmokeEvidenceValid: a
+// native-login write turn must still run under enforced required containment with
+// native-direct-unrestricted egress and backend-native credential access. The
+// write RunResult carries no durable-session `native` block, so driver/fingerprint
+// evidence is not asserted here; the candidate Git commit and its integration into
+// primary carry the end-to-end write proof instead.
+export function nativeWriteSmokeContainmentValid(containment: Record<string, unknown> | null) {
+  return containment?.requirement === "required"
+    && containment.enforced === true
+    && containment.network === "native-direct-unrestricted"
+    && containment.credentialAccess === "backend-native"
+    && containment.unsafe === false;
+}
+
+// A candidate integration outcome that actually advanced primary. Preserved or
+// blocked outcomes are deliberately excluded: the write gate proves the edit
+// reached primary, whether by the inline fast-forward or an authorized
+// `candidate integrate` of a preserved candidate.
+export function isNativeWriteMergeOutcome(outcome: string | null) {
+  return outcome === "merged_fast_forward"
+    || outcome === "merged_advanced"
+    || outcome === "recovered_applied";
+}
+
+// Per-backend release-gate evaluation for the write smoke. Mirrors
+// evaluateNativeSmokeGate exactly, except the repository invariant is that no
+// preserved candidate mutated primary before its authorized integration
+// (`primaryPreservedBeforeIntegration`) rather than primary being unchanged
+// throughout — a write smoke is expected to advance primary once the candidate is
+// authorized. Required set, accepted limitations, and transient rate-limit
+// handling are identical to the read gate.
+export function evaluateNativeWriteSmokeGate(
+  results: ReadonlyArray<{ backend: string; status: string; acceptedLimitation: boolean; code?: string | null }>,
+  primaryPreservedBeforeIntegration: boolean,
+  platform: NodeJS.Platform,
+) {
+  return evaluateRequiredNativeBackends(results, primaryPreservedBeforeIntegration, platform);
+}
+
+function evaluateRequiredNativeBackends(
+  results: ReadonlyArray<{ backend: string; status: string; acceptedLimitation: boolean; code?: string | null }>,
+  repositoryInvariantHeld: boolean,
+  platform: NodeJS.Platform,
+) {
   const requiredBackends = [...requiredNativeSmokeBackends(platform)];
   const required = requiredBackends.map((backend) => results.find((result) => result.backend === backend) ?? null);
   const rateLimited = (result: { code?: string | null }) => result.code === "RATE_LIMITED";
@@ -68,7 +115,7 @@ export function evaluateNativeSmokeGate(
   const requiredRealPass = required.some((result) => result?.status === "passed");
   const transientRateLimited = required.filter((result) => result && rateLimited(result)).map((result) => result!.backend);
   return {
-    releaseGatePassed: repositoryUnchanged && requiredSatisfied && requiredRealPass,
+    releaseGatePassed: repositoryInvariantHeld && requiredSatisfied && requiredRealPass,
     requiredBackends,
     requiredSatisfied,
     requiredRealPass,

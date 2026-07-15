@@ -68,6 +68,7 @@
     "check": "bun run typecheck && bun run typecheck:plugin && bun run lint && bun run format:check && bun run check:docs && bun run test",
     "smoke:pack": "bun scripts/pack-smoke.ts",
     "smoke:native": "bun scripts/native-subscription-smoke.ts",
+    "smoke:native-write": "bun scripts/native-write-smoke.ts",
     "smoke:providers": "bun scripts/provider-smoke.ts",
     "release:check": "bun run check && bun run build && bun run smoke:pack",
     "clean": "rm -rf dist plugin/dist",
