@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, rmSync } from "node:fs";
 import { z } from "zod";
+import { HeadlessError } from "../runtime/headless-error";
 import { redactAndTruncate } from "../runtime/redaction";
 import { calculateModelPricedCost } from "../runtime/pricing";
 import { recordRuntimeDiagnostic } from "../runtime/diagnostics";
@@ -14,6 +15,24 @@ const DEFAULT_BROKER_CONCURRENCY = 32;
 const DEFAULT_BROKER_BODY_MEMORY_LIMIT = 64_000_000;
 const MAX_RETAINED_LEASES = 10_000;
 const MAX_RETAINED_BUDGET_QUOTAS = 10_000;
+const MAX_RETAINED_LINKED_OPERATIONS = 10_000;
+
+const digest = z.string().regex(/^[a-f0-9]{64}$/);
+const nullableLinkedAmount = z.number().nonnegative().finite().nullable();
+
+export const BrokerLinkedAllocationSchema = z.object({
+  requests: z.number().int().positive().max(100_000),
+  inputTokens: z.number().int().nonnegative().safe().nullable(),
+  outputTokens: z.number().int().nonnegative().safe().nullable(),
+  costUsd: nullableLinkedAmount,
+}).strict();
+
+export const BrokerLinkedUnusedSchema = z.object({
+  requests: z.number().int().nonnegative().max(100_000),
+  inputTokens: z.number().int().nonnegative().safe().nullable(),
+  outputTokens: z.number().int().nonnegative().safe().nullable(),
+  costUsd: nullableLinkedAmount,
+}).strict();
 
 export const BrokerBudgetQuotaSchema = z.object({
   id: z.string().trim().min(1).max(160),
@@ -59,6 +78,39 @@ export const BrokerLeaseScopeSchema = z.object({
 
 export type BrokerLeaseScope = z.infer<typeof BrokerLeaseScopeSchema>;
 
+export const BrokerLinkedTargetScopeSchema = z.object({
+  provider: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
+  models: z.array(z.string().min(1).max(256)).min(1).max(128),
+  endpointClasses: z.array(z.enum(["chat", "responses", "messages", "embeddings", "models", "generate"])).min(1),
+  expiresAt: z.number().int().positive(),
+  childDeadlineAt: z.number().int().positive(),
+  replyMarginMs: z.number().int().nonnegative().max(60_000),
+  maxRequests: z.number().int().positive().max(100_000),
+  maxInputTokens: z.number().int().positive().safe().nullable(),
+  maxOutputTokens: z.number().int().positive().safe().nullable(),
+  maxBodyBytes: z.number().int().positive().max(64_000_000).default(DEFAULT_BODY_LIMIT),
+  maxConcurrentRequests: z.number().int().positive().max(1_024).default(DEFAULT_LEASE_CONCURRENCY),
+  maxInFlightBodyBytes: z.number().int().positive().max(256_000_000).default(DEFAULT_LEASE_BODY_MEMORY_LIMIT),
+  maxStreamMs: z.number().int().positive().max(3_600_000).default(DEFAULT_STREAM_LIMIT_MS),
+  maxCostUsd: z.number().nonnegative().nullable().default(null),
+  budgetQuotas: z.array(BrokerBudgetQuotaSchema).max(255).default([]),
+}).strict().superRefine((scope, context) => {
+  if (scope.maxInFlightBodyBytes < scope.maxBodyBytes) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["maxInFlightBodyBytes"],
+      message: "Broker in-flight body memory must accommodate one maximum-sized request.",
+    });
+  }
+  const ids = new Set<string>();
+  for (const [index, quota] of scope.budgetQuotas.entries()) {
+    if (ids.has(quota.id)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["budgetQuotas", index, "id"], message: `Duplicate broker budget quota: ${quota.id}` });
+    ids.add(quota.id);
+  }
+});
+
+export type BrokerLinkedTargetScope = z.infer<typeof BrokerLinkedTargetScopeSchema>;
+
 type Lease = BrokerLeaseScope & {
   id: string;
   tokenHash: Buffer;
@@ -98,6 +150,78 @@ export type BrokerLeaseCarve = {
   settled: boolean;
 };
 
+const BrokerLeaseCarveSchema = z.object({
+  id: z.string().trim().min(1).max(160),
+  parentLeaseId: z.string().trim().min(1).max(160),
+  runId: z.string().trim().min(1).max(160),
+  requests: z.number().int().positive().max(100_000),
+  inputTokens: z.number().int().nonnegative().safe().nullable(),
+  outputTokens: z.number().int().nonnegative().safe().nullable(),
+  costUsd: nullableLinkedAmount,
+  settled: z.boolean(),
+}).strict();
+
+export const BrokerLinkedTargetObservationSchema = z.object({
+  leaseId: z.string().trim().min(1).max(160),
+  requests: z.number().int().nonnegative(),
+  forwardedRequests: z.number().int().nonnegative(),
+  observedCostUsd: z.number().nonnegative().finite(),
+  accountedCostUsd: z.number().nonnegative().finite(),
+  accountedInputTokens: z.number().int().nonnegative(),
+  accountedOutputTokens: z.number().int().nonnegative(),
+  activeRequests: z.number().int().nonnegative(),
+  revoked: z.boolean(),
+  expiresAt: z.number().int().positive(),
+}).strict();
+
+const BrokerLinkedParentOperationSchema = z.object({
+  kind: z.literal("parent"),
+  operationId: z.string().trim().min(1).max(160),
+  linkId: digest,
+  parentRunId: z.string().trim().min(1).max(160),
+  allocation: BrokerLinkedAllocationSchema,
+  phase: z.enum(["prepared", "applied", "settled"]),
+  carve: BrokerLeaseCarveSchema,
+  unused: BrokerLinkedUnusedSchema.nullable(),
+  expiresAt: z.number().int().positive(),
+  updatedAt: z.number().int().nonnegative(),
+}).strict().superRefine((operation, context) => {
+  if ((operation.phase === "settled") !== (operation.unused !== null) || operation.carve.settled !== (operation.phase === "settled")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Linked parent settlement state is inconsistent." });
+  }
+  if (operation.unused) addUnusedIssues(operation.allocation, operation.unused, context);
+});
+
+const BrokerLinkedTargetOperationSchema = z.object({
+  kind: z.literal("target"),
+  operationId: z.string().trim().min(1).max(160),
+  linkId: digest,
+  childRunId: z.string().trim().min(1).max(160),
+  requestedScope: BrokerLinkedTargetScopeSchema,
+  targetLeaseId: z.string().trim().min(1).max(160),
+  targetTokenHash: digest.nullable(),
+  targetIssuedAt: z.number().int().nonnegative().nullable(),
+  targetQuotaScope: BrokerLeaseScopeSchema,
+  targetExpiresAt: z.number().int().positive(),
+  phase: z.enum(["prepared", "issued", "revoked"]),
+  observation: BrokerLinkedTargetObservationSchema,
+  updatedAt: z.number().int().nonnegative(),
+}).strict().superRefine((operation, context) => {
+  if ((operation.phase === "prepared") !== (operation.targetIssuedAt === null && operation.targetTokenHash === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Linked target issuance state is inconsistent." });
+  }
+  if ((operation.phase === "revoked") !== operation.observation.revoked) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Linked target revocation state is inconsistent." });
+  }
+});
+
+export const BrokerLinkedOperationSchema = z.union([
+  BrokerLinkedParentOperationSchema,
+  BrokerLinkedTargetOperationSchema,
+]);
+
+export type BrokerLinkedOperation = z.infer<typeof BrokerLinkedOperationSchema>;
+
 export type ProviderBrokerOptions = {
   credentials?: Record<string, string | undefined>;
   upstreams?: Record<string, string | undefined>;
@@ -108,6 +232,8 @@ export type ProviderBrokerOptions = {
   maxInFlightBodyBytes?: number;
   initialBudgetQuotas?: BrokerBudgetQuota[];
   persistBudgetQuota?: (quota: BrokerBudgetQuota, expiresAt?: number) => void;
+  initialLinkedOperations?: BrokerLinkedOperation[];
+  persistLinkedOperation?: (operation: BrokerLinkedOperation) => void;
 };
 
 export class ProviderBroker {
@@ -120,6 +246,8 @@ export class ProviderBroker {
   private readonly maxConcurrentRequests: number;
   private readonly maxInFlightBodyBytes: number;
   private readonly persistBudgetQuota?: ProviderBrokerOptions["persistBudgetQuota"];
+  private readonly linkedOperations = new Map<string, BrokerLinkedOperation>();
+  private readonly persistLinkedOperation?: ProviderBrokerOptions["persistLinkedOperation"];
   private readonly logs: BrokerRequestLog[] = [];
   private activeRequests = 0;
   private inFlightBodyBytes = 0;
@@ -138,6 +266,12 @@ export class ProviderBroker {
     for (const quota of options.initialBudgetQuotas ?? []) {
       const parsed = BrokerBudgetQuotaSchema.parse(quota);
       this.budgetQuotas.set(parsed.id, parsed);
+    }
+    this.persistLinkedOperation = options.persistLinkedOperation;
+    for (const operation of options.initialLinkedOperations ?? []) {
+      const parsed = BrokerLinkedOperationSchema.parse(operation);
+      if (this.linkedOperations.has(parsed.operationId)) throw new Error(`Duplicate linked broker operation: ${parsed.operationId}`);
+      this.linkedOperations.set(parsed.operationId, parsed);
     }
     this.unixSocketPath = options.unixSocketPath ?? null;
   }
@@ -181,13 +315,17 @@ export class ProviderBroker {
   }
 
   issueLease(input: z.input<typeof BrokerLeaseScopeSchema>) {
+    return this.issueLeaseWithId(randomUUID(), input);
+  }
+
+  private issueLeaseWithId(id: string, input: z.input<typeof BrokerLeaseScopeSchema>) {
     this.pruneLeases();
     if (this.leases.size >= MAX_RETAINED_LEASES) throw new Error("Provider broker lease retention limit is exhausted.");
+    if (this.leases.has(id)) throw new Error(`Provider broker lease already exists: ${id}`);
     const scope = BrokerLeaseScopeSchema.parse(input);
     if (scope.expiresAt <= Date.now()) throw new Error("Broker lease expiry must be in the future.");
     this.registerBudgetQuotas(scope.budgetQuotas, scope.expiresAt);
     const token = `hls_${randomBytes(32).toString("base64url")}`;
-    const id = randomUUID();
     this.leases.set(id, {
       ...scope,
       id,
@@ -209,6 +347,165 @@ export class ProviderBroker {
       expiresAt: scope.expiresAt,
       baseUrl: `${this.endpoint}/${scope.provider}`,
     };
+  }
+
+  /** Durably identify and synchronously carve one cross-provider parent hold. */
+  carveLinkedParent(linkId: string, parentRunId: string, value: z.input<typeof BrokerLinkedAllocationSchema>) {
+    const id = linkedOperationId(linkId, "parent");
+    const allocation = BrokerLinkedAllocationSchema.parse(value);
+    const existing = this.linkedOperations.get(id);
+    if (existing) {
+      if (existing.kind !== "parent" || linkedParentIdentity(existing.parentRunId, existing.allocation) !== linkedParentIdentity(parentRunId, allocation)) {
+        throw linkedConflict("Linked parent operation conflicts with its original allocation.");
+      }
+      if (existing.phase === "prepared") throw linkedConflict("Linked parent operation is incomplete and requires recovery.");
+      return BrokerLeaseCarveSchema.parse(existing.carve);
+    }
+
+    const lease = [...this.leases.values()].find((candidate) => candidate.runId === parentRunId && !candidate.revoked);
+    if (!lease) throw new Error("Parent broker lease is unavailable for delegation.");
+    const prepared = BrokerLinkedOperationSchema.parse({
+      kind: "parent",
+      operationId: id,
+      linkId,
+      parentRunId,
+      allocation,
+      phase: "prepared",
+      carve: { id, parentLeaseId: lease.id, runId: parentRunId, ...allocation, settled: false },
+      unused: null,
+      expiresAt: lease.expiresAt,
+      updatedAt: Date.now(),
+    });
+    this.storeLinkedOperation(prepared);
+    const carve = this.carveRunLeaseWithId(id, parentRunId, allocation);
+    const applied = BrokerLinkedOperationSchema.parse({
+      ...prepared,
+      phase: "applied",
+      carve,
+      updatedAt: Date.now(),
+    });
+    this.storeLinkedOperation(applied);
+    return BrokerLeaseCarveSchema.parse(carve);
+  }
+
+  /** Issue one target-provider capability from a durable linked allocation. */
+  issueLinkedTarget(linkId: string, childRunId: string, value: z.input<typeof BrokerLinkedTargetScopeSchema>) {
+    const id = linkedOperationId(linkId, "target");
+    const requestedScope = BrokerLinkedTargetScopeSchema.parse(value);
+    const leaseScope = this.reduceLinkedTargetScope(linkedTargetLeaseScope(id, childRunId, requestedScope));
+    const existing = this.linkedOperations.get(id);
+    if (existing) {
+      if (existing.kind !== "target" || linkedTargetIdentity(existing.childRunId, existing.requestedScope) !== linkedTargetIdentity(childRunId, requestedScope)) {
+        throw linkedConflict("Linked target operation conflicts with its original provider, model, or allocation.");
+      }
+      if (existing.phase === "prepared") throw linkedConflict("Linked target operation is incomplete and requires recovery.");
+      return { status: "already_leased" as const, evidence: linkedTargetEvidence(existing) };
+    }
+    if (this.linkedOperations.size >= MAX_RETAINED_LINKED_OPERATIONS) throw new Error("Provider broker linked-operation retention limit is exhausted.");
+
+    const now = Date.now();
+    const prepared = BrokerLinkedOperationSchema.parse({
+      kind: "target",
+      operationId: id,
+      linkId,
+      childRunId,
+      requestedScope,
+      targetLeaseId: id,
+      targetTokenHash: null,
+      targetIssuedAt: null,
+      targetQuotaScope: leaseScope,
+      targetExpiresAt: leaseScope.expiresAt,
+      phase: "prepared",
+      observation: emptyLinkedTargetObservation(id, leaseScope.expiresAt),
+      updatedAt: now,
+    });
+    this.storeLinkedOperation(prepared);
+    try {
+      const issuance = this.issueLeaseWithId(id, leaseScope);
+      const lease = this.leases.get(id)!;
+      const issued = BrokerLinkedTargetOperationSchema.parse({
+        ...prepared,
+        phase: "issued",
+        targetTokenHash: digestToken(issuance.token).toString("hex"),
+        targetIssuedAt: now,
+        observation: linkedTargetObservation(lease),
+        updatedAt: Date.now(),
+      });
+      this.storeLinkedOperation(issued);
+      return { status: "issued" as const, lease: { ...issuance }, evidence: linkedTargetEvidence(issued) };
+    } catch (error) {
+      this.revokeLease(id);
+      throw error;
+    }
+  }
+
+  observeLinkedTarget(linkId: string) {
+    const id = linkedOperationId(linkId, "target");
+    const operation = this.linkedOperations.get(id);
+    if (!operation || operation.kind !== "target") return null;
+    const lease = this.leases.get(operation.observation.leaseId);
+    if (lease) this.syncLinkedTargetObservation(lease);
+    const current = this.linkedOperations.get(id);
+    return current?.kind === "target" ? BrokerLinkedTargetObservationSchema.parse(current.observation) : null;
+  }
+
+  /** Revoke a target capability once; exact replays are no-ops. */
+  revokeLinkedTarget(linkId: string) {
+    const id = linkedOperationId(linkId, "target");
+    const operation = this.linkedOperations.get(id);
+    if (!operation || operation.kind !== "target") return false;
+    if (operation.phase === "revoked") return false;
+    const lease = this.leases.get(operation.observation.leaseId);
+    if (lease) {
+      lease.revoked = true;
+      operation.observation = linkedTargetObservation(lease);
+      if (lease.activeRequests === 0) this.leases.delete(lease.id);
+    } else {
+      operation.observation.revoked = true;
+      operation.observation.activeRequests = 0;
+    }
+    operation.phase = "revoked";
+    operation.updatedAt = Date.now();
+    this.storeLinkedOperation(BrokerLinkedOperationSchema.parse(operation));
+    return true;
+  }
+
+  /** Record a proven-unused parent allocation before restoring any live authority. */
+  settleLinkedParent(linkId: string, value: z.input<typeof BrokerLinkedUnusedSchema>) {
+    const id = linkedOperationId(linkId, "parent");
+    const operation = this.linkedOperations.get(id);
+    if (!operation || operation.kind !== "parent") throw new Error("Unknown linked parent operation.");
+    if (operation.phase === "prepared") throw linkedConflict("Linked parent operation is incomplete and requires recovery.");
+    const unused = BrokerLinkedUnusedSchema.parse(value);
+    assertUnusedFits(operation.allocation, unused);
+    if (operation.phase === "settled") {
+      if (JSON.stringify(operation.unused) !== JSON.stringify(unused)) {
+        throw linkedConflict("Linked parent settlement conflicts with the terminal settlement.");
+      }
+      return false;
+    }
+
+    const settled = BrokerLinkedParentOperationSchema.parse({
+      ...operation,
+      phase: "settled",
+      carve: { ...operation.carve, settled: true },
+      unused,
+      updatedAt: Date.now(),
+    });
+    // The once-only marker is write-ahead. A crash may forgo restoration, but
+    // it can never replay the same refund and enlarge the parent capability.
+    this.storeLinkedOperation(settled);
+    try {
+      this.restoreRunLeaseCarve(settled.carve, unused);
+    } catch (error) {
+      const lease = this.leases.get(settled.carve.parentLeaseId);
+      if (lease) {
+        lease.revoked = true;
+        if (lease.activeRequests === 0) this.leases.delete(lease.id);
+      }
+      throw error;
+    }
+    return true;
   }
 
   revokeLease(id: string) {
@@ -236,6 +533,7 @@ export class ProviderBroker {
     if (!lease) throw new Error("Unknown broker lease.");
     lease.observedCostUsd += amountUsd;
     if (lease.maxCostUsd !== null && lease.observedCostUsd > lease.maxCostUsd) lease.revoked = true;
+    this.syncLinkedTargetObservation(lease);
   }
 
   getLeaseObservation(leaseId: string) {
@@ -258,6 +556,10 @@ export class ProviderBroker {
 
   /** Synchronously remove a delegated slice from the live parent lease. */
   carveRunLease(runId: string, allocation: Omit<BrokerLeaseCarve, "id" | "parentLeaseId" | "runId" | "settled">) {
+    return this.carveRunLeaseWithId(randomUUID(), runId, allocation);
+  }
+
+  private carveRunLeaseWithId(id: string, runId: string, allocation: Omit<BrokerLeaseCarve, "id" | "parentLeaseId" | "runId" | "settled">) {
     const lease = [...this.leases.values()].find((candidate) => candidate.runId === runId && !candidate.revoked);
     if (!lease) throw new Error("Parent broker lease is unavailable for delegation.");
     const runQuota = lease.budgetQuotas.find((quota) => quota.id.startsWith("headless-run-"));
@@ -286,7 +588,7 @@ export class ProviderBroker {
       this.persistBudgetQuota?.(BrokerBudgetQuotaSchema.parse(aggregate), lease.expiresAt);
     }
     return {
-      id: randomUUID(),
+      id,
       parentLeaseId: lease.id,
       runId,
       ...allocation,
@@ -336,6 +638,76 @@ export class ProviderBroker {
 
   getLogs() {
     return this.logs.map((entry) => ({ ...entry }));
+  }
+
+  private storeLinkedOperation(operation: BrokerLinkedOperation) {
+    const value = BrokerLinkedOperationSchema.parse(operation);
+    if (!this.linkedOperations.has(value.operationId) && this.linkedOperations.size >= MAX_RETAINED_LINKED_OPERATIONS) {
+      throw new Error("Provider broker linked-operation retention limit is exhausted.");
+    }
+    this.persistLinkedOperation?.(value);
+    this.linkedOperations.set(value.operationId, value);
+  }
+
+  private syncLinkedTargetObservation(lease: Lease, throwOnFailure = false) {
+    const operation = this.linkedOperations.get(lease.id);
+    if (!operation || operation.kind !== "target" || operation.phase === "prepared") return;
+    const next = BrokerLinkedOperationSchema.parse({
+      ...operation,
+      phase: lease.revoked ? "revoked" : operation.phase,
+      observation: linkedTargetObservation(lease),
+      updatedAt: Date.now(),
+    });
+    try {
+      this.storeLinkedOperation(next);
+    } catch (error) {
+      if (throwOnFailure) throw error;
+      recordRuntimeDiagnostic("state", "broker.linked-target-observation", error);
+    }
+  }
+
+  private restoreRunLeaseCarve(carve: BrokerLeaseCarve, unused: z.infer<typeof BrokerLinkedUnusedSchema>) {
+    const lease = this.leases.get(carve.parentLeaseId);
+    if (!lease || lease.revoked || lease.runId !== carve.runId) return false;
+    const runQuota = lease.budgetQuotas.find((quota) => quota.id.startsWith("headless-run-"));
+    const aggregate = runQuota ? this.budgetQuotas.get(runQuota.id) : null;
+    lease.maxRequests += unused.requests;
+    if (unused.costUsd !== null && lease.maxCostUsd !== null) lease.maxCostUsd += unused.costUsd;
+    if (runQuota && aggregate) {
+      if (runQuota.maxRequests !== null && aggregate.maxRequests !== null) {
+        runQuota.maxRequests += unused.requests;
+        aggregate.maxRequests += unused.requests;
+      }
+      if (unused.inputTokens !== null && runQuota.maxInputTokens !== null && aggregate.maxInputTokens !== null) {
+        runQuota.maxInputTokens += unused.inputTokens;
+        aggregate.maxInputTokens += unused.inputTokens;
+      }
+      if (unused.outputTokens !== null && runQuota.maxOutputTokens !== null && aggregate.maxOutputTokens !== null) {
+        runQuota.maxOutputTokens += unused.outputTokens;
+        aggregate.maxOutputTokens += unused.outputTokens;
+      }
+      this.persistBudgetQuota?.(BrokerBudgetQuotaSchema.parse(aggregate), lease.expiresAt);
+    }
+    return true;
+  }
+
+  private reduceLinkedTargetScope(scope: BrokerLeaseScope) {
+    const budgetQuotas = scope.budgetQuotas.map((quota) => {
+      const existing = this.budgetQuotas.get(quota.id);
+      if (!existing) return quota;
+      return BrokerBudgetQuotaSchema.parse({
+        id: quota.id,
+        maxRequests: minimumNullableLimit(existing.maxRequests, quota.maxRequests),
+        usedRequests: Math.max(existing.usedRequests, quota.usedRequests),
+        maxInputTokens: minimumNullableLimit(existing.maxInputTokens, quota.maxInputTokens),
+        usedInputTokens: Math.max(existing.usedInputTokens, quota.usedInputTokens),
+        maxOutputTokens: minimumNullableLimit(existing.maxOutputTokens, quota.maxOutputTokens),
+        usedOutputTokens: Math.max(existing.usedOutputTokens, quota.usedOutputTokens),
+        maxCostUsd: minimumNullableLimit(existing.maxCostUsd, quota.maxCostUsd),
+        usedCostUsd: Math.max(existing.usedCostUsd, quota.usedCostUsd),
+      });
+    });
+    return BrokerLeaseScopeSchema.parse({ ...scope, budgetQuotas });
   }
 
   private async handle(request: Request) {
@@ -394,8 +766,15 @@ export class ProviderBroker {
       releaseBody();
       lease.activeRequests = Math.max(0, lease.activeRequests - 1);
       this.activeRequests = Math.max(0, this.activeRequests - 1);
+      this.syncLinkedTargetObservation(lease);
       if (lease.activeRequests === 0 && (lease.revoked || lease.expiresAt <= Date.now())) this.leases.delete(lease.id);
     };
+    try {
+      this.syncLinkedTargetObservation(lease, true);
+    } catch {
+      releaseActive();
+      return this.failure(lease, providerId, request, route, 503, "Linked broker evidence could not be persisted before request processing.", started, 0);
+    }
     let bodyRead: Awaited<ReturnType<typeof readBodyBounded>>;
     try {
       bodyRead = hasBody
@@ -550,6 +929,7 @@ export class ProviderBroker {
     let responseOwnsCleanup = false;
     try {
       lease.forwardedRequests += 1;
+      this.syncLinkedTargetObservation(lease, true);
       const response = await this.fetcher(upstream, {
         method: request.method,
         headers,
@@ -703,7 +1083,9 @@ export class ProviderBroker {
 
   private pruneLeases(now = Date.now()) {
     for (const [id, lease] of this.leases) {
-      if (lease.activeRequests === 0 && (lease.revoked || lease.expiresAt <= now)) this.leases.delete(id);
+      if (lease.activeRequests === 0 && (lease.revoked || lease.expiresAt <= now)) {
+        this.leases.delete(id);
+      }
     }
   }
 
@@ -717,6 +1099,137 @@ export class ProviderBroker {
     this.logs.push({ id: randomUUID(), runId: lease?.runId ?? null, provider, route, method, status, requestBytes, durationMs, error });
     if (this.logs.length > this.maxLogEntries) this.logs.splice(0, this.logs.length - this.maxLogEntries);
   }
+}
+
+function linkedOperationId(linkId: string, kind: "parent" | "target") {
+  return `${digest.parse(linkId)}:${kind}`;
+}
+
+function linkedTargetRunQuotaId(linkId: string) {
+  return `headless-linked-target-${digest.parse(linkId)}`;
+}
+
+function linkedParentIdentity(parentRunId: string, allocation: z.infer<typeof BrokerLinkedAllocationSchema>) {
+  return JSON.stringify({ parentRunId, allocation });
+}
+
+function linkedTargetIdentity(childRunId: string, scope: BrokerLinkedTargetScope) {
+  return JSON.stringify({ childRunId, scope });
+}
+
+function linkedConflict(message: string) {
+  return new HeadlessError("CONFLICT", message);
+}
+
+function linkedTargetLeaseScope(operationId: string, childRunId: string, scope: BrokerLinkedTargetScope) {
+  const linkId = operationId.slice(0, 64);
+  const runQuotaId = linkedTargetRunQuotaId(linkId);
+  if (scope.budgetQuotas.some((quota) => quota.id === runQuotaId)) {
+    throw linkedConflict("Linked target scope cannot supply its broker-derived run quota.");
+  }
+  return BrokerLeaseScopeSchema.parse({
+    runId: childRunId,
+    provider: scope.provider,
+    models: scope.models,
+    endpointClasses: scope.endpointClasses,
+    expiresAt: Math.min(scope.expiresAt, scope.childDeadlineAt + scope.replyMarginMs),
+    maxRequests: scope.maxRequests,
+    maxBodyBytes: scope.maxBodyBytes,
+    maxConcurrentRequests: scope.maxConcurrentRequests,
+    maxInFlightBodyBytes: scope.maxInFlightBodyBytes,
+    maxStreamMs: scope.maxStreamMs,
+    maxCostUsd: scope.maxCostUsd,
+    budgetQuotas: [
+      {
+        id: runQuotaId,
+        maxRequests: scope.maxRequests,
+        usedRequests: 0,
+        maxInputTokens: scope.maxInputTokens,
+        usedInputTokens: 0,
+        maxOutputTokens: scope.maxOutputTokens,
+        usedOutputTokens: 0,
+        maxCostUsd: scope.maxCostUsd,
+        usedCostUsd: 0,
+      },
+      ...scope.budgetQuotas,
+    ],
+  });
+}
+
+function emptyLinkedTargetObservation(leaseId: string, expiresAt: number) {
+  return BrokerLinkedTargetObservationSchema.parse({
+    leaseId,
+    requests: 0,
+    forwardedRequests: 0,
+    observedCostUsd: 0,
+    accountedCostUsd: 0,
+    accountedInputTokens: 0,
+    accountedOutputTokens: 0,
+    activeRequests: 0,
+    revoked: false,
+    expiresAt,
+  });
+}
+
+function linkedTargetObservation(lease: Lease) {
+  return BrokerLinkedTargetObservationSchema.parse({
+    leaseId: lease.id,
+    requests: lease.requests,
+    forwardedRequests: lease.forwardedRequests,
+    observedCostUsd: lease.observedCostUsd,
+    accountedCostUsd: lease.accountedCostUsd,
+    accountedInputTokens: lease.accountedInputTokens,
+    accountedOutputTokens: lease.accountedOutputTokens,
+    activeRequests: lease.activeRequests,
+    revoked: lease.revoked,
+    expiresAt: lease.expiresAt,
+  });
+}
+
+function linkedTargetEvidence(operation: z.infer<typeof BrokerLinkedTargetOperationSchema>) {
+  return {
+    targetLeaseId: operation.targetLeaseId,
+    targetTokenHash: operation.targetTokenHash!,
+    targetIssuedAt: operation.targetIssuedAt!,
+    targetQuotaScope: BrokerLeaseScopeSchema.parse(operation.targetQuotaScope),
+    targetExpiresAt: operation.targetExpiresAt,
+  };
+}
+
+function addUnusedIssues(
+  allocation: z.infer<typeof BrokerLinkedAllocationSchema>,
+  unused: z.infer<typeof BrokerLinkedUnusedSchema>,
+  context: z.RefinementCtx,
+) {
+  if (unused.requests > allocation.requests) context.addIssue({ code: z.ZodIssueCode.custom, path: ["unused", "requests"], message: "Unused linked requests exceed the allocation." });
+  addUnusedNullableIssue("inputTokens", allocation.inputTokens, unused.inputTokens, context);
+  addUnusedNullableIssue("outputTokens", allocation.outputTokens, unused.outputTokens, context);
+  addUnusedNullableIssue("costUsd", allocation.costUsd, unused.costUsd, context);
+}
+
+function addUnusedNullableIssue(
+  field: "inputTokens" | "outputTokens" | "costUsd",
+  allocation: number | null,
+  unused: number | null,
+  context: z.RefinementCtx,
+) {
+  if (allocation === null && unused !== null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["unused", field], message: `Unknown linked ${field} cannot be restored.` });
+  } else if (allocation !== null && unused !== null && unused > allocation) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["unused", field], message: `Unused linked ${field} exceeds the allocation.` });
+  }
+}
+
+function assertUnusedFits(allocation: z.infer<typeof BrokerLinkedAllocationSchema>, unused: z.infer<typeof BrokerLinkedUnusedSchema>) {
+  if (unused.requests > allocation.requests) throw new TypeError("Unused linked requests exceed the allocation.");
+  assertUnusedNullableFits("inputTokens", allocation.inputTokens, unused.inputTokens);
+  assertUnusedNullableFits("outputTokens", allocation.outputTokens, unused.outputTokens);
+  assertUnusedNullableFits("costUsd", allocation.costUsd, unused.costUsd);
+}
+
+function assertUnusedNullableFits(field: string, allocation: number | null, unused: number | null) {
+  if (allocation === null && unused !== null) throw new TypeError(`Unknown linked ${field} cannot be restored.`);
+  if (allocation !== null && unused !== null && unused > allocation) throw new TypeError(`Unused linked ${field} exceeds the allocation.`);
 }
 
 function digestToken(token: string) {
@@ -974,4 +1487,10 @@ function assertCarveFits(label: string, allocation: number | null, maximum: numb
 function unusedNullable(allocated: number | null, actual: number | null | undefined) {
   if (allocated === null || actual === null || actual === undefined) return null;
   return Math.max(0, allocated - actual);
+}
+
+function minimumNullableLimit(left: number | null, right: number | null) {
+  if (left === null) return right;
+  if (right === null) return left;
+  return Math.min(left, right);
 }

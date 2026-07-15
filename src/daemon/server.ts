@@ -164,6 +164,8 @@ export class HeadlessDaemon {
       unixSocketPath: join(this.state.daemonRuntimeDir, `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`),
       initialBudgetQuotas: brokerQuotas.snapshot(),
       persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
+      initialLinkedOperations: brokerQuotas.linkedSnapshot(),
+      persistLinkedOperation: (operation) => brokerQuotas.updateLinkedOperation(operation),
     });
     this.coordinator = options.coordinator ?? this.principal;
     this.writeGateChecks = options.writeGateChecks ?? DEFAULT_GATES;

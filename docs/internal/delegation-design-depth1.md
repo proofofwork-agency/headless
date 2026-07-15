@@ -210,14 +210,14 @@ All steps through the parent broker carve run synchronously under one daemon del
 4. In one BudgetStore atomic replacement, revalidate generations and remaining values, subtract the parent envelope, create the inactive child reservation with the target provider and target-matching budget ids, and transition to `held`. This is the commit point for both budget-side holds; there is no crash point at which only one is visible.
 5. Carve the parent live broker lease with deterministic operation id `linkId:parent`. The carve reduces request/token/cost ceilings by the parent allocation and persists its run-quota counters before transitioning to `parent_carved`. A retry returns the identical carve; a conflicting retry fails closed.
 6. Activate the child reservation without queueing. If the concurrency slot disappeared, roll back only after proving no target lease/request exists; otherwise exhaust. Consume the scoped authority iteration, create the durable child job/request with `delegationOf`, then transition to `admitted`.
-7. Normal execution derives a target lease from the child reservation using deterministic operation id `linkId:target`. Its run quota and all target/global budget quota counters are separate from the parent lease, capped by the linked allocation, and expire no later than the child deadline plus reply margin. Persist issuance evidence, never the token, and transition to `leased` before handing the token to the child.
+7. Normal execution derives a target lease from the child reservation using deterministic operation id `linkId:target`. Its run quota and all target/global budget quota counters are separate from the parent lease, capped by the linked allocation, and expire no later than the child deadline plus reply margin. Mint the bearer exactly once from `admitted`, persist only `{ targetLeaseId, targetTokenHash, targetIssuedAt, targetQuotaScope, targetExpiresAt }`, transition to `leased`, and then hand the one returned bearer to the child. The broker never persists or retains the plaintext bearer.
 
 The child still receives fresh HOME/runtime state, no parent token/socket/secrets, and a run-tool credential without `run.delegate`. Cross-provider admission changes quota linkage only; all v1 execution, cancellation, containment, and result rules remain in force.
 
 `ProviderBroker` therefore needs idempotent linked operations rather than a second ordinary carve:
 
 - `carveLinkedParent(linkId, parentRunId, allocation)` wraps the existing synchronous parent-lease reduction and returns the existing identical carve on replay.
-- `issueLinkedTarget(linkId, childRunId, targetScope)` issues exactly one target lease, binds its run quota to the linked child reservation, and rejects a changed provider/model/allocation.
+- `issueLinkedTarget(linkId, childRunId, targetScope)` issues exactly one target lease, binds its run quota to the linked child reservation, and rejects a changed provider/model/allocation. Its first successful call returns the bearer once. Every in-process or post-restart replay returns `already_leased` with token-free evidence only; it never remints or reproduces the bearer.
 - `observeLinkedTarget(linkId)` returns only counters, forwarded-request state, active-request count, revocation, and expiry; it never returns the token.
 - `settleLinkedParent(linkId, unused)` and target revocation are once-only even when journal recovery repeats them.
 
@@ -233,7 +233,7 @@ The parent lease and target lease serve different purposes. The parent carve fen
 4. In one BudgetStore atomic replacement, remove the target child reservation, charge its actual usage once to its target/global budget ids, return only proven-unused dimensions to the parent envelope, and transition to `settled`. The consumed parent slice is delegation authority consumed, not parent-provider usage; parent-provider budgets are charged only for the parent's own result.
 5. Settle the deterministic parent broker carve, restoring the same proven-unused dimensions once. If the daemon dies after budget settlement but before this live restoration, replay sees `settled` and retries the idempotent broker settlement; if the old parent lease is gone, no spend authority remains to restore.
 
-Broker aggregate counters are enforcement evidence, while BudgetStore is durable accounting. Replaying a settlement digest is a no-op. A different digest for an already settling/terminal link is an integrity error. The target lease is never reissued after a terminal child, and neither provider can be charged twice by job recovery plus journal recovery.
+Broker aggregate counters are enforcement evidence, while BudgetStore is durable accounting. Replaying a settlement digest is a no-op. A different digest for an already settling/terminal link is an integrity error. The target bearer is never reissued after its first mint, including before terminal state; a lost bearer is handled by recovery rather than reproduced. Neither provider can be charged twice by job recovery plus journal recovery.
 
 ### Rollback, interruption, and startup recovery
 
@@ -312,7 +312,7 @@ If the target cannot be isolated while every other budget, reservation, and link
 - Contract/migration tests accept v3 state by adding an empty journal, reject unknown states/fields, and preserve the v1 same-provider byte-for-byte behavior after migration.
 - Atomicity tests kill after `intent`, during the atomic `held` write, after parent carve, after child admission, after target lease, and during settlement; each restart reaches the specified terminal state.
 - Budget tests prove both provider/global holds fit before admission, concurrent requests admit one child, no target ordinary reservation creates independent authority, and parent/target budgets cannot double-spend.
-- Broker tests prove deterministic carve/lease replay, separate provider scopes, target token non-persistence, zero-egress rollback, bounded expiry, and once-only unused restoration.
+- Broker tests prove deterministic parent-carve replay, mint-once target replay returning token-free `already_leased` evidence, separate provider scopes, target token non-persistence/non-retention, zero-egress rollback, bounded expiry, and once-only unused restoration.
 - Recovery tests inject one-sided reservations, missing jobs, altered allocations, regressed counters, duplicate links, and settlement-digest mismatch; every ambiguity fails readiness without releasing quota.
 - Operator-recovery tests prove inspect is redacted/read-only, mutation requires admin ownership plus confirm/digest/resolution, one quarantined `linkId` restores readiness, its audit evidence survives, and every other hold remains byte-for-byte unchanged.
 - Usage tests prove target actuals charge target/global budgets once, parent actuals charge parent/global budgets once, unused linked allocation returns once, and crash-unknown exhausts both sides of the slice.

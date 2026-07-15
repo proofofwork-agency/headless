@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProviderBroker } from "../src/broker/server";
+import { ProviderBroker, type BrokerLinkedOperation } from "../src/broker/server";
 import { getProvider, registerProvider, unregisterProvider } from "../src/broker/providers";
 import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
 import { DurableBrokerQuotaStore } from "../src/runtime/broker-quota-store";
@@ -197,6 +197,262 @@ describe("provider broker", () => {
     expect(broker.settleRunLeaseCarve(carve, { requests: 0 })).toBe(false);
     expect((await send()).status).toBe(200);
     expect((await send()).status).toBe(429);
+  });
+
+  test("replays one deterministic linked parent carve and settles proven-unused authority once", async () => {
+    const operations: BrokerLinkedOperation[] = [];
+    const broker = new ProviderBroker({
+      credentials: { ANTHROPIC_API_KEY: "secret" },
+      upstreams: { anthropic: "http://127.0.0.1:9" },
+      fetch: (async () => Response.json({ ok: true })) as typeof fetch,
+      persistLinkedOperation: (operation) => replaceOperation(operations, operation),
+    });
+    broker.start();
+    closers.push(() => broker.stop());
+    const lease = broker.issueLease({
+      runId: "linked-parent",
+      provider: "anthropic",
+      models: ["claude-test"],
+      endpointClasses: ["messages"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 4,
+      budgetQuotas: [{
+        id: "headless-run-linked-parent",
+        maxRequests: 4,
+        usedRequests: 0,
+        maxInputTokens: null,
+        usedInputTokens: 0,
+        maxOutputTokens: null,
+        usedOutputTokens: 0,
+      }],
+    });
+    const linkId = "a".repeat(64);
+    const allocation = { requests: 2, inputTokens: null, outputTokens: null, costUsd: null };
+    const first = broker.carveLinkedParent(linkId, "linked-parent", allocation);
+    const replay = broker.carveLinkedParent(linkId, "linked-parent", allocation);
+    expect(first).toEqual(replay);
+    expect(first.id).toBe(`${linkId}:parent`);
+    expect(() => broker.carveLinkedParent(linkId, "linked-parent", { ...allocation, requests: 1 })).toThrow("conflicts");
+
+    const send = () => fetch(`${lease.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "x-api-key": lease.token, "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-test" }),
+    });
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(429);
+    const unused = { requests: 1, inputTokens: null, outputTokens: null, costUsd: null };
+    expect(broker.settleLinkedParent(linkId, unused)).toBe(true);
+    expect(broker.settleLinkedParent(linkId, unused)).toBe(false);
+    expect(() => broker.settleLinkedParent(linkId, { ...unused, requests: 0 })).toThrow("conflicts");
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(429);
+    expect(operations).toContainEqual(expect.objectContaining({
+      kind: "parent",
+      operationId: `${linkId}:parent`,
+      phase: "settled",
+      unused,
+    }));
+    expect(JSON.stringify(operations)).not.toContain(lease.token);
+  });
+
+  test("mints one target bearer without retaining it and keeps provider and quota scopes separate", async () => {
+    const operations: BrokerLinkedOperation[] = [];
+    const broker = new ProviderBroker({
+      credentials: { ANTHROPIC_API_KEY: "anthropic-secret", OPENAI_API_KEY: "openai-secret" },
+      upstreams: { anthropic: "http://127.0.0.1:9", openai: "http://127.0.0.1:9" },
+      fetch: (async () => Response.json({ ok: true })) as typeof fetch,
+      initialBudgetQuotas: [{
+        id: "target-provider-budget",
+        maxRequests: 1,
+        usedRequests: 0,
+        maxInputTokens: 80,
+        usedInputTokens: 0,
+        maxOutputTokens: 8,
+        usedOutputTokens: 0,
+        maxCostUsd: null,
+        usedCostUsd: 0,
+      }],
+      persistLinkedOperation: (operation) => replaceOperation(operations, operation),
+    });
+    broker.start();
+    closers.push(() => broker.stop());
+    const parent = broker.issueLease({
+      runId: "provider-parent",
+      provider: "anthropic",
+      models: ["claude-test"],
+      endpointClasses: ["messages"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 2,
+      budgetQuotas: [{
+        id: "headless-run-provider-parent",
+        maxRequests: 2,
+        usedRequests: 0,
+        maxInputTokens: null,
+        usedInputTokens: 0,
+        maxOutputTokens: null,
+        usedOutputTokens: 0,
+      }],
+    });
+    const linkId = "b".repeat(64);
+    const childDeadlineAt = Date.now() + 20_000;
+    const scope = linkedTargetScope(childDeadlineAt);
+    const first = broker.issueLinkedTarget(linkId, "target-child", scope);
+    expect(first.status).toBe("issued");
+    if (first.status !== "issued") throw new Error("Expected first linked target issuance.");
+    expect(first.lease.provider).toBe("openai");
+    expect(first.lease.expiresAt).toBeLessThanOrEqual(childDeadlineAt + scope.replyMarginMs);
+    expect(first.evidence.targetQuotaScope.budgetQuotas.map((quota) => quota.id)).toEqual([
+      `headless-linked-target-${linkId}`,
+      "target-provider-budget",
+      "global-budget",
+    ]);
+    expect(first.evidence.targetQuotaScope.budgetQuotas.map((quota) => quota.id)).not.toContain("headless-run-provider-parent");
+    expect(first.evidence.targetQuotaScope.budgetQuotas.find((quota) => quota.id === "target-provider-budget")).toMatchObject({
+      maxRequests: 1,
+      maxInputTokens: 80,
+      maxOutputTokens: 8,
+    });
+
+    const replay = broker.issueLinkedTarget(linkId, "target-child", scope);
+    expect(replay).toEqual({ status: "already_leased", evidence: first.evidence });
+    expect(JSON.stringify(replay)).not.toContain(first.lease.token);
+    expect((replay as Record<string, unknown>).token).toBeUndefined();
+    expect(() => broker.issueLinkedTarget(linkId, "target-child", { ...scope, models: ["changed"] })).toThrow("conflicts");
+
+    const targetOnParent = await fetch(`${broker.endpoint}/anthropic/v1/messages`, {
+      method: "POST",
+      headers: { "x-api-key": first.lease.token, "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-test" }),
+    });
+    const parentOnTarget = await fetch(`${broker.endpoint}/openai/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${parent.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", input: "x", max_output_tokens: 1 }),
+    });
+    expect(targetOnParent.status).toBe(403);
+    expect(parentOnTarget.status).toBe(403);
+
+    const targetResponse = await fetch(`${first.lease.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${first.lease.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", input: "x", max_output_tokens: 1 }),
+    });
+    expect(targetResponse.status).toBe(200);
+    const observation = broker.observeLinkedTarget(linkId);
+    expect(observation).toMatchObject({ requests: 1, forwardedRequests: 1, activeRequests: 0, revoked: false });
+    expect(JSON.stringify(observation)).not.toContain(first.lease.token);
+    expect(broker.getLeaseObservation(parent.id)).toMatchObject({ provider: "anthropic", requests: 0 });
+    expect(broker.getLeaseObservation(first.lease.id)).toMatchObject({ provider: "openai", requests: 1 });
+
+    expect(broker.revokeLinkedTarget(linkId)).toBe(true);
+    expect(broker.revokeLinkedTarget(linkId)).toBe(false);
+    expect(broker.observeLinkedTarget(linkId)).toMatchObject({ revoked: true, activeRequests: 0 });
+    expect((await fetch(`${first.lease.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${first.lease.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", input: "x", max_output_tokens: 1 }),
+    })).status).toBe(401);
+    expect(JSON.stringify(operations)).not.toContain(first.lease.token);
+  });
+
+  test("persists token-free target issuance evidence and never remints it after restart", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-linked-broker-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const project = join(root, "project");
+    mkdirSync(project);
+    const paths = ensureProjectStateDirectories(getProjectStatePaths(project, {
+      env: { ...process.env, HEADLESS_STATE_HOME: join(root, "state"), HEADLESS_RUNTIME_HOME: undefined },
+    }));
+    const createBroker = () => {
+      const store = new DurableBrokerQuotaStore(paths);
+      const broker = new ProviderBroker({
+        credentials: { OPENAI_API_KEY: "secret" },
+        initialBudgetQuotas: store.snapshot(),
+        persistBudgetQuota: (quota, expiresAt) => store.update(quota, expiresAt),
+        initialLinkedOperations: store.linkedSnapshot(),
+        persistLinkedOperation: (operation) => store.updateLinkedOperation(operation),
+      });
+      broker.start();
+      return broker;
+    };
+    const linkId = "c".repeat(64);
+    const scope = linkedTargetScope(Date.now() + 20_000);
+    const firstBroker = createBroker();
+    const first = firstBroker.issueLinkedTarget(linkId, "restart-child", scope);
+    expect(first.status).toBe("issued");
+    if (first.status !== "issued") throw new Error("Expected first linked target issuance.");
+    const persisted = readFileSync(paths.brokerQuotasPath, "utf8");
+    expect(persisted).not.toContain(first.lease.token);
+    expect(persisted).toContain(first.evidence.targetTokenHash);
+    firstBroker.stop();
+
+    const reopened = createBroker();
+    closers.push(() => reopened.stop());
+    const replay = reopened.issueLinkedTarget(linkId, "restart-child", scope);
+    expect(replay).toEqual({ status: "already_leased", evidence: first.evidence });
+    expect(JSON.stringify(replay)).not.toContain(first.lease.token);
+    expect(reopened.observeLinkedTarget(linkId)).toEqual({
+      leaseId: `${linkId}:target`,
+      requests: 0,
+      forwardedRequests: 0,
+      observedCostUsd: 0,
+      accountedCostUsd: 0,
+      accountedInputTokens: 0,
+      accountedOutputTokens: 0,
+      activeRequests: 0,
+      revoked: false,
+      expiresAt: first.evidence.targetExpiresAt,
+    });
+  });
+
+  test("upgrades the durable quota envelope without changing existing quota evidence", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-quota-upgrade-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const project = join(root, "project");
+    mkdirSync(project);
+    const paths = ensureProjectStateDirectories(getProjectStatePaths(project, {
+      env: { ...process.env, HEADLESS_STATE_HOME: join(root, "state"), HEADLESS_RUNTIME_HOME: undefined },
+    }));
+    const quota = {
+      id: "existing-quota",
+      maxRequests: 3,
+      usedRequests: 1,
+      maxInputTokens: 100,
+      usedInputTokens: 20,
+      maxOutputTokens: 10,
+      usedOutputTokens: 2,
+      maxCostUsd: 2,
+      usedCostUsd: 0.5,
+      expiresAt: Date.now() + 60_000,
+      updatedAt: 123,
+    };
+    writeFileSync(paths.brokerQuotasPath, `${JSON.stringify({
+      version: 1,
+      projectId: paths.projectId,
+      quotas: [quota],
+      updatedAt: 123,
+    })}\n`, { mode: 0o600 });
+
+    const store = new DurableBrokerQuotaStore(paths);
+    expect(store.snapshot()).toEqual([expect.objectContaining({
+      id: quota.id,
+      maxRequests: quota.maxRequests,
+      usedRequests: quota.usedRequests,
+      maxInputTokens: quota.maxInputTokens,
+      usedInputTokens: quota.usedInputTokens,
+      maxOutputTokens: quota.maxOutputTokens,
+      usedOutputTokens: quota.usedOutputTokens,
+      maxCostUsd: quota.maxCostUsd,
+      usedCostUsd: quota.usedCostUsd,
+    })]);
+    expect(store.linkedSnapshot()).toEqual([]);
+    expect(JSON.parse(readFileSync(paths.brokerQuotasPath, "utf8"))).toMatchObject({
+      version: 2,
+      quotas: [quota],
+      linkedOperations: [],
+    });
   });
 
   test("enforces one aggregate request cap across leases issued at different times", async () => {
@@ -924,3 +1180,48 @@ describe("provider broker", () => {
     expect(unregisterProvider("custom-test")).toBe(true);
   });
 });
+
+function replaceOperation(operations: BrokerLinkedOperation[], operation: BrokerLinkedOperation) {
+  const index = operations.findIndex((candidate) => candidate.operationId === operation.operationId);
+  if (index < 0) operations.push(operation);
+  else operations[index] = operation;
+}
+
+function linkedTargetScope(childDeadlineAt: number) {
+  return {
+    provider: "openai",
+    models: ["gpt-test"],
+    endpointClasses: ["responses"] as const,
+    expiresAt: childDeadlineAt + 60_000,
+    childDeadlineAt,
+    replyMarginMs: 2_000,
+    maxRequests: 2,
+    maxInputTokens: 100,
+    maxOutputTokens: 10,
+    maxCostUsd: null,
+    budgetQuotas: [
+      {
+        id: "target-provider-budget",
+        maxRequests: 2,
+        usedRequests: 0,
+        maxInputTokens: 100,
+        usedInputTokens: 0,
+        maxOutputTokens: 10,
+        usedOutputTokens: 0,
+        maxCostUsd: null,
+        usedCostUsd: 0,
+      },
+      {
+        id: "global-budget",
+        maxRequests: 4,
+        usedRequests: 0,
+        maxInputTokens: 200,
+        usedInputTokens: 0,
+        maxOutputTokens: 20,
+        usedOutputTokens: 0,
+        maxCostUsd: null,
+        usedCostUsd: 0,
+      },
+    ],
+  };
+}
