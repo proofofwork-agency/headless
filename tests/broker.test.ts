@@ -168,6 +168,37 @@ describe("provider broker", () => {
     expect(broker.getLeaseObservation(lease.id)?.requests).toBe(1);
   });
 
+  test("carves a child slice from the live parent lease and restores proven unused capacity once", async () => {
+    const broker = new ProviderBroker({
+      credentials: { OPENAI_API_KEY: "secret" },
+      upstreams: { openai: "http://127.0.0.1:9" },
+      fetch: (async () => Response.json({ ok: true })) as typeof fetch,
+    });
+    broker.start();
+    closers.push(() => broker.stop());
+    const lease = broker.issueLease({
+      runId: "delegating-parent",
+      provider: "openai",
+      models: ["allowed"],
+      endpointClasses: ["responses"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 4,
+    });
+    const carve = broker.carveRunLease("delegating-parent", { requests: 2, inputTokens: null, outputTokens: null, costUsd: null });
+    const send = () => fetch(`${lease.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${lease.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "allowed" }),
+    });
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(429);
+    expect(broker.settleRunLeaseCarve(carve, { requests: 1 })).toBe(true);
+    expect(broker.settleRunLeaseCarve(carve, { requests: 0 })).toBe(false);
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(429);
+  });
+
   test("enforces one aggregate request cap across leases issued at different times", async () => {
     let upstreamCalls = 0;
     const broker = new ProviderBroker({

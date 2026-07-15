@@ -120,6 +120,28 @@ describe("run-scoped daemon tool endpoint", () => {
     await expect(callRunToolEndpoint(endpoint, "context", {}, 250)).rejects.toMatchObject({ code: "RUN_TOOL_UNAVAILABLE" });
   });
 
+  test("validates delegation strictly and enforces each credential operation allowlist", async () => {
+    const root = temporaryDirectory();
+    let observedRequestId = "";
+    const manager = new RunToolEndpointManager({
+      socketDir: root,
+      handle: (_scope, operation, params, requestId) => {
+        observedRequestId = requestId;
+        return { operation, params };
+      },
+    });
+    managers.push(manager);
+    const childEndpoint = await manager.issue(scope(Date.now() + 10_000), ["context"]);
+    await expect(callRunToolEndpoint(childEndpoint, "run.delegate", { backend: "other", prompt: "forged" })).rejects.toMatchObject({ code: "POLICY_DENIED" });
+
+    const parentEndpoint = await manager.issue(scope(Date.now() + 10_000));
+    const result = await callRunToolEndpoint(parentEndpoint, "run.delegate", { backend: "other", prompt: "bounded" }) as { params: Record<string, unknown> };
+    expect(result.params).toMatchObject({ backend: "other", prompt: "bounded", budgetFraction: 0.25 });
+    expect(observedRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    await expect(callRunToolEndpoint(parentEndpoint, "run.delegate", { backend: "other", prompt: "bounded", budgetFraction: 0.51 })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(callRunToolEndpoint(parentEndpoint, "run.delegate", { backend: "other", prompt: "bounded", parentJobId: "forged" })).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
   test("cooperation operations stay bound to the daemon-owned job, session, task, and principal", async () => {
     const root = temporaryDirectory();
     const project = join(root, "project");

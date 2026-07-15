@@ -1,6 +1,7 @@
 import { chmodSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import type { WorkerEnvironment } from "./worker-environment";
+import type { RunToolOperation } from "../daemon/run-tool-endpoint";
 
 export type RunToolWorkerAccess = {
   socketPath: string;
@@ -8,6 +9,7 @@ export type RunToolWorkerAccess = {
   expiresAt: number;
   jobId: string;
   sessionId: string;
+  operations?: RunToolOperation[];
 };
 
 export const DEFAULT_RUN_TOOL_TIMEOUT_MS = 5_000;
@@ -37,15 +39,16 @@ export function installRunToolClient(worker: WorkerEnvironment, access: RunToolW
     HEADLESS_RUN_JOB_ID: access.jobId,
     HEADLESS_RUN_SESSION_ID: access.sessionId,
     HEADLESS_RUN_TOOL_TIMEOUT_MS: String(runToolCallTimeoutMs()),
+    HEADLESS_RUN_TOOL_OPERATIONS: (access.operations ?? []).join(","),
   } satisfies NodeJS.ProcessEnv;
 }
 
-export function withRunToolInstructions(prompt: string) {
+export function withRunToolInstructions(prompt: string, operations: readonly RunToolOperation[] = []) {
   return [
     "HEADLESS AUTHENTICATED RUN TOOLS",
     "A short-lived, run-scoped cooperation endpoint is provisioned only during this worker run.",
     "Call it through the protected helper: headless-run-tool <operation> '<json-params>'.",
-    "Allowed operations: context, task_status, note, artifact, propose_final, message_send, messages_pull, ask_for_more_work, ask_for_backup.",
+    `Allowed operations: ${(operations.length > 0 ? operations : ["context", "task_status", "note", "artifact", "propose_final", "message_send", "messages_pull", "ask_for_more_work", "ask_for_backup"]).join(", ")}.`,
     "Examples:",
     `  headless-run-tool context '{"view":"summary","limit":40}'`,
     `  headless-run-tool note '{"text":"Concrete progress and evidence."}'`,
@@ -88,9 +91,14 @@ const socket = hasRelay ? createConnection({ host: relayHost, port: relayPort })
 socket.setEncoding("utf8");
 let buffer = "";
 const configuredTimeoutMs = Number(process.env.HEADLESS_RUN_TOOL_TIMEOUT_MS);
-const timeoutMs = Number.isSafeInteger(configuredTimeoutMs)
+const baseTimeoutMs = Number.isSafeInteger(configuredTimeoutMs)
   ? Math.max(${MIN_RUN_TOOL_TIMEOUT_MS}, Math.min(${MAX_RUN_TOOL_TIMEOUT_MS}, configuredTimeoutMs))
   : ${DEFAULT_RUN_TOOL_TIMEOUT_MS};
+const requestedDelegateMs = operation === "run.delegate" && Number.isSafeInteger(params.timeoutMs) ? params.timeoutMs : 60000;
+const expiresAt = Number(process.env.HEADLESS_RUN_TOOL_EXPIRES_AT);
+const timeoutMs = operation === "run.delegate"
+  ? Math.max(baseTimeoutMs, Math.min(Number.isSafeInteger(expiresAt) ? Math.max(1, expiresAt - Date.now()) : 86400000, requestedDelegateMs + 10000))
+  : baseTimeoutMs;
 const timeout = setTimeout(() => socket.destroy(new Error("run tool timeout")), timeoutMs);
 socket.once("connect", () => socket.write(request));
 socket.on("data", (chunk) => {

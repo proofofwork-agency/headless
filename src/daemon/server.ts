@@ -70,6 +70,7 @@ import { LeadBindingStore, leadCredentialName } from "../runtime/lead-binding";
 import { migrateSingleLeadState } from "../runtime/project-state-migration";
 import { assertPrincipalOwns } from "./auth";
 import { RunToolEndpointManager } from "./run-tool-endpoint";
+import { buildRunEvent } from "../runtime/run-event";
 import { createRunToolCallHandler } from "./run-tool-operations";
 import { dispatchDaemonRoute, type DaemonRouteHandlerMap } from "./route-dispatcher";
 import { createDaemonRouteHandlers } from "./route-handlers";
@@ -784,6 +785,8 @@ export class HeadlessDaemon {
       trust: this.trust,
       authority: this.authority,
       budgets: this.budgets,
+      broker: this.broker,
+      activeLeadBackend: () => this.leads.status()?.backendId ?? null,
       isStopping: () => this.stopping,
       execute: (jobId, request, controls) => this.runExecution.execute(jobId, request, controls),
       abort: (jobId) => { this.runExecution.cancel(jobId); },
@@ -797,6 +800,22 @@ export class HeadlessDaemon {
       },
       diagnostic: (message, error) => {
         console.error(redactAndTruncate(`${message} ${error === undefined ? "" : messageOf(error)}`, 2_048).text);
+      },
+      auditDelegation: (type, parent, child, metadata) => {
+        const session = getOrCreateSession({
+          cwd: this.state.canonicalProjectRoot,
+          state: this.stateOptions,
+          authenticatedPrincipal: parent.principal,
+          sessionId: parent.sessionId ?? parent.id,
+        });
+        appendEvent(session, {
+          type,
+          source: parent.principal,
+          runId: parent.id,
+          workerId: child.id,
+          content: type === "worker_spawned" ? `Delegated child ${child.id} admitted.` : `Delegated child ${child.id} completed as ${child.state}.`,
+          meta: metadata,
+        });
       },
     });
     this.councils = new CouncilStore(this.state);
@@ -872,6 +891,38 @@ export class HeadlessDaemon {
         getJob: (jobId) => this.jobs.get(jobId),
         getTask: (jobId) => this.taskForJob(jobId),
         messages: this.messages,
+        delegate: async (scope, requestId, params) => {
+          let childJobId: string | null = null;
+          try {
+            const admitted = this.jobAdmission.admitDelegation({
+              parentJobId: scope.jobId,
+              requestId,
+              backend: params.backend as string,
+              prompt: params.prompt as string,
+              model: params.model as string | undefined,
+              agent: params.agent as string | undefined,
+              timeoutMs: params.timeoutMs as number | undefined,
+              budgetFraction: params.budgetFraction as number,
+            });
+            childJobId = admitted.job.id;
+            const request = this.jobs.request(admitted.job.id);
+            if (!request) throw new HeadlessError("INTERNAL_ERROR", "Delegated child request is unavailable.");
+            const child = await this.wait(admitted.job.id, request.timeoutMs + 10_000);
+            this.jobAdmission.settleDelegation(child);
+            if (!child.result) throw new HeadlessError("INTERNAL_ERROR", "Delegated child completed without a result.");
+            const completion = buildRunEvent(
+              { jobId: child.id, sessionId: child.sessionId, sequence: 0 },
+              { kind: "completion", result: child.result },
+            );
+            if (completion.kind !== "completion") throw new HeadlessError("INTERNAL_ERROR", "Delegated child projection produced the wrong event kind.");
+            const projected = completion.result;
+            return projected.status === "succeeded"
+              ? { ok: true, childJobId: child.id, result: projected }
+              : { ok: false, childJobId: child.id, error: projected.error ?? toStructuredError(new HeadlessError("INTERNAL_ERROR", "Delegated child failed without a structured error.")), result: projected };
+          } catch (error) {
+            return { ok: false, childJobId, error: toStructuredError(error) };
+          }
+        },
       }),
     });
     this.runExecution = new RunExecutionService({
@@ -1115,6 +1166,7 @@ export class HeadlessDaemon {
   private observerSnapshot() {
     const fleetState = this.fleets.snapshot();
     const goals = this.goals.listRecords();
+    const jobs = this.jobs.list();
     return {
       version: 1,
       projectId: this.state.projectId,
@@ -1130,7 +1182,24 @@ export class HeadlessDaemon {
       goalMessages: Object.fromEntries(goals.map((record) => [record.goal.id, this.directedMailbox.snapshot().messages.filter((message) => message.collaborationId === record.goal.id)])),
       approvals: this.approvals.list({}),
       budgets: this.budgets.getState().budgets,
-      jobs: this.jobs.list(),
+      jobs,
+      delegations: jobs.flatMap((job) => {
+        if (!job.delegationOf) return [];
+        const request = this.jobs.request(job.id);
+        return [{
+          parentJobId: job.delegationOf.parentJobId,
+          childJobId: job.id,
+          requestId: job.delegationOf.requestId,
+          backend: job.backend,
+          state: job.state,
+          createdAt: job.createdAt,
+          deadlineAt: request ? job.createdAt + request.timeoutMs : null,
+          budgetFraction: job.delegationOf.budgetFraction,
+          usage: job.result?.usage ?? null,
+          cost: job.result?.cost ?? null,
+          error: job.result?.error ?? null,
+        }];
+      }),
       tasks: this.tasks.list(),
       sessions: this.sessions.list(),
       orchestration: this.goalRuntime.autonomyStatus(),

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { RunRequestSchema, RunResultSchema } from "../src/contracts/run";
 import { MAX_DAEMON_MESSAGE_BYTES } from "../src/daemon/protocol";
+import { JobSchema } from "../src/contracts/durable";
 
 describe("v0.2 wire bounds", () => {
   test("bounds prompts by UTF-8 bytes below the daemon envelope", () => {
@@ -33,5 +34,36 @@ describe("v0.2 wire bounds", () => {
     const framed = JSON.stringify({ version: 2, id: crypto.randomUUID(), ok: true, result: { result } });
     expect(Buffer.byteLength(framed)).toBeLessThan(MAX_DAEMON_MESSAGE_BYTES);
     expect(() => RunResultSchema.parse({ ...result, output: "x".repeat(270_001) })).toThrow();
+  });
+
+  test("keeps daemon-assigned delegation links strict and depth-one", () => {
+    const now = Date.now();
+    const job = {
+      id: "child",
+      projectId: "a".repeat(64),
+      principal: "worker",
+      sessionId: null,
+      workflowId: null,
+      councilId: null,
+      councilSlot: null,
+      delegationOf: { parentJobId: "parent", requestId: crypto.randomUUID(), depth: 1, budgetFraction: 0.25 },
+      backend: "fixture",
+      mode: "read-only",
+      authMode: "broker",
+      approvalPolicy: "auto",
+      mergePolicy: "preserve",
+      state: "queued",
+      attempt: 1,
+      maxAttempts: 1,
+      retryNumber: 0,
+      createdAt: now,
+      updatedAt: now,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      result: null,
+    };
+    expect(JobSchema.parse(job).delegationOf?.depth).toBe(1);
+    expect(() => JobSchema.parse({ ...job, delegationOf: { ...job.delegationOf, depth: 2 } })).toThrow();
+    expect(() => JobSchema.parse({ ...job, delegationOf: { ...job.delegationOf, forged: true } })).toThrow();
   });
 });

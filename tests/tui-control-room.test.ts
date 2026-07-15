@@ -58,6 +58,7 @@ describe("Headless read-only TUI", () => {
         approvals: [],
         budgets: [budgetFixture()],
         jobs: [{ state: "running" }, { state: "queued" }],
+        delegations: [{ parentJobId: "parent", childJobId: "child", requestId: crypto.randomUUID(), backend: "claude", state: "running", createdAt: 10, deadlineAt: 1000, budgetFraction: 0.25, usage: null, cost: null, error: null }],
         tasks: [],
         sessions: [],
         orchestration: { enabled: true, mode: "automatic" },
@@ -74,6 +75,7 @@ describe("Headless read-only TUI", () => {
       activeGoalId: goal.id,
       lead: { host: "codex", generation: 2, status: "connected" },
       budgets: [{ id: "project-limit" }],
+      delegations: [{ childJobId: "child", parentJobId: "parent" }],
       orchestration: { enabled: true, activeJobs: 1, queuedJobs: 1, mode: "automatic" },
     });
     expect(restored.patch.events).toEqual([event]);
@@ -91,6 +93,7 @@ describe("Headless read-only TUI", () => {
       budgets: [budgetFixture()],
       fleetHealth: [{ id: "worker", backend: "opencode", authenticated: true, healthy: true, rateLimited: false, load: 0, detail: "ready" }],
       orchestration: { enabled: true, activeJobs: 1, queuedJobs: 2, mode: "automatic" },
+      delegations: [{ parentJobId: "parent", childJobId: "child", requestId: crypto.randomUUID(), backend: "claude", state: "running", createdAt: 900, deadlineAt: 5_000, budgetFraction: 0.25, usage: null, cost: null, error: null }],
     };
 
     const config = configViewModel(state);
@@ -99,6 +102,7 @@ describe("Headless read-only TUI", () => {
       lead: "codex · generation 3 · connected",
       backends: [{ id: "worker", backend: "opencode", readiness: "Ready" }],
       budgets: [{ id: "project-limit" }],
+      delegations: [{ id: "child", summary: expect.stringContaining("↳ claude · running · parent parent · fraction 0.25") }],
     });
     expect(config.commands.map(({ command }) => command)).toEqual(expect.arrayContaining([
       "headless project trust grant --allow-native-direct-unrestricted --cwd '/canonical/project with space'",
@@ -113,6 +117,7 @@ describe("Headless read-only TUI", () => {
     expect(rendered).toContain("headless project trust grant --allow-native-direct-unrestricted --cwd '/canonical/project with space'");
     expect(rendered).toContain("headless experimental budget upsert --id project-limit");
     expect(rendered).toContain("headless daemon status --cwd '/canonical/project with space'");
+    expect(rendered).toContain("↳ claude · running · parent parent · fraction 0.25");
   });
 
   test("never turns prompt-like input into daemon mutations", async () => {

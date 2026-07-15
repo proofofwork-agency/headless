@@ -9,11 +9,19 @@ import { HeadlessDaemon } from "../src/daemon/server";
 import { DARWIN_SANDBOX_EXEC, probeLinuxBwrap, probeLinuxRunToolRelay } from "../src/runtime/os-sandbox";
 
 const ADAPTER_ID = "run-tool-contained-fixture";
+const DELEGATE_PARENT_ID = "run-tool-delegate-parent";
+const DELEGATE_CHILD_ID = "run-tool-delegate-child";
+const DELEGATE_FAILURE_ID = "run-tool-delegate-failure";
+const DELEGATE_TIMEOUT_ID = "run-tool-delegate-timeout";
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];
 
 afterEach(async () => {
   unregisterBackendDefinition(ADAPTER_ID);
+  unregisterBackendDefinition(DELEGATE_PARENT_ID);
+  unregisterBackendDefinition(DELEGATE_CHILD_ID);
+  unregisterBackendDefinition(DELEGATE_FAILURE_ID);
+  unregisterBackendDefinition(DELEGATE_TIMEOUT_ID);
   for (const daemon of daemons.splice(0)) await daemon.stop().catch(() => {});
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -70,6 +78,92 @@ describe("daemon-owned worker cooperation", () => {
     expect(preparedPrompt).toBe("Unsafe local escape hatch does not receive daemon authority.");
     expect(readdirSync(daemon.state.daemonRuntimeDir).filter((name) => name.endsWith(".tool.sock"))).toEqual([]);
   }, 30_000);
+
+  test.skipIf(!strictContainmentAvailable())("runs one depth-one child and omits delegation from the child credential", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-"));
+    roots.push(root);
+    const project = join(root, "project");
+    mkdirSync(project);
+    const runtime = `/tmp/hdd-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+    roots.push(runtime);
+    const state = { env: { ...process.env, HEADLESS_STATE_HOME: join(root, "state"), HEADLESS_RUNTIME_HOME: runtime } };
+    registerBackendDefinition(delegatingParentAdapter());
+    registerBackendDefinition(delegatedChildAdapter());
+
+    const token = "e".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: project, state, token, principal: "coordinator", maxConcurrency: 2 });
+    daemons.push(daemon);
+    await daemon.start();
+    const client = new HeadlessDaemonClient({ projectRoot: project, state, token });
+    const parent = await client.call<Job>("run.submit", {
+      backend: DELEGATE_PARENT_ID,
+      prompt: "Delegate one bounded read.",
+      containment: "required",
+      timeoutMs: 30_000,
+    });
+    const completed = await client.call<Job>("run.wait", { jobId: parent.id, timeoutMs: 30_000 }, 35_000);
+
+    expect(completed.result?.status, JSON.stringify(completed.result, null, 2)).toBe("succeeded");
+    const reply = JSON.parse(completed.result?.output ?? "null") as { ok: boolean; childJobId: string; result: { output: string } };
+    expect(reply.ok).toBe(true);
+    expect(reply.result.output).toContain("child completed");
+    expect(reply.result.output).toContain("delegate-hidden");
+    const child = daemon.jobs.get(reply.childJobId);
+    expect(child?.delegationOf).toMatchObject({ parentJobId: parent.id, depth: 1, budgetFraction: 0.25 });
+    expect(daemon.jobs.list().filter((job) => job.delegationOf?.parentJobId === parent.id)).toHaveLength(1);
+    const parentEvents = await client.call<{ events: Array<{ kind: string; rule?: string; reason?: string }> }>("events.snapshot", { jobId: parent.id });
+    expect(parentEvents.events.some((event) => event.kind === "policy" && event.rule === "run-delegation-completed")).toBe(true);
+    expect(parentEvents.events.map((event) => event.reason ?? "").join(" ")).not.toContain("Child must inspect");
+    const ledger = readFileSync(daemon.state.ledgerPath, "utf8");
+    expect(ledger).toContain("worker_spawned");
+    expect(ledger).toContain(reply.childJobId);
+    expect(ledger).not.toContain("Child must inspect");
+  }, 45_000);
+
+  test.skipIf(!strictContainmentAvailable())("returns child failure as tool data and lets the parent finish", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-failure-"));
+    roots.push(root);
+    const project = join(root, "project");
+    mkdirSync(project);
+    const runtime = `/tmp/hdf-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+    roots.push(runtime);
+    const state = { env: { ...process.env, HEADLESS_STATE_HOME: join(root, "state"), HEADLESS_RUNTIME_HOME: runtime } };
+    registerBackendDefinition(delegatingParentAdapter(DELEGATE_FAILURE_ID));
+    registerBackendDefinition(delegationFixture(DELEGATE_FAILURE_ID, `console.error("expected child failure"); process.exit(7);`));
+    const token = "f".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: project, state, token, principal: "coordinator", maxConcurrency: 2 });
+    daemons.push(daemon);
+    await daemon.start();
+    const client = new HeadlessDaemonClient({ projectRoot: project, state, token });
+    const parent = await client.call<Job>("run.submit", { backend: DELEGATE_PARENT_ID, prompt: "Handle child failure.", containment: "required", timeoutMs: 30_000 });
+    const completed = await client.call<Job>("run.wait", { jobId: parent.id, timeoutMs: 30_000 }, 35_000);
+    expect(completed.result?.status).toBe("succeeded");
+    const reply = JSON.parse(completed.result?.output ?? "null") as { ok: boolean; childJobId: string; result: { status: string }; error: { code: string } };
+    expect(reply).toMatchObject({ ok: false, result: { status: "failed" }, error: { code: "PROCESS_ERROR" } });
+    expect(daemon.jobs.get(reply.childJobId)?.state).toBe("failed");
+  }, 45_000);
+
+  test.skipIf(!strictContainmentAvailable())("returns child timeout as tool data inside the parent deadline", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-timeout-"));
+    roots.push(root);
+    const project = join(root, "project");
+    mkdirSync(project);
+    const runtime = `/tmp/hdtm-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+    roots.push(runtime);
+    const state = { env: { ...process.env, HEADLESS_STATE_HOME: join(root, "state"), HEADLESS_RUNTIME_HOME: runtime } };
+    registerBackendDefinition(delegatingParentAdapter(DELEGATE_TIMEOUT_ID, 1_000));
+    registerBackendDefinition(delegationFixture(DELEGATE_TIMEOUT_ID, `await Bun.sleep(5000); console.log("too late");`));
+    const token = "a".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: project, state, token, principal: "coordinator", maxConcurrency: 2 });
+    daemons.push(daemon);
+    await daemon.start();
+    const client = new HeadlessDaemonClient({ projectRoot: project, state, token });
+    const parent = await client.call<Job>("run.submit", { backend: DELEGATE_PARENT_ID, prompt: "Handle child timeout.", containment: "required", timeoutMs: 30_000 });
+    const completed = await client.call<Job>("run.wait", { jobId: parent.id, timeoutMs: 30_000 }, 35_000);
+    expect(completed.result?.status).toBe("succeeded");
+    const reply = JSON.parse(completed.result?.output ?? "null") as { ok: boolean; result: { status: string }; error: { code: string } };
+    expect(reply).toMatchObject({ ok: false, result: { status: "timed_out" }, error: { code: "TIMED_OUT" } });
+  }, 45_000);
 });
 
 function fixtureAdapter(capturePrompt: (prompt: string) => void): BackendDefinition {
@@ -102,6 +196,42 @@ console.log(JSON.stringify({ task: results[0], note: results[1], leaked: process
       capturePrompt(options.prompt);
       return ["bun", "-e", script];
     },
+    decodeOutput: (stdout) => ({ output: stdout.trim(), cost: null, tokens: null, error: null }),
+  };
+}
+
+function delegatingParentAdapter(target = DELEGATE_CHILD_ID, timeoutMs = 10_000): BackendDefinition {
+  const script = String.raw`
+const child = Bun.spawn(["headless-run-tool", "run.delegate", JSON.stringify({ backend: "${target}", prompt: "Child must inspect the project without mutation.", timeoutMs: ${timeoutMs} })], { stdout: "pipe", stderr: "pipe" });
+const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+if (code !== 0) { console.error(stderr); process.exit(code || 1); }
+console.log(stdout.trim());
+`;
+  return delegationFixture(DELEGATE_PARENT_ID, script);
+}
+
+function delegatedChildAdapter(): BackendDefinition {
+  const script = String.raw`
+const advertised = (process.env.HEADLESS_RUN_TOOL_OPERATIONS || "").split(",");
+if (advertised.includes("run.delegate")) { console.error("delegate advertised to child"); process.exit(9); }
+const forged = Bun.spawn(["headless-run-tool", "run.delegate", JSON.stringify({ backend: "${DELEGATE_PARENT_ID}", prompt: "forged" })], { stdout: "pipe", stderr: "pipe" });
+const [code] = await Promise.all([forged.exited, new Response(forged.stdout).text(), new Response(forged.stderr).text()]);
+if (code === 0) { console.error("forged delegation unexpectedly succeeded"); process.exit(10); }
+console.log("child completed; delegate-hidden");
+`;
+  return delegationFixture(DELEGATE_CHILD_ID, script);
+}
+
+function delegationFixture(id: string, script: string): BackendDefinition {
+  return {
+    id,
+    metadata: { id, aliases: [], promptDelivery: "native", timeoutMs: 30_000, maxDepth: null, canRead: true, canWrite: false },
+    capabilities: { write: false, streaming: false, structuredOutput: true, nativeResume: false, cancellation: true, tools: true, effort: false, brokerCompatible: false },
+    security: { outerContainmentRequired: true, strictAuth: "credential-free", disablesProjectConfig: true, disablesHooks: true, disablesMcp: true, disablesSkills: true },
+    probe: { versionCommand: ["bun", "--version"], helpCommand: ["bun", "--help"], requiredHelpFragments: ["Usage:"], timeoutMs: 2_000, maxOutputBytes: 262_144 },
+    stdinPrompt: false,
+    credentialPrefixes: [],
+    prepareCommand: () => ["bun", "-e", script],
     decodeOutput: (stdout) => ({ output: stdout.trim(), cost: null, tokens: null, error: null }),
   };
 }

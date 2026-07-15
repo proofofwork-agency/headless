@@ -15,11 +15,12 @@ export type RunToolOperationDependencies = {
   getJob: (jobId: string) => Job | null;
   getTask: (jobId: string) => Task | null;
   messages: PersistentMessageQueue;
+  delegate?: (scope: Parameters<RunToolCallHandler>[0], requestId: string, params: Record<string, unknown>) => unknown | Promise<unknown>;
 };
 
 /** Build the deliberately small, non-administrative worker cooperation API. */
 export function createRunToolCallHandler(deps: RunToolOperationDependencies): RunToolCallHandler {
-  return (scope, operation, params) => {
+  return (scope, operation, params, requestId) => {
     const job = deps.getJob(scope.jobId);
     if (!job || job.projectId !== scope.projectId || job.principal !== scope.principal) {
       throw denied("Run tool scope no longer matches its daemon-owned job.");
@@ -33,6 +34,11 @@ export function createRunToolCallHandler(deps: RunToolOperationDependencies): Ru
       authenticatedPrincipal: scope.principal,
       sessionId: scope.sessionId,
     };
+
+    if (operation === "run.delegate") {
+      if (!deps.delegate) throw denied("Worker delegation is unavailable.");
+      return deps.delegate(scope, requestId, params);
+    }
 
     if (operation === "context") {
       return getReadContext({

@@ -29,6 +29,13 @@ export const JobStateSchema = z.enum([
   "blocked",
 ]);
 
+export const RunDelegationLinkSchema = z.object({
+  parentJobId: IdentifierSchema,
+  requestId: z.string().uuid(),
+  depth: z.literal(1),
+  budgetFraction: z.number().positive().max(0.5),
+}).strict();
+
 export const JobSchema = z.object({
   id: IdentifierSchema,
   projectId: ProjectIdSchema,
@@ -38,6 +45,8 @@ export const JobSchema = z.object({
   /** Durable council phase-slot binding used to reconcile crash orphans. */
   councilId: IdentifierSchema.nullable().default(null),
   councilSlot: z.string().min(1).max(160).nullable().default(null),
+  /** Daemon-assigned worker delegation relationship; never accepted from RPC input. */
+  delegationOf: RunDelegationLinkSchema.nullable().default(null),
   backend: BackendIdSchema,
   mode: RunModeSchema,
   authMode: AuthModeSchema.default("broker"),
