@@ -4,7 +4,7 @@ import type { RunEvent } from "../contracts/run";
 import { backendMetadata } from "../backends/metadata";
 import { normalizeBackend } from "../backends/ids";
 import { strictLogIdentity, type LogDisplayMode } from "../runtime/log-presentation";
-import { EmptyHint, GateChips, KeyValue, SectionTitle } from "./components";
+import { BackendName, Dot, EmptyHint, GateChips, KeyValue, SectionTitle } from "./components";
 import { contentRows, listWindowStart } from "./layout";
 import {
   activeFleetProfile,
@@ -26,7 +26,7 @@ import {
   truncateDisplay,
   type TuiControlRoomState,
 } from "./model";
-import { ACCENT, BLUE, CHROME, ERR, LIST_OFFSET, MUTED, OK, VIOLET, WARN, goalStateGlyph } from "./theme";
+import { ACCENT, backendTone, BLUE, CHROME, ERR, LIST_OFFSET, MUTED, OK, readinessTone, VIOLET, WARN, goalStateGlyph } from "./theme";
 
 export type ListMeta = { rows: number; start: number; total: number; paneWidth: number };
 
@@ -49,7 +49,20 @@ export function OverviewView({ state, width, height }: { state: TuiControlRoomSt
       <Text color={MUTED} wrap="truncate">  {control.connection} · project {control.project} · orchestrator {control.orchestrator} · fleet {control.fleet} · lead {control.lead}</Text>
       <Text color={CHROME} wrap="truncate">  external lead → authenticated daemon → contained workers · this TUI only observes</Text>
       <SectionTitle title="Health" tone={health.blocked + health.loginRequired ? WARN : OK} width={contentWidth} />
-      <Text color={MUTED} wrap="truncate">  daemon {health.daemon} · trust {health.trust ? "Ready" : "required"} · ready {health.ready} · login {health.loginRequired} · blocked {health.blocked} · queue {health.queue} · approvals {health.approvals}</Text>
+      <Text wrap="truncate">
+        <Text>  </Text>
+        <Dot tone={health.daemon === "Ready" ? OK : WARN} /><Text color={MUTED}>daemon {health.daemon}</Text>
+        <Text color={CHROME}> · </Text>
+        <Dot tone={health.trust ? OK : WARN} /><Text color={MUTED}>trust {health.trust ? "granted" : "required"}</Text>
+        <Text color={CHROME}> · </Text>
+        <Text color={OK}>{health.ready} ready</Text>
+        <Text color={CHROME}> · </Text>
+        <Text color={health.loginRequired ? WARN : MUTED}>{health.loginRequired} login</Text>
+        <Text color={CHROME}> · </Text>
+        <Text color={health.blocked ? ERR : MUTED}>{health.blocked} blocked</Text>
+        <Text color={CHROME}> · </Text>
+        <Text color={MUTED}>queue {health.queue} · approvals {health.approvals}</Text>
+      </Text>
       <SectionTitle title="Current task" tone={BLUE} width={contentWidth} />
       {goal ? <>
         <Text color="white" wrap="truncate">  {goal.id} · {goal.status} · {goal.mode} · lead {goal.lead} · stage {goal.stage}</Text>
@@ -251,17 +264,17 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
           const isSelected = meta.start + index === selected;
           return (
             <Text key={agent.id} wrap="truncate">
-              <Text color={isSelected ? BLUE : CHROME}>{isSelected ? "▸ " : "  "}</Text>
+              <Text color={isSelected ? ACCENT : CHROME}>{isSelected ? "▸ " : "  "}</Text>
               <Text color={agent.tone}>{agent.glyph} </Text>
               <Text bold={isSelected} color={agent.enabled ? "white" : MUTED}>{truncateDisplay(agent.name, nameWidth).padEnd(nameWidth)}</Text>
-              <Text color={MUTED}> {agent.backend.padEnd(9)}</Text>
+              <Text color={backendTone(agent.backend)}> {agent.backend.padEnd(9)}</Text>
               <Text color={agent.authTone}> {agent.auth}</Text>
             </Text>
           );
         })}
       </Box>
-      <Box flexDirection="column" width={rightWidth} marginLeft={2} height={rows} overflow="hidden">
-        <SectionTitle title="Detail" tone={BLUE} width={rightWidth} />
+      <Box flexDirection="column" width={rightWidth} marginLeft={2} height={rows} overflow="hidden" borderStyle="single" borderColor={CHROME} paddingX={1}>
+        <SectionTitle title="Detail" tone={BLUE} width={rightWidth - 4} />
         {profile ? (
           <>
             <KeyValue label="profile">
@@ -271,7 +284,7 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
             <KeyValue label="policy">
               <Text color={profile.approvalPolicy === "bypass" ? WARN : MUTED}>{profile.approvalPolicy}</Text>
               <Text color={CHROME}> · auth </Text>
-              <Text color={MUTED}>{profile.authMode}</Text>
+              <Text color={profile.authMode === "native-login" ? OK : WARN}>{profile.authMode}</Text>
             </KeyValue>
             <KeyValue label="limits">
               <Text color={MUTED}>workers {profile.maxActiveWorkers} · queue {profile.maxQueuedDelegations} · idle {profile.idleAutonomy}</Text>
@@ -282,16 +295,16 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
         )}
         {selectedAgent ? (
           <>
-            <Box marginTop={1}><Text color={CHROME}>{"─".repeat(Math.max(4, rightWidth - 2))}</Text></Box>
+            <Box marginTop={1}><Text color={CHROME}>{"─".repeat(Math.max(4, rightWidth - 4))}</Text></Box>
             <KeyValue label="agent">
               <Text color={selectedAgent.tone}>{selectedAgent.glyph} </Text>
               <Text bold color="white">{selectedAgent.name}</Text>
             </KeyValue>
-            <KeyValue label="backend"><Text color={MUTED}>{selectedAgent.backend} · load {selectedAgent.load}</Text></KeyValue>
-            <KeyValue label="readiness"><Text color={selectedAgent.readiness === "Ready" ? OK : WARN}>{selectedAgent.readiness}</Text></KeyValue>
+            <KeyValue label="backend"><BackendName backend={selectedAgent.backend} /><Text color={CHROME}> · load </Text><Text color={MUTED}>{selectedAgent.load}</Text></KeyValue>
+            <KeyValue label="readiness"><Dot tone={readinessTone(selectedAgent.readiness)} /><Text color={readinessTone(selectedAgent.readiness)}>{selectedAgent.readiness}</Text></KeyValue>
             {selectedAgent.recovery && rows >= 12 ? <>
-              <KeyValue label="why"><Text color={MUTED}>{truncateDisplay(selectedAgent.recovery.explanation, Math.max(8, rightWidth - 12))}</Text></KeyValue>
-              <KeyValue label="next"><Text color={WARN}>{truncateDisplay(selectedAgent.recovery.nextAction, Math.max(8, rightWidth - 12))}</Text></KeyValue>
+              <KeyValue label="why"><Text color={MUTED}>{truncateDisplay(selectedAgent.recovery.explanation, Math.max(8, rightWidth - 14))}</Text></KeyValue>
+              <KeyValue label="next"><Text color={WARN}>{truncateDisplay(selectedAgent.recovery.nextAction, Math.max(8, rightWidth - 14))}</Text></KeyValue>
             </> : null}
             {login && selectedAgent.readiness === "Login required" && rows >= 16 ? <>
               <KeyValue label="expects"><Text color={MUTED}>supported provider CLI login state</Text></KeyValue>
@@ -302,8 +315,8 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
         ) : null}
         {state.fleetProfiles.length > 1 ? (
           <>
-            <Box marginTop={1}><Text color={CHROME}>{"─".repeat(Math.max(4, rightWidth - 2))}</Text></Box>
-            <Text color={CHROME} wrap="truncate">profiles · /use-fleet &lt;id&gt;</Text>
+            <Box marginTop={1}><Text color={CHROME}>{"─".repeat(Math.max(4, rightWidth - 4))}</Text></Box>
+            <Text color={CHROME} wrap="truncate">profiles · switch with the root CLI</Text>
             {state.fleetProfiles.slice(0, 3).map((entry) => (
               <Text key={entry.id} color={entry.id === state.activeFleetProfileId ? BLUE : MUTED} wrap="truncate">  {entry.id === state.activeFleetProfileId ? "●" : "○"} {entry.name} ({entry.id})</Text>
             ))}
@@ -544,8 +557,12 @@ export function ConfigView({ state, width, height }: { state: TuiControlRoomStat
         <SectionTitle title="Backend readiness" tone={BLUE} width={stateWidth} />
         {config.backends.length === 0 ? <EmptyHint text="no configured backend health is available" /> : config.backends.map((backend) => (
           <Text key={backend.id} wrap="truncate">
-            <Text color={backend.readiness === "Ready" ? OK : backend.readiness === "Disabled" ? CHROME : WARN}>  {backend.backend} · {backend.readiness}</Text>
-            <Text color={MUTED}> · {backend.detail}</Text>
+            <Text>  </Text>
+            <Dot tone={readinessTone(backend.readiness)} />
+            <Text color={backendTone(backend.backend)}>{backend.backend.padEnd(12)}</Text>
+            <Text color={readinessTone(backend.readiness)}>{backend.readiness}</Text>
+            <Text color={CHROME}> · </Text>
+            <Text color={MUTED}>{backend.detail}</Text>
           </Text>
         ))}
         <SectionTitle title="Budgets" tone={VIOLET} width={stateWidth} />

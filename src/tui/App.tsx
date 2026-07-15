@@ -3,7 +3,8 @@ import { Box, render, Text, useApp, useInput, useStdout } from "ink";
 import { connectOrStartDaemon } from "../daemon/connect";
 import type { HeadlessDaemonClient } from "../daemon/client";
 import { runReconnectLoop, subscribeControlRoom, TuiController } from "./controller";
-import { ChromeHeader, Footer, StatusStrip, TabBar } from "./components";
+import { ChromeHeader, Footer, Rule, StatusStrip, TabBar } from "./components";
+import { HEADLESS_COPYRIGHT, HEADLESS_VERSION } from "../version";
 import { buildHitZones, buildTabLayout, hitTest, nextView, parseMouseEvents, viewForDigit } from "./layout";
 import {
   approvalRows,
@@ -161,12 +162,13 @@ export const App: React.FC<AppProps> = ({ projectRoot, connect = connectProjectD
 
   if (width < MIN_WIDTH || height < MIN_HEIGHT) return <MinimumSizeView width={width} height={height} />;
   const footer = view === "events"
-    ? { hints: [["↑↓", "scroll"], ["e", "errors"], ["a", "activity"], ["g", "group"]] as Array<[string, string]>, right: "observer · r refresh · q quit" }
-    : { hints: [["⇥", "views"], ["1-7", "jump"], ["↑↓", "select"]] as Array<[string, string]>, right: "observer · r refresh · q quit" };
+    ? { hints: [["↑↓", "scroll"], ["e", "errors"], ["a", "activity"], ["g", "group"], ["r", "refresh"], ["q", "quit"]] as Array<[string, string]> }
+    : { hints: [["⇥", "views"], ["1-7", "jump"], ["↑↓", "select"], ["r", "refresh"], ["q", "quit"]] as Array<[string, string]> };
+  const footerRight = width < 100 ? HEADLESS_COPYRIGHT : `v${HEADLESS_VERSION} · ${HEADLESS_COPYRIGHT}`;
 
   return <Box flexDirection="column" width={width} height={height}>
     <ChromeHeader state={state} width={width} />
-    <Text> </Text>
+    <Rule width={width} />
     <TabBar segments={tabs} active={view} width={width} />
     <Box flexDirection="column" flexGrow={1}>
       {view === "overview" ? <OverviewView state={state} width={width} height={height} /> : null}
@@ -177,8 +179,9 @@ export const App: React.FC<AppProps> = ({ projectRoot, connect = connectProjectD
       {view === "config" ? <ConfigView state={state} width={width} height={height} /> : null}
       {view === "help" ? <HelpView width={width} height={height} /> : null}
     </Box>
+    <Rule width={width} />
     <StatusStrip state={state} working={state.connection !== "connected"} width={width} />
-    <Footer hints={footer.hints} right={footer.right} width={width} />
+    <Footer hints={footer.hints} right={footerRight} width={width} />
   </Box>;
 };
 

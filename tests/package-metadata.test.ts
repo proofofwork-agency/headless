@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DAEMON_PROTOCOL_VERSION } from "../src/daemon/protocol";
+import { HEADLESS_VERSION } from "../src/version";
 import { MCP_VERSION } from "../src/mcp/server";
 
 const root = join(import.meta.dir, "..");
@@ -10,7 +11,7 @@ const plugin = JSON.parse(readFileSync(join(root, "plugin", "package.json"), "ut
 
 describe("v0.2 private-alpha package metadata", () => {
   test("keeps package, MCP, plugin, schema, and daemon protocol versions aligned", () => {
-    expect(pkg.version).toBe("0.2.0-alpha.0");
+    expect(pkg.version).toBe(HEADLESS_VERSION);
     expect(pkg.private).toBe(true);
     expect(pkg.packageManager).toBe("bun@1.3.14");
     expect(plugin.version).toBe(pkg.version);
@@ -31,9 +32,9 @@ describe("v0.2 private-alpha package metadata", () => {
     expect(plugin.files).toEqual(["dist", "README.md", "LICENSE"]);
     expect(plugin.main).toBe("./dist/index.js");
     expect(plugin.types).toBe("./dist/index.d.ts");
-    expect(plugin.version).toBe("0.2.0-alpha.0");
+    expect(plugin.version).toBe(HEADLESS_VERSION);
     expect(plugin.private).toBe(true);
-    expect(plugin.peerDependencies["@proofofwork-agency/headless"]).toBe("0.2.0-alpha.0");
+    expect(plugin.peerDependencies["@proofofwork-agency/headless"]).toBe(HEADLESS_VERSION);
     expect(plugin.peerDependenciesMeta?.["@proofofwork-agency/headless"]?.optional).not.toBe(true);
   });
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { terminateProcessTree } from "../src/runtime/process-tree";
+import { HEADLESS_VERSION } from "../src/version";
 
 const root = resolve(import.meta.dir, "..");
 const scratch = mkdtempSync(join(tmpdir(), "headless-pack-smoke-"));
@@ -73,7 +74,7 @@ try {
     JSON.parse(await run(["tar", "-xOzf", rootTarball, "package/package.json"], root)),
     {
       name: "@proofofwork-agency/headless",
-      version: "0.2.0-alpha.0",
+      version: HEADLESS_VERSION,
       bins: {
         headless: "./dist/cli.js",
         hless: "./dist/hless.js",
@@ -83,7 +84,7 @@ try {
   );
   validatePackedManifest(
     JSON.parse(await run(["tar", "-xOzf", pluginTarball, "package/package.json"], root)),
-    { name: "@proofofwork-agency/headless-plugin", version: "0.2.0-alpha.0" },
+    { name: "@proofofwork-agency/headless-plugin", version: HEADLESS_VERSION },
   );
 
   writeFileSync(join(scratch, "pack-contents.json"), `${JSON.stringify({ rootEntries, pluginEntries }, null, 2)}\n`);
@@ -103,7 +104,7 @@ try {
 
   await run(["bun", "install", "--ignore-scripts"], installRoot, 120_000);
   const version = (await run([join(installRoot, "node_modules", ".bin", "headless"), "--version"], installRoot)).trim();
-  if (version !== "0.2.0-alpha.0") throw new Error(`Installed headless binary reported ${JSON.stringify(version)} instead of 0.2.0-alpha.0.`);
+  if (version !== HEADLESS_VERSION) throw new Error(`Installed headless binary reported ${JSON.stringify(version)} instead of ${HEADLESS_VERSION}.`);
   const aliasVersion = (await run([join(installRoot, "node_modules", ".bin", "hless"), "--version"], installRoot)).trim();
   if (aliasVersion !== version) throw new Error(`Installed hless alias reported ${JSON.stringify(aliasVersion)} instead of ${version}.`);
 
@@ -119,7 +120,7 @@ try {
     'if (typeof resolveDaemonExtensionConfig !== "function") throw new Error("daemon extension export failed");',
     'if (typeof HeadlessDaemonClient !== "function") throw new Error("daemon export failed");',
     'if (typeof runLinuxBrokerRelay !== "function") throw new Error("Linux broker relay export failed");',
-    'if (MCP_VERSION !== "0.2.0-alpha.0" || !mcpToolDefinitions.some((tool) => tool.name === "headless_run")) throw new Error("MCP export failed");',
+    `if (MCP_VERSION !== ${JSON.stringify(HEADLESS_VERSION)} || !mcpToolDefinitions.some((tool) => tool.name === "headless_run")) throw new Error("MCP export failed");`,
     'if (plugin.id !== "headless" || typeof plugin.server !== "function") throw new Error("plugin export failed");',
   ].join(" ")], installRoot);
 

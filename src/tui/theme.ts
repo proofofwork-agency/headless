@@ -31,8 +31,34 @@ export const TAB_ROW = 3;
 export const CONTENT_TOP = 5;
 /** Rows of view chrome (section title + column header) above selectable list rows. */
 export const LIST_OFFSET = 2;
-/** Terminal rows consumed by fixed observer chrome outside the content area. */
-export const FIXED_ROWS = 6;
+/** Terminal rows consumed by fixed observer chrome outside the content area (header, rule, tabs ×2, rule, status, footer). */
+export const FIXED_ROWS = 7;
+
+/**
+ * Stable identity colors for the four advertised backends, used wherever an
+ * agent/backend is named so the fleet reads at a glance. Aliases cover both
+ * the backend ids and the short host names.
+ */
+export const BACKEND_TONES: Record<string, string> = {
+  "claude-code": "#fb923c",
+  claude: "#fb923c",
+  codex: "#8aa7ff",
+  opencode: "#34d399",
+  "grok-build": "#c4b5fd",
+  grok: "#c4b5fd",
+};
+
+export function backendTone(backend: string): string {
+  return BACKEND_TONES[backend] ?? MUTED;
+}
+
+/** Tone for a fleet/backend readiness label. */
+export function readinessTone(readiness: string): string {
+  if (readiness === "Ready") return OK;
+  if (readiness === "Disabled") return CHROME;
+  if (/blocked|unavailable|unsupported/i.test(readiness)) return ERR;
+  return WARN;
+}
 
 export function goalStateGlyph(state: string): { glyph: string; tone: string } {
   switch (state) {

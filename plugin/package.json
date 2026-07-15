@@ -1,6 +1,6 @@
 {
   "name": "@proofofwork-agency/headless-plugin",
-  "version": "0.2.0-alpha.0",
+  "version": "0.2.0-beta.1",
   "private": true,
   "description": "OpenCode plugin exposing Headless runner and local ledger tools. Standalone: depends on @proofofwork-agency/headless (install both for npm use).",
   "type": "module",
@@ -36,7 +36,7 @@
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "*",
-    "@proofofwork-agency/headless": "0.2.0-alpha.0"
+    "@proofofwork-agency/headless": "0.2.0-beta.1"
   },
   "engines": {
     "bun": ">=1.1.0"
