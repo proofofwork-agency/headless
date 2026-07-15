@@ -3,9 +3,9 @@ import { Box, render, Text, useApp, useInput, useStdout } from "ink";
 import { connectOrStartDaemon } from "../daemon/connect";
 import type { HeadlessDaemonClient } from "../daemon/client";
 import { runReconnectLoop, subscribeControlRoom, TuiController } from "./controller";
-import { ChromeHeader, Footer, Rule, StatusStrip, TabBar } from "./components";
+import { ChromeHeader, CompactTabRow, Footer, Rule, StatusStrip } from "./components";
 import { HEADLESS_COPYRIGHT, HEADLESS_VERSION } from "../version";
-import { buildHitZones, buildTabLayout, hitTest, nextView, parseMouseEvents, viewForDigit } from "./layout";
+import { buildHitZones, buildTabLayout, headerTabsMode, hitTest, nextView, parseMouseEvents, viewForDigit } from "./layout";
 import {
   approvalRows,
   type EventFilter,
@@ -167,9 +167,8 @@ export const App: React.FC<AppProps> = ({ projectRoot, connect = connectProjectD
   const footerRight = width < 100 ? HEADLESS_COPYRIGHT : `v${HEADLESS_VERSION} · ${HEADLESS_COPYRIGHT}`;
 
   return <Box flexDirection="column" width={width} height={height}>
-    <ChromeHeader state={state} width={width} />
-    <Rule width={width} />
-    <TabBar segments={tabs} active={view} width={width} />
+    <ChromeHeader state={state} width={width} segments={tabs} active={view} />
+    {headerTabsMode(width) ? <Rule width={width} /> : <CompactTabRow segments={tabs} active={view} />}
     <Box flexDirection="column" flexGrow={1}>
       {view === "overview" ? <OverviewView state={state} width={width} height={height} /> : null}
       {view === "fleet" ? <FleetView state={state} width={width} height={height} selected={selected.fleet} /> : null}

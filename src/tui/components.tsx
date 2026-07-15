@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { controlSummary, healthSummary, shortPath, truncateDisplay, type TuiControlRoomState } from "./model";
-import type { TabSegment } from "./layout";
+import { healthSummary, truncateDisplay, type TuiControlRoomState } from "./model";
+import { headerBrand, headerTabsMode, type TabSegment } from "./layout";
 import { HEADLESS_VERSION } from "../version";
 import {
   ACCENT,
@@ -31,25 +31,35 @@ export function BackendName({ backend, bold = false }: { backend: string; bold?:
   return <Text bold={bold} color={backendTone(backend)}>{backend}</Text>;
 }
 
-export function ChromeHeader({ state, width }: { state: TuiControlRoomState; width: number }) {
+export function ChromeHeader({ state, width, segments, active }: {
+  state: TuiControlRoomState;
+  width: number;
+  segments: TabSegment[];
+  active: TuiView;
+}) {
   const tone = connectionTone(state.connection);
-  const control = controlSummary(state);
   const health = healthSummary(state);
-  const right = width < 120
-    ? `${state.connection.toUpperCase()} · mode:${control.orchestrator} · lead:${control.lead} · R${health.ready} B${health.blocked + health.loginRequired}`
-    : `${state.connection.toUpperCase()} · mode:${control.orchestrator} · lead:${control.lead} · ready:${health.ready} · blocked:${health.blocked + health.loginRequired}`;
-  const leftWidth = Math.max(18, width - right.length - 5);
+  const inHeader = headerTabsMode(width);
+  const brand = headerBrand(width);
+  const version = brand.includes(HEADLESS_VERSION);
+  const right = width >= 150
+    ? `${state.connection.toUpperCase()} · ready:${health.ready} · blocked:${health.blocked + health.loginRequired}`
+    : width >= 120
+      ? `${state.connection.toUpperCase()} · R${health.ready} B${health.blocked + health.loginRequired}`
+      : state.connection.toUpperCase();
   return (
     <Box paddingX={2} justifyContent="space-between">
       <Text wrap="truncate">
         <Text color={ACCENT}>◆ </Text>
         <Text bold>HEADLESS</Text>
-        <Text color={MUTED}> v{HEADLESS_VERSION}</Text>
-        <Text color={CHROME}> · observer</Text>
+        {version ? <Text color={MUTED}> v{HEADLESS_VERSION}</Text> : null}
+        {inHeader ? <Text>  {segments.map((segment, index) => (
+          <React.Fragment key={segment.view}>
+            {index > 0 ? <Text> </Text> : null}
+            <TabLabel segment={segment} active={active === segment.view} />
+          </React.Fragment>
+        ))}</Text> : null}
       </Text>
-      {width >= 120 ? <Box width={leftWidth}>
-        <Text wrap="truncate"><Text color={CHROME}>{shortPath(state.projectRoot, Math.max(10, leftWidth - 8))}</Text></Text>
-      </Box> : null}
       <Text wrap="truncate">
         <Dot tone={tone} /><Text color={tone}>{right}</Text>
       </Text>
@@ -57,59 +67,26 @@ export function ChromeHeader({ state, width }: { state: TuiControlRoomState; wid
   );
 }
 
-export function TabBar({ segments, active, width }: { segments: TabSegment[]; active: TuiView; width: number }) {
-  const help = segments.find((segment) => segment.view === "help");
-  const main = segments.filter((segment) => segment.view !== "help");
+/** Compact single-row tab bar used below the header when the terminal is narrow. */
+export function CompactTabRow({ segments, active }: { segments: TabSegment[]; active: TuiView }) {
   return (
-    <Box flexDirection="column" width={width}>
-      <Box paddingX={2} width={width} justifyContent="space-between">
-        <TabGroup segments={main} active={active} kind="label" />
-        {help ? <TabLabel segment={help} active={active === "help"} /> : null}
-      </Box>
-      <Box paddingX={2} width={width} justifyContent="space-between">
-        <TabGroup segments={main} active={active} kind="rule" />
-        {help ? <TabRule segment={help} active={active === "help"} /> : null}
-      </Box>
+    <Box paddingX={2}>
+      <Text wrap="truncate">
+        {segments.map((segment, index) => (
+          <React.Fragment key={segment.view}>
+            {index > 0 ? <Text> </Text> : null}
+            <TabLabel segment={segment} active={active === segment.view} />
+          </React.Fragment>
+        ))}
+      </Text>
     </Box>
   );
 }
 
-function TabGroup({ segments, active, kind }: { segments: TabSegment[]; active: TuiView; kind: "label" | "rule" }) {
-  return (
-    <Text wrap="truncate">
-      {segments.map((segment, index) => (
-        <React.Fragment key={segment.view}>
-          {index > 0 ? <Text color={CHROME}>{"  "}</Text> : null}
-          {kind === "label"
-            ? <TabLabel segment={segment} active={active === segment.view} />
-            : <TabRule segment={segment} active={active === segment.view} />}
-        </React.Fragment>
-      ))}
-    </Text>
-  );
-}
-
 function TabLabel({ segment, active }: { segment: TabSegment; active: boolean }) {
-  const base = segment.badge > 0 ? segment.label.slice(0, -String(segment.badge).length - 1) : segment.label;
-  return (
-    <Text>
-      <Text bold={active} color={active ? ACCENT : MUTED}>{base}</Text>
-      {segment.badge > 0 ? (
-        <>
-          <Text color={CHROME}>·</Text>
-          <Text bold color={segment.view === "approvals" ? WARN : ACCENT}>{segment.badge}</Text>
-        </>
-      ) : null}
-    </Text>
-  );
-}
-
-function TabRule({ segment, active }: { segment: TabSegment; active: boolean }) {
-  return <Text color={active ? ACCENT : CHROME}>{tabRule(segment, active)}</Text>;
-}
-
-export function tabRule(segment: Pick<TabSegment, "label">, active: boolean) {
-  return (active ? "━" : "─").repeat(segment.label.length);
+  return active
+    ? <Text bold color={ACCENT} inverse>{segment.label}</Text>
+    : <Text color={MUTED} dimColor>{segment.label}</Text>;
 }
 
 export function SectionTitle({ title, hint, tone = BLUE, width }: { title: string; hint?: string; tone?: string; width: number }) {
