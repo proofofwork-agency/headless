@@ -177,6 +177,24 @@ export class JobStore {
     return recovered;
   }
 
+  /** Never rerun a delegated prompt whose linked provider capability was interrupted. */
+  recoverLinkedChildBlocked(id: string, reason: string) {
+    const job = this.require(id);
+    if (terminalStates.has(job.state)) return job;
+    const request = this.request(id);
+    if (!request) throw new Error(`Linked child ${id} request is missing during recovery.`);
+    const next = JobSchema.parse({
+      ...job,
+      state: "blocked",
+      result: linkedRecoveryResult(job, reason),
+      updatedAt: Date.now(),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+    });
+    this.writeJob(next);
+    return next;
+  }
+
   /**
    * Reconcile the truth established by a durable primary-update journal. This
    * may repair an earlier generic crash result, but it never overwrites an
@@ -279,6 +297,19 @@ function cancellationRecoveryResult(job: Job): RunResult {
       retryable: false,
     },
     output: "Daemon stopped while cancellation was in progress; the job will not be retried.",
+  };
+}
+
+function linkedRecoveryResult(job: Job, reason: string): RunResult {
+  return {
+    ...crashResult(job),
+    status: "blocked",
+    error: {
+      code: "PROCESS_ERROR",
+      message: reason.slice(0, 16_384),
+      retryable: false,
+    },
+    output: reason.slice(0, 16_384),
   };
 }
 

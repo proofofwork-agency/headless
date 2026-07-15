@@ -261,6 +261,8 @@ describe("persistent budgets", () => {
       usedInputTokens: 0,
       maxOutputTokens: null,
       usedOutputTokens: 0,
+      maxCostUsd: 6,
+      usedCostUsd: 0,
     }]);
     expect(secondLimits.budgetQuotas).toEqual(firstLimits.budgetQuotas);
     expect(store.commit("broker-one", { costUsd: 2, observedRequests: 3 }).passed).toBe(true);
@@ -397,7 +399,8 @@ describe("persistent budgets", () => {
       updatedAt: 1,
     })}\n`, { mode: 0o600 });
     const upgraded = new BudgetStore(paths).getState();
-    expect(upgraded.version).toBe(3);
+    expect(upgraded.version).toBe(4);
+    expect(upgraded.linkedHolds).toEqual([]);
     expect(upgraded.reservations[0]).toMatchObject({
       id: "legacy-parent",
       parentReservationId: null,

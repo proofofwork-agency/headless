@@ -111,6 +111,22 @@ describe("v0.2 CLI contracts", () => {
     expect(parseBudgetCommand(["budget", "upsert", "--id", "project-limit", "--max-requests", "20", "--max-cost-usd", "10", "--max-retries", "0"]))
       .toEqual({ method: "budget.upsert", params: { id: "project-limit", maxRequests: 20, maxCostUsd: 10, maxRetries: 0 } });
     expect(() => parseBudgetCommand(["budget", "upsert", "--id", "project-limit", "--max-requests", "0"])).toThrow("positive safe integer");
+    expect(parseBudgetCommand(["budget", "linked-hold", "inspect", "--link-id", "a".repeat(64)])).toEqual({
+      offline: "inspect",
+      linkId: "a".repeat(64),
+    });
+    expect(parseBudgetCommand([
+      "budget", "linked-hold", "quarantine", "--link-id", "a".repeat(64),
+      "--expected-digest", "b".repeat(64), "--resolution", "exhaust", "--confirm",
+    ])).toEqual({
+      offline: "quarantine",
+      linkId: "a".repeat(64),
+      expectedDigest: "b".repeat(64),
+      resolution: "exhaust",
+      confirm: true,
+    });
+    expect(() => parseBudgetCommand(["budget", "linked-hold", "inspect", "--link-id", "a", "--link-id", "b"])).toThrow("one literal");
+    expect(() => parseBudgetCommand(["budget", "linked-hold", "inspect", "--link-id", "*"])).toThrow("one literal");
     expect(parseCliInvocation(["budget", "list"])).toEqual({ kind: "unknown", name: "budget" });
     expect(parseCliInvocation(["experimental", "budget", "list"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "budget")! });
   });

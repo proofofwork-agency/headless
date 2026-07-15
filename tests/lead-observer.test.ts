@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { HeadlessDaemonClient } from "../src/daemon/client";
 import { DaemonMethodSchema } from "../src/daemon/protocol";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { AuthorityStore } from "../src/runtime/authority-store";
+import { BudgetStore } from "../src/runtime/budget-store";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 
 const fixtures: Array<{ root: string; runtime: string; daemon?: HeadlessDaemon }> = [];
@@ -45,7 +47,8 @@ describe("foreground lead and observer daemon boundaries", () => {
   });
 
   test("observer credentials can project state and events but cannot mutate any route", async () => {
-    const fixture = await daemonFixture();
+    const fixture = await daemonFixture({ seedLinkedHold: true });
+    const linkedDigestBefore = linkedHoldsDigest(fixture.state);
     await fixture.rootClient.call("budget.upsert", { id: "observer-budget", maxRequests: 2 });
     await fixture.rootClient.call("auth.provisionObserver");
     const observer = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.stateOptions, credential: { observer: true } });
@@ -62,6 +65,17 @@ describe("foreground lead and observer daemon boundaries", () => {
       if (method === "ping" || method.startsWith("observer.")) continue;
       await expect(observer.call(method)).rejects.toMatchObject({ code: "POLICY_DENIED" });
     }
+    for (const internalMutation of [
+      "linkedHold.prepare",
+      "linkedHold.apply",
+      "linkedHold.settle",
+      "linkedHold.recover",
+      "linkedHold.quarantine",
+    ]) {
+      expect(DaemonMethodSchema.safeParse(internalMutation).success).toBe(false);
+      await expect(observer.call(internalMutation)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    }
+    expect(linkedHoldsDigest(fixture.state)).toBe(linkedDigestBefore);
     expect(readFileSync(fixture.state.observerTokenPath, "utf8").trim().length).toBeGreaterThan(40);
   });
 });
@@ -105,8 +119,9 @@ describe("finite lead authority", () => {
   });
 });
 
-async function daemonFixture() {
+async function daemonFixture(options: { seedLinkedHold?: boolean } = {}) {
   const fixture = stateFixture();
+  if (options.seedLinkedHold) seedTerminalLinkedHold(fixture.state);
   const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.stateOptions, token: "a".repeat(48), principal: "root" });
   fixture.record.daemon = daemon;
   await daemon.start();
@@ -115,6 +130,48 @@ async function daemonFixture() {
     daemon,
     rootClient: new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.stateOptions, token: "a".repeat(48) }),
   };
+}
+
+function seedTerminalLinkedHold(state: ReturnType<typeof ensureProjectStateDirectories>) {
+  const budgets = new BudgetStore(state);
+  expect(budgets.reserve({
+    id: "observer-linked-parent",
+    projectId: state.projectId,
+    principal: "root",
+    sessionId: null,
+    workflowId: null,
+    provider: "anthropic",
+    inputTokens: 1_000,
+    outputTokens: 100,
+    costUsd: 1,
+    artifactBytes: 0,
+    retries: 0,
+  }).allowed).toBe(true);
+  expect(budgets.activate("observer-linked-parent").allowed).toBe(true);
+  const prepared = budgets.prepareLinkedProviderHold({
+    parentJobId: "observer-linked-parent",
+    parentReservationId: "observer-linked-parent",
+    childReservationId: "observer-linked-child",
+    requestId: "123e4567-e89b-42d3-a456-426614174099",
+    parentBackend: "claude-code",
+    targetBackend: "codex",
+    parentProvider: "anthropic",
+    targetProvider: "openai",
+    budgetFraction: 0.25,
+    parentDeadlineAt: Date.now() + 60_000,
+    childDeadlineAt: Date.now() + 40_000,
+    approvalPolicy: "auto",
+    parentAllocation: { requests: 1, inputTokens: 250, outputTokens: 25, costUsd: 0.25, artifactBytes: 0, retries: 0 },
+    targetReservation: { requests: 1, inputTokens: 100, outputTokens: 25, costUsd: 0.1, artifactBytes: 0, retries: 0 },
+    requestDigest: "a".repeat(64),
+    promptDigest: "b".repeat(64),
+    promptBytes: 16,
+  });
+  budgets.rollbackLinkedProviderHold(prepared.hold!.linkId);
+}
+
+function linkedHoldsDigest(state: ReturnType<typeof ensureProjectStateDirectories>) {
+  return createHash("sha256").update(JSON.stringify(new BudgetStore(state).getState().linkedHolds)).digest("hex");
 }
 
 function stateFixture() {

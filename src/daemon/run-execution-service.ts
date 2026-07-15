@@ -62,6 +62,15 @@ export type RunExecutionServiceOptions = {
 export type RunExecutionControls = {
   /** A durable admin-resolved grant for mutating coder tools in this one turn. */
   coderToolApproved?: boolean;
+  /** Mint-once cross-provider bearer, passed only on the synchronous admission call stack. */
+  linkedBrokerLease?: {
+    linkId: string;
+    id: string;
+    token: string;
+    provider: string;
+    expiresAt: number;
+    baseUrl: string;
+  };
 };
 
 const DEFAULT_BROKER_MAX_REQUESTS = 8;
@@ -103,6 +112,18 @@ export class RunExecutionService {
 
   async execute(jobId: string, request: SerializedRunRequest, controls: RunExecutionControls = {}) {
     const startingJob = this.requireJob(jobId);
+    const linkedHold = this.options.budgets.linkedProviderHoldForReservation(jobId);
+    if (controls.linkedBrokerLease) {
+      if (!linkedHold
+        || linkedHold.linkId !== controls.linkedBrokerLease.linkId
+        || linkedHold.state !== "leased"
+        || linkedHold.childJobId !== jobId
+        || linkedHold.targetProvider !== controls.linkedBrokerLease.provider) {
+        throw new Error("Linked target bearer does not match the daemon-owned leased child.");
+      }
+    } else if (linkedHold) {
+      throw new Error("Linked target bearer is unavailable and cannot be reproduced.");
+    }
     const principal = startingJob.principal;
     const reservation = this.options.budgets.getReservation(jobId);
     if (!reservation) throw new Error(`Job ${jobId} has no durable budget reservation.`);
@@ -166,9 +187,11 @@ export class RunExecutionService {
           deadlineExceeded = true;
           result = timedOutResult(request, jobId, Math.max(0, Date.now() - startingJob.createdAt), "Job exceeded its total lifecycle timeout during preparation.");
         } else {
-          brokerLease = request.authMode === "broker"
-            ? this.issueBrokerLease(jobId, request, deadlineAt, executionAuthorization.maxCostUsd)
-            : null;
+          brokerLease = controls.linkedBrokerLease
+            ? { ...controls.linkedBrokerLease }
+            : request.authMode === "broker"
+              ? this.issueBrokerLease(jobId, request, deadlineAt, executionAuthorization.maxCostUsd)
+              : null;
           const useNativePersistentSession = !!durableSession
             && request.authMode === "native-login"
             && request.mode === "read-only"
@@ -396,7 +419,8 @@ export class RunExecutionService {
       }
       if (brokerLease) {
         budgetUsage ??= conservativeBudgetUsage(result.usage, this.options.broker.getLeaseObservation(brokerLease.id));
-        this.options.broker.revokeLease(brokerLease.id);
+        if (controls.linkedBrokerLease) this.options.broker.revokeLinkedTarget(controls.linkedBrokerLease.linkId);
+        else this.options.broker.revokeLease(brokerLease.id);
       }
     }
     const current = this.options.jobs.get(jobId);
@@ -410,7 +434,7 @@ export class RunExecutionService {
         durationMs: Math.max(result.durationMs, Date.now() - startingJob.createdAt),
       };
     }
-    if (!budgetCommitted) {
+    if (!budgetCommitted && !linkedHold) {
       try {
         const committedUsage = budgetUsage ?? result.usage;
         const budget = this.options.budgets.commit(jobId, {

@@ -8,3 +8,6 @@ opencode/
 .DS_Store
 .env
 .env.local
+
+# Local Claude Code session state (agents/plans/skills/settings) — never commit
+.claude/
