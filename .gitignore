@@ -1,5 +1,8 @@
 node_modules/
 dist/
+website/node_modules/
+website/build/
+website/.docusaurus/
 opencode/
 .headless/
 *.log
