@@ -139,7 +139,7 @@ The observer snapshot contains jobs, delegation projections, and bounded run eve
 
 ## Cross-provider linked holds (v2)
 
-Status: design for review; the implemented runtime remains same-provider-only until this section's acceptance gate passes.
+Status: implemented and covered by the v2 acceptance tests below; the same-provider v1 fast path remains unchanged.
 
 ### Decision and atomicity boundary
 
