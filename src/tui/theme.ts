@@ -25,14 +25,16 @@ export const VIEW_LABELS: Record<TuiView, string> = {
   help: "Help",
 };
 
-/** 1-based terminal row of the tab bar; kept in sync with the fixed chrome in App.tsx. */
-export const TAB_ROW = 3;
-/** 1-based terminal row where view content starts. */
-export const CONTENT_TOP = 5;
+/** Narrowest width at which the tabs live inside the header row (ContextRelay style). */
+export const HEADER_TABS_MIN_WIDTH = 96;
+/** 1-based terminal row of the header (which carries the tabs at normal widths). */
+export const TAB_ROW = 1;
+/** 1-based terminal row where view content starts (header + rule/compact-tabs). */
+export const CONTENT_TOP = 3;
 /** Rows of view chrome (section title + column header) above selectable list rows. */
 export const LIST_OFFSET = 2;
-/** Terminal rows consumed by fixed observer chrome outside the content area (header, rule, tabs ×2, rule, status, footer). */
-export const FIXED_ROWS = 7;
+/** Terminal rows consumed by fixed observer chrome outside the content area (header, rule-or-tabs, rule, status, footer). */
+export const FIXED_ROWS = 5;
 
 /**
  * Stable identity colors for the four advertised backends, used wherever an

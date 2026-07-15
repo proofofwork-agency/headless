@@ -1,4 +1,5 @@
-import { CONTENT_TOP, FIXED_ROWS, LIST_OFFSET, TAB_ROW, TUI_VIEWS, VIEW_LABELS, type TuiView } from "./theme";
+import { CONTENT_TOP, FIXED_ROWS, HEADER_TABS_MIN_WIDTH, LIST_OFFSET, TAB_ROW, TUI_VIEWS, VIEW_LABELS, type TuiView } from "./theme";
+import { HEADLESS_VERSION } from "../version";
 
 export type TabSegment = {
   view: TuiView;
@@ -36,25 +37,45 @@ export type HitAction =
 
 /** First terminal column of content inside paddingX={2} chrome (1-based). */
 const CONTENT_START_X = 3;
-const TAB_GAP = 2;
+const TAB_GAP = 1;
 
 export function contentRows(height: number): number {
   return Math.max(4, height - FIXED_ROWS);
 }
 
+/** Whether the tabs render inside the header row (ContextRelay style) at this width. */
+export function headerTabsMode(width: number): boolean {
+  return width >= HEADER_TABS_MIN_WIDTH;
+}
+
+/** 1-based terminal row where tab labels live (header row, or the compact row under it). */
+export function tabRowFor(width: number): number {
+  return headerTabsMode(width) ? TAB_ROW : TAB_ROW + 1;
+}
+
+/** The header brand text; the tab x-offsets are derived from its exact width. */
+export function headerBrand(width: number): string {
+  return width >= 132 ? `◆ HEADLESS v${HEADLESS_VERSION}` : "◆ HEADLESS";
+}
+
+/**
+ * Tab segments with 1-based inclusive terminal columns. In header mode the tabs
+ * start after the brand; in the compact fallback they own the row below the
+ * header. Every label is rendered with one leading digit and padding spaces so
+ * active/inactive widths are identical and hit zones stay exact.
+ */
 export function buildTabLayout(width: number, badges: Partial<Record<TuiView, number>> = {}): TabSegment[] {
   const segments: TabSegment[] = [];
-  let cursor = CONTENT_START_X;
-  for (const view of TUI_VIEWS) {
-    if (view === "help") continue;
+  let cursor = headerTabsMode(width)
+    ? CONTENT_START_X + headerBrand(width).length + 2
+    : CONTENT_START_X;
+  for (const [index, view] of TUI_VIEWS.entries()) {
     const badge = badges[view] ?? 0;
-    const label = badge > 0 ? `${VIEW_LABELS[view]}·${badge}` : VIEW_LABELS[view];
+    const name = VIEW_LABELS[view].toLowerCase();
+    const label = ` ${index + 1} ${badge > 0 ? `${name}·${badge}` : name} `;
     segments.push({ view, label, badge, from: cursor, to: cursor + label.length - 1 });
     cursor += label.length + TAB_GAP;
   }
-  const helpLabel = VIEW_LABELS.help;
-  const helpTo = Math.max(cursor, width - 2);
-  segments.push({ view: "help", label: helpLabel, badge: 0, from: Math.max(cursor, helpTo - helpLabel.length + 1), to: helpTo });
   return segments;
 }
 
@@ -69,7 +90,7 @@ export function buildHitZones(options: {
   const list = options.list ?? null;
   const listRows = list ? Math.max(0, Math.min(list.rows, contentRows(height) - LIST_OFFSET)) : 0;
   return {
-    tabY: TAB_ROW,
+    tabY: tabRowFor(width),
     tabs: buildTabLayout(width, options.badges ?? {}),
     list: list && listRows > 0
       ? {
@@ -86,7 +107,7 @@ export function buildHitZones(options: {
 }
 
 export function hitTest(x: number, y: number, zones: HitZones): HitAction | undefined {
-  if (y === zones.tabY || y === zones.tabY + 1) {
+  if (y === zones.tabY) {
     const tab = zones.tabs.find((segment) => x >= segment.from && x <= segment.to);
     return tab ? { kind: "view", view: tab.view } : undefined;
   }
