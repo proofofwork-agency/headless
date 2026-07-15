@@ -6,7 +6,7 @@ export function nativeSmokeEvidenceValid(
   return result?.status === "succeeded"
     && containment?.requirement === "required"
     && containment.enforced === true
-    && containment.network === "provider-direct"
+    && containment.network === "native-direct-unrestricted"
     && containment.credentialAccess === "backend-native"
     && containment.unsafe === false
     && stringValue(native?.driverKind) !== null

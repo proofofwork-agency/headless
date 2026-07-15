@@ -5,6 +5,23 @@ import {
 } from "../scripts/native-smoke-evidence";
 
 describe("native subscription smoke harness", () => {
+  test("accepts only canonical native-direct containment evidence", () => {
+    const native = { driverKind: "opencode-session", authProfileFingerprint: "fingerprint" };
+    const containment = {
+      requirement: "required",
+      enforced: true,
+      network: "native-direct-unrestricted",
+      credentialAccess: "backend-native",
+      unsafe: false,
+    };
+
+    expect(nativeSmokeEvidenceValid({ status: "succeeded", containment }, native)).toBe(true);
+    expect(nativeSmokeEvidenceValid({
+      status: "succeeded",
+      containment: { ...containment, network: "provider-direct" },
+    }, native)).toBe(false);
+  });
+
   test("preserves denied prelaunch evidence without accepting it as a provider turn", () => {
     const containment = {
       requirement: "required",

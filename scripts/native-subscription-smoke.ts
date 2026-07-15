@@ -85,7 +85,9 @@ try {
   daemon = started.child;
   daemonOutput = started.output;
   await waitForDaemon(project, stateHome, runtimeHome, daemon, controller.signal);
-  await runCheckedCli(cliPath, ["project", "trust", "grant", "--cwd", project], env, controller.signal);
+  // Native-login sessions additionally require the explicit unrestricted-egress
+  // acknowledgement; the disposable smoke project opts in for its lifetime.
+  await runCheckedCli(cliPath, ["project", "trust", "grant", "--allow-native-direct-unrestricted", "--cwd", project], env, controller.signal);
 
   const results: BackendSmoke[] = [];
   for (const definition of backends) {
@@ -156,7 +158,9 @@ async function smokeBackend(
   const startedAt = Date.now();
   try {
     const created = await runCheckedCli(cli, [
-      "session", "create",
+      // `session` moved behind the experimental namespace in the Beta 1
+      // surface refocus; the smoke exercises that compatibility surface.
+      "experimental", "session", "create",
       "--cwd", cwd,
       "--backend", definition.backend,
       "--auth-mode", "native-login",
@@ -167,7 +171,7 @@ async function smokeBackend(
     const sessionId = requiredString(session.id, `${definition.backend} session id`);
     const sent = await runBounded([
       process.execPath, cli,
-      "session", "send",
+      "experimental", "session", "send",
       "--cwd", cwd,
       "--session-id", sessionId,
       "--timeout-ms", "60000",
@@ -192,7 +196,7 @@ async function smokeBackend(
     return {
       ...definition,
       status: "passed",
-      reason: "Native subscription turn completed with required provider-direct containment.",
+      reason: "Native subscription turn completed with required native-direct-unrestricted containment.",
       durationMs: Date.now() - startedAt,
       driverKind: stringValue(native?.driverKind),
       backendVersion: stringValue(native?.backendVersion),
@@ -230,7 +234,9 @@ function smokeFailure(
 }
 
 function startDaemon(cli: string, cwd: string, childEnv: NodeJS.ProcessEnv, signal: AbortSignal) {
-  const child = Bun.spawn([process.execPath, cli, "daemon", "serve", "--cwd", cwd], {
+  // The harness's own daemon must opt into experimental persistent sessions
+  // or the `experimental session` namespace refuses to attach to it.
+  const child = Bun.spawn([process.execPath, cli, "daemon", "serve", "--cwd", cwd, "--experimental-sessions"], {
     cwd,
     env: childEnv,
     stdin: "ignore",
