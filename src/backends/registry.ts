@@ -9,11 +9,14 @@ import { backendMetadata, type BackendMetadata } from "./metadata";
 import { normalizeBackend, type Backend } from "./ids";
 import type { BackendCapabilities } from "../contracts/backend";
 import type { WorkerEnvironment } from "../runtime/worker-environment";
+import { CLAUDE_SETUP_TOKEN_ENV } from "../runtime/native-auth-capsule";
 import {
   grokProjectControlPaths,
   installGrokIsolation,
   managedGrokExecutable,
+  prepareGrokTrustCanary,
   validateGrokIsolationInspection,
+  validateVacuouslyTrustedGrokInspection,
 } from "../runtime/grok-isolation";
 
 export type BackendDefinitionMetadata = Omit<BackendMetadata, "id"> & { id: string };
@@ -59,11 +62,22 @@ export type BackendDefinition = {
     timeoutMs: number;
     maxOutputBytes: number;
     validate: (value: unknown) => string | null;
+    /**
+     * Second phase for backends whose trust attestation is vacuous in a
+     * project without trust-gated control surfaces: when `validate` rejects
+     * the primary inspection but `validateVacuousPrimary` accepts it, the
+     * runner re-runs the same attestation inside `prepareCanaryCwd(worker)`
+     * and requires the strict `validate` to pass there.
+     */
+    vacuousTrustFallback?: {
+      validateVacuousPrimary: (value: unknown, projectRoot: string) => string | null;
+      prepareCanaryCwd: (worker: WorkerEnvironment) => string;
+    };
   };
   managedExecutable?: (homeDir?: string) => unknown | null;
   prepareEnvironment?: (
     env: NodeJS.ProcessEnv,
-    context: { worker: WorkerEnvironment; platform: NodeJS.Platform },
+    context: { worker: WorkerEnvironment; platform: NodeJS.Platform; authMode: ExecOptions["authMode"] },
   ) => void;
   buildEnv?: (env: NodeJS.ProcessEnv, opts?: ExecOptions) => NodeJS.ProcessEnv;
   prepareCommand: (opts: ExecOptions, cwd: string) => string[];
@@ -184,6 +198,10 @@ const builtInBackendDefinitions = {
       timeoutMs: 30_000,
       maxOutputBytes: 1_000_000,
       validate: validateGrokIsolationInspection,
+      vacuousTrustFallback: {
+        validateVacuousPrimary: validateVacuouslyTrustedGrokInspection,
+        prepareCanaryCwd: prepareGrokTrustCanary,
+      },
     },
     managedExecutable: managedGrokExecutable,
     prepareCommand: buildGrokCommand,
@@ -334,8 +352,14 @@ function prepareOpenCodeEnvironment(env: NodeJS.ProcessEnv) {
   env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = "1";
 }
 
-function prepareClaudeEnvironment(env: NodeJS.ProcessEnv, context: { worker: WorkerEnvironment }) {
+function prepareClaudeEnvironment(
+  env: NodeJS.ProcessEnv,
+  context: { worker: WorkerEnvironment; authMode: ExecOptions["authMode"] },
+) {
   env.CLAUDE_CODE_TMPDIR = context.worker.temp;
+  if (context.authMode !== "native-login") return;
+  const setupToken = context.worker.credentialEnv[CLAUDE_SETUP_TOKEN_ENV];
+  if (setupToken) env[CLAUDE_SETUP_TOKEN_ENV] = setupToken;
 }
 
 function prepareCodexEnvironment(env: NodeJS.ProcessEnv, context: { platform: NodeJS.Platform }) {

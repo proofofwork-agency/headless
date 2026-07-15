@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { NativeAuthCapsuleManifestSchema, type NativeAuthCapsuleManifest } from "../contracts/native";
@@ -8,6 +8,11 @@ import type { WorkerEnvironment } from "./worker-environment";
 
 const MAX_AUTH_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_AUTH_CAPSULE_BYTES = 4 * 1024 * 1024;
+export const MAX_CLAUDE_SETUP_TOKEN_BYTES = 4 * 1024;
+export const CLAUDE_SETUP_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
+export const CLAUDE_SETUP_TOKEN_LOGICAL_ENTRY = `env:${CLAUDE_SETUP_TOKEN_ENV}`;
+export const CLAUDE_SETUP_TOKEN_PATTERN = /^sk-ant-oat[A-Za-z0-9_-]{20,}$/;
+export const CLAUDE_SETUP_TOKEN_REMEDY = "Run `claude setup-token`, store its output at ~/.claude/.headless-setup-token, and run `chmod 600 ~/.claude/.headless-setup-token`.";
 const NATIVE_AUTH_CAPSULE_BACKENDS = new Set(["codex", "claude-code", "opencode", "grok-build"]);
 
 type CapsuleFile = {
@@ -55,6 +60,13 @@ export function installNativeAuthCapsule(
   if (model && !model.available) {
     return { available: false, manifest: null, reason: model.reason, model: null };
   }
+  if (backend === "claude-code") {
+    const setupToken = readClaudeSetupToken(home);
+    if (setupToken.status === "invalid") {
+      return { available: false, manifest: null, reason: setupToken.reason, model: null };
+    }
+    if (setupToken.status === "ok") return installClaudeSetupToken(worker, setupToken.contents);
+  }
   const files = capsuleFiles(backend, home);
   const installed: Array<{ destination: string; contents: Buffer }> = [];
   let totalBytes = 0;
@@ -75,7 +87,7 @@ export function installNativeAuthCapsule(
   // the real HOME, ambient OAuth tokens, or a broad keychain export.
   if (installed.length === 0) {
     const reason = backend === "claude-code"
-      ? "Claude native login requires supported regular-file state; keychain-only login is unavailable in required containment."
+      ? `Claude native login requires supported regular-file state; keychain-only login is unavailable in required containment. ${CLAUDE_SETUP_TOKEN_REMEDY}`
       : `No native authentication state was found for ${backend}.`;
     return { available: false, manifest: null, reason, model: model?.model ?? null };
   }
@@ -108,6 +120,69 @@ export function installNativeAuthCapsule(
   return { available: true, manifest, reason: null, model: model?.model ?? null };
 }
 
+function readClaudeSetupToken(home: string):
+  | { status: "ok"; contents: Buffer }
+  | { status: "missing" }
+  | { status: "invalid"; reason: string } {
+  const source = join(home, ".claude", ".headless-setup-token");
+  const read = readCapsuleSource(home, source, MAX_CLAUDE_SETUP_TOKEN_BYTES, {
+    resolveReason: "Claude setup-token could not be resolved safely.",
+    pathReason: "Claude setup-token must be a canonical non-symlinked file at ~/.claude/.headless-setup-token.",
+    fileReason: "Claude setup-token must be a single-link regular file.",
+    sizeReason: `Claude setup-token exceeds its ${MAX_CLAUDE_SETUP_TOKEN_BYTES}-byte limit.`,
+    openReason: "Claude setup-token could not be opened safely.",
+    validateInfo: (info) => {
+      const uid = process.getuid?.();
+      if ((uid !== undefined && info.uid !== uid) || (info.mode & 0o077) !== 0) {
+        return "Claude setup-token must be owned by the current user and accessible only to that user (chmod 600).";
+      }
+      return null;
+    },
+  });
+  if (read.status !== "ok") return read;
+  try {
+    let token: string;
+    try {
+      token = new TextDecoder("utf-8", { fatal: true }).decode(read.contents).trim();
+    } catch {
+      return { status: "invalid", reason: "Claude setup-token must contain valid UTF-8 text." };
+    }
+    if (!token) return { status: "invalid", reason: "Claude setup-token must not be empty." };
+    if (!CLAUDE_SETUP_TOKEN_PATTERN.test(token)) {
+      return { status: "invalid", reason: "Claude setup-token must match the expected sk-ant-oat token format." };
+    }
+    return { status: "ok", contents: Buffer.from(token, "utf8") };
+  } finally {
+    read.contents.fill(0);
+  }
+}
+
+function installClaudeSetupToken(worker: WorkerEnvironment, contents: Buffer): NativeAuthCapsuleResult {
+  const fingerprint = createHash("sha256")
+    .update("headless-native-auth-v1\0claude-code\0")
+    .update(CLAUDE_SETUP_TOKEN_LOGICAL_ENTRY)
+    .update("\0")
+    .update(contents)
+    .update("\0")
+    .digest("hex");
+  const token = contents.toString("utf8");
+  contents.fill(0);
+  worker.credentialEnv[CLAUDE_SETUP_TOKEN_ENV] = token;
+  try {
+    const manifest = NativeAuthCapsuleManifestSchema.parse({
+      version: 1,
+      backend: "claude-code",
+      fingerprint,
+      files: [CLAUDE_SETUP_TOKEN_LOGICAL_ENTRY],
+      createdAt: Date.now(),
+    });
+    return { available: true, manifest, reason: null, model: null };
+  } catch (error) {
+    delete worker.credentialEnv[CLAUDE_SETUP_TOKEN_ENV];
+    throw error;
+  }
+}
+
 function capsuleFiles(backend: string, home: string): CapsuleFile[] {
   if (backend === "codex") {
     return [{ source: join(home, ".codex", "auth.json"), destination: (worker) => join(worker.home, ".codex", "auth.json") }];
@@ -133,7 +208,24 @@ function assertWithinWorker(root: string, path: string) {
   if (!destination.startsWith(base)) throw new Error("Native authentication capsule escaped the worker root.");
 }
 
-function readCapsuleSource(home: string, source: string, maxBytes: number):
+type CapsuleSourcePolicy = {
+  resolveReason: string;
+  pathReason: string;
+  fileReason: string;
+  sizeReason: string;
+  openReason: string;
+  validateInfo?: (info: Stats) => string | null;
+};
+
+const DEFAULT_SOURCE_POLICY: CapsuleSourcePolicy = {
+  resolveReason: "Native authentication state could not be resolved safely.",
+  pathReason: "Native authentication state must use an allowlisted regular path inside the real home.",
+  fileReason: "Native authentication state is not a regular file.",
+  sizeReason: "Native authentication state exceeds its capsule limit.",
+  openReason: "Native authentication state could not be opened safely.",
+};
+
+function readCapsuleSource(home: string, source: string, maxBytes: number, policy: CapsuleSourcePolicy = DEFAULT_SOURCE_POLICY):
   | { status: "ok"; contents: Buffer }
   | { status: "missing" }
   | { status: "invalid"; reason: string } {
@@ -143,11 +235,11 @@ function readCapsuleSource(home: string, source: string, maxBytes: number):
   } catch (error) {
     return isMissing(error)
       ? { status: "missing" }
-      : { status: "invalid", reason: "Native authentication state could not be resolved safely." };
+      : { status: "invalid", reason: policy.resolveReason };
   }
   const expected = resolve(source);
   if (canonical !== expected || !canonical.startsWith(`${home}${sep}`)) {
-    return { status: "invalid", reason: "Native authentication state must use an allowlisted regular path inside the real home." };
+    return { status: "invalid", reason: policy.pathReason };
   }
 
   let descriptor: number | null = null;
@@ -156,10 +248,12 @@ function readCapsuleSource(home: string, source: string, maxBytes: number):
     descriptor = openSync(canonical, constants.O_RDONLY | constants.O_NOFOLLOW);
     const info = fstatSync(descriptor);
     if (!info.isFile() || info.nlink !== 1) {
-      return { status: "invalid", reason: "Native authentication state is not a regular file." };
+      return { status: "invalid", reason: policy.fileReason };
     }
+    const invalidInfo = policy.validateInfo?.(info);
+    if (invalidInfo) return { status: "invalid", reason: invalidInfo };
     if (maxBytes < 0 || info.size > maxBytes) {
-      return { status: "invalid", reason: "Native authentication state exceeds its capsule limit." };
+      return { status: "invalid", reason: policy.sizeReason };
     }
 
     // Read at most one byte beyond the remaining bound. This stays bounded
@@ -172,11 +266,11 @@ function readCapsuleSource(home: string, source: string, maxBytes: number):
       offset += count;
     }
     if (offset > maxBytes) {
-      return { status: "invalid", reason: "Native authentication state exceeds its capsule limit." };
+      return { status: "invalid", reason: policy.sizeReason };
     }
     return { status: "ok", contents: Buffer.from(buffer.subarray(0, offset)) };
   } catch {
-    return { status: "invalid", reason: "Native authentication state could not be opened safely." };
+    return { status: "invalid", reason: policy.openReason };
   } finally {
     buffer?.fill(0);
     if (descriptor !== null) closeSync(descriptor);

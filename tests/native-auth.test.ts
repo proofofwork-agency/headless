@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,12 @@ import {
   DARWIN_SANDBOX_EXEC,
   writeDarwinReadOnlySandboxProfile,
 } from "../src/runtime/os-sandbox";
-import { installNativeAuthCapsule } from "../src/runtime/native-auth-capsule";
+import {
+  CLAUDE_SETUP_TOKEN_ENV,
+  CLAUDE_SETUP_TOKEN_LOGICAL_ENTRY,
+  installNativeAuthCapsule,
+  MAX_CLAUDE_SETUP_TOKEN_BYTES,
+} from "../src/runtime/native-auth-capsule";
 import { createWorkerEnvironment } from "../src/runtime/worker-environment";
 
 const roots: string[] = [];
@@ -118,7 +123,7 @@ describe("native authentication capsules", () => {
       expect(result).toMatchObject({
         available: false,
         manifest: null,
-        reason: "Claude native login requires supported regular-file state; keychain-only login is unavailable in required containment.",
+        reason: "Claude native login requires supported regular-file state; keychain-only login is unavailable in required containment. Run `claude setup-token`, store its output at ~/.claude/.headless-setup-token, and run `chmod 600 ~/.claude/.headless-setup-token`.",
       });
       expect(worker.env.HOME).toBe(worker.home);
       expect(worker.env.USER).toBe("headless");
@@ -141,6 +146,128 @@ describe("native authentication capsules", () => {
       });
     } finally {
       worker.cleanup();
+    }
+  });
+
+  test("prefers a valid Claude setup-token as an env-only fingerprinted capsule", () => {
+    const home = fixtureRoot("headless-native-claude-setup-token-");
+    const base = fixtureRoot("headless-native-claude-setup-token-worker-");
+    const token = `sk-ant-oat${"A".repeat(32)}_fixture-token`;
+    mkdirSync(join(home, ".claude"));
+    writeFileSync(join(home, ".claude", ".headless-setup-token"), `  ${token}\n`, { mode: 0o600 });
+    writeFileSync(join(home, ".claude", ".credentials.json"), JSON.stringify({ oauth: "stale-file" }), { mode: 0o600 });
+    const worker = createWorkerEnvironment({
+      baseDir: base,
+      sourceEnv: { PATH: process.env.PATH, CLAUDE_CODE_OAUTH_TOKEN: "ambient-must-not-pass" },
+    });
+    try {
+      expect(worker.env[CLAUDE_SETUP_TOKEN_ENV]).toBeUndefined();
+      const result = installNativeAuthCapsule(worker, "claude-code", { homeDir: home });
+      expect(result).toMatchObject({
+        available: true,
+        reason: null,
+        manifest: {
+          backend: "claude-code",
+          files: [CLAUDE_SETUP_TOKEN_LOGICAL_ENTRY],
+        },
+      });
+      expect(result.manifest?.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(worker.env[CLAUDE_SETUP_TOKEN_ENV]).toBeUndefined();
+      expect(worker.credentialEnv[CLAUDE_SETUP_TOKEN_ENV]).toBe(token);
+      expect(existsSync(join(worker.home, ".claude", ".credentials.json"))).toBe(false);
+      expect(existsSync(join(worker.home, ".claude", ".headless-setup-token"))).toBe(false);
+    } finally {
+      worker.cleanup();
+      expect(worker.env[CLAUDE_SETUP_TOKEN_ENV]).toBeUndefined();
+      expect(worker.credentialEnv[CLAUDE_SETUP_TOKEN_ENV]).toBeUndefined();
+    }
+  });
+
+  test("fails closed on malformed or empty Claude setup-token files without falling back", () => {
+    const cases = [
+      ["empty", "", "Claude setup-token must not be empty."],
+      ["malformed", "not-a-setup-token", "Claude setup-token must match the expected sk-ant-oat token format."],
+    ] as const;
+    for (const [name, contents, reason] of cases) {
+      const home = fixtureRoot(`headless-native-claude-setup-${name}-`);
+      const base = fixtureRoot(`headless-native-claude-setup-${name}-worker-`);
+      mkdirSync(join(home, ".claude"));
+      writeFileSync(join(home, ".claude", ".headless-setup-token"), contents, { mode: 0o600 });
+      writeFileSync(join(home, ".claude", ".credentials.json"), JSON.stringify({ oauth: "must-not-fallback" }), { mode: 0o600 });
+      const worker = createWorkerEnvironment({ baseDir: base });
+      try {
+        expect(installNativeAuthCapsule(worker, "claude-code", { homeDir: home })).toEqual({
+          available: false,
+          manifest: null,
+          reason,
+          model: null,
+        });
+        expect(worker.credentialEnv[CLAUDE_SETUP_TOKEN_ENV]).toBeUndefined();
+        expect(existsSync(join(worker.home, ".claude", ".credentials.json"))).toBe(false);
+      } finally {
+        worker.cleanup();
+      }
+    }
+  });
+
+  test("rejects oversized and non-owner-only Claude setup-token files", () => {
+    const cases = [
+      ["oversized", Buffer.alloc(MAX_CLAUDE_SETUP_TOKEN_BYTES + 1, 65), 0o600, `Claude setup-token exceeds its ${MAX_CLAUDE_SETUP_TOKEN_BYTES}-byte limit.`],
+      ["permissions", Buffer.from(`sk-ant-oat${"P".repeat(32)}`), 0o644, "Claude setup-token must be owned by the current user and accessible only to that user (chmod 600)."],
+    ] as const;
+    for (const [name, contents, mode, reason] of cases) {
+      const home = fixtureRoot(`headless-native-claude-setup-${name}-`);
+      const base = fixtureRoot(`headless-native-claude-setup-${name}-worker-`);
+      mkdirSync(join(home, ".claude"));
+      const source = join(home, ".claude", ".headless-setup-token");
+      writeFileSync(source, contents, { mode });
+      chmodSync(source, mode);
+      const worker = createWorkerEnvironment({ baseDir: base });
+      try {
+        expect(installNativeAuthCapsule(worker, "claude-code", { homeDir: home })).toMatchObject({
+          available: false,
+          manifest: null,
+          reason,
+        });
+      } finally {
+        worker.cleanup();
+      }
+    }
+  });
+
+  test("rejects symlinked and multi-hardlink Claude setup-token sources", () => {
+    const symlinkHome = fixtureRoot("headless-native-claude-setup-symlink-");
+    const symlinkBase = fixtureRoot("headless-native-claude-setup-symlink-worker-");
+    mkdirSync(join(symlinkHome, ".claude"));
+    const target = join(symlinkHome, "setup-token-target");
+    writeFileSync(target, `sk-ant-oat${"S".repeat(32)}`, { mode: 0o600 });
+    symlinkSync(target, join(symlinkHome, ".claude", ".headless-setup-token"));
+    const symlinkWorker = createWorkerEnvironment({ baseDir: symlinkBase });
+    try {
+      expect(installNativeAuthCapsule(symlinkWorker, "claude-code", { homeDir: symlinkHome })).toMatchObject({
+        available: false,
+        manifest: null,
+        reason: "Claude setup-token must be a canonical non-symlinked file at ~/.claude/.headless-setup-token.",
+      });
+    } finally {
+      symlinkWorker.cleanup();
+    }
+
+    const hardlinkHome = fixtureRoot("headless-native-claude-setup-hardlink-");
+    const hardlinkBase = fixtureRoot("headless-native-claude-setup-hardlink-worker-");
+    mkdirSync(join(hardlinkHome, ".claude"));
+    const alias = join(hardlinkHome, "setup-token-alias");
+    writeFileSync(alias, `sk-ant-oat${"H".repeat(32)}`, { mode: 0o600 });
+    linkSync(alias, join(hardlinkHome, ".claude", ".headless-setup-token"));
+    const hardlinkWorker = createWorkerEnvironment({ baseDir: hardlinkBase });
+    try {
+      expect(installNativeAuthCapsule(hardlinkWorker, "claude-code", { homeDir: hardlinkHome })).toMatchObject({
+        available: false,
+        manifest: null,
+        reason: "Claude setup-token must be a single-link regular file.",
+      });
+    } finally {
+      hardlinkWorker.cleanup();
     }
   });
 

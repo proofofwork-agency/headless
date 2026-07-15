@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunSessionExecutor } from "../src/runtime/session-drivers";
+import { CLAUDE_SETUP_TOKEN_ENV } from "../src/runtime/native-auth-capsule";
 
 const roots: string[] = [];
 
@@ -292,6 +293,26 @@ for await (const chunk of Bun.stdin.stream()) {
       reason: "No native authentication capsule is available for claude-code.",
       profileFingerprint: null,
     });
+  });
+
+  test("detects a Claude setup-token environment without returning the bearer", async () => {
+    const root = fixture();
+    const token = `sk-ant-oat${"Q".repeat(32)}`;
+    const executor = new BunSessionExecutor();
+    const result = await executor.probeAuth!({
+      backend: "claude-code",
+      cwd: root,
+      env: { HOME: join(root, "home"), [CLAUDE_SETUP_TOKEN_ENV]: token },
+      timeoutMs: 5_000,
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      available: true,
+      reason: "Claude setup-token capsule is present.",
+    });
+    expect(result.profileFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(result)).not.toContain(token);
   });
 });
 

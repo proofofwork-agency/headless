@@ -1,6 +1,6 @@
 import { chmodSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, join, relative, resolve, sep } from "node:path";
 import type { WorkerEnvironment } from "./worker-environment";
 
 const MAX_PROJECT_ENTRIES = 250_000;
@@ -110,6 +110,66 @@ export function validateGrokIsolationInspection(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "Grok inspect did not return an object.";
   const inspected = value as Record<string, unknown>;
   if (inspected.projectTrusted !== false) return "Grok inspect did not prove project trust is disabled.";
+  return validateGrokInspectionSurfaces(inspected);
+}
+
+/**
+ * Grok records a folder-trust decision only for a project that contains
+ * gated repo-local configuration (.mcp.json, .grok, hooks); a project
+ * without any such surface reports a vacuous `projectTrusted: true` that no
+ * trust-store entry can flip. Accept that vacuous shape only when every
+ * loadable surface is provably empty and Headless's own startup snapshot
+ * agrees the project exposes no trust-gated control paths. Callers must
+ * still prove the trust gate itself with a canary attestation
+ * (`prepareGrokTrustCanary`).
+ */
+export function validateVacuouslyTrustedGrokInspection(value: unknown, projectRoot: string) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "Grok inspect did not return an object.";
+  const inspected = value as Record<string, unknown>;
+  if (inspected.projectTrusted !== true) return "Grok inspect did not report a vacuously trusted project.";
+  const surfaces = validateGrokInspectionSurfaces(inspected);
+  if (surfaces) return surfaces;
+  let controls: string[];
+  try {
+    controls = grokTrustGatedControlPaths(projectRoot);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return controls.length === 0
+    ? null
+    : "Grok reported a trusted project even though the project exposes trust-gated control paths.";
+}
+
+/**
+ * Control paths that can carry configuration Grok gates behind folder trust
+ * (repo-local MCP, LSP, hooks, plugins). Instruction files such as AGENTS.md
+ * or CLAUDE.md stay masked by the sandbox deny-read snapshot, but Grok does
+ * not gate them behind folder trust, so their presence keeps a
+ * `projectTrusted: true` report vacuous.
+ */
+export function grokTrustGatedControlPaths(projectRoot: string) {
+  return grokProjectControlPaths(projectRoot).filter((path) => {
+    const name = basename(path);
+    return CONTROL_DIRECTORIES.has(name) || name === ".mcp.json";
+  });
+}
+
+const GROK_TRUST_CANARY_MCP = `${JSON.stringify({ mcpServers: { headless_trust_canary: { command: "/usr/bin/true", args: [] } } })}\n`;
+
+/**
+ * Worker-owned canary project containing one gated-but-inert control file.
+ * A surface-free target project cannot force Grok into a real trust
+ * decision, so the trust gate is proven here instead: the strict inspection
+ * validator must report `projectTrusted: false` for this directory.
+ */
+export function prepareGrokTrustCanary(worker: WorkerEnvironment) {
+  const canary = join(worker.root, "grok-trust-canary");
+  mkdirSync(canary, { recursive: true, mode: 0o700 });
+  writeFileSync(join(canary, ".mcp.json"), GROK_TRUST_CANARY_MCP, { mode: 0o600 });
+  return canary;
+}
+
+function validateGrokInspectionSurfaces(inspected: Record<string, unknown>) {
   for (const field of ["projectInstructions", "hooks", "skills", "plugins", "mcpServers", "lspServers"] as const) {
     if (!Array.isArray(inspected[field]) || inspected[field].length !== 0) return `Grok inspect did not prove ${field} is empty.`;
   }

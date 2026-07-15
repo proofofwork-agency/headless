@@ -52,7 +52,7 @@ export function prepareNativeSessionEnvironment(
   platform: NodeJS.Platform = process.platform,
 ) {
   const env = adapter.buildEnv ? adapter.buildEnv(worker.env, options) : { ...worker.env };
-  adapter.prepareEnvironment?.(env, { worker, platform });
+  adapter.prepareEnvironment?.(env, { worker, platform, authMode: options.authMode ?? "broker" });
   return env;
 }
 
