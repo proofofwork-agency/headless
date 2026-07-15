@@ -129,13 +129,14 @@ try {
       }
     }
   }
-  const gate = evaluateNativeSmokeGate(results, repositoryUnchanged);
+  const gate = evaluateNativeSmokeGate(results, repositoryUnchanged, process.platform);
   console.log(JSON.stringify({
     version: 2,
     releaseGatePassed: gate.releaseGatePassed,
     requiredBackends: gate.requiredBackends,
     requiredSatisfied: gate.requiredSatisfied,
     requiredRealPass: gate.requiredRealPass,
+    transientRateLimited: gate.transientRateLimited,
     compiledArtifactsOnly: true,
     providerApiKeyEnvironmentCleared: true,
     providerCredentialEnvironmentCleared: true,
