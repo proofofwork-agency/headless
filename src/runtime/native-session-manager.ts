@@ -1,6 +1,7 @@
 import type { ExperimentalExecResult as ExecResult } from "../experimental/exec-result";
 import type { DurableSession } from "../contracts/durable";
-import { getBackendDefinition, requiredContainmentSecurityGaps } from "../backends/registry";
+import type { ExecOptions } from "../index";
+import { getBackendDefinition, requiredContainmentSecurityGaps, type BackendDefinition } from "../backends/registry";
 import { executableReadRoots, maybeWrapWithSandbox } from "../runner/simple";
 import { installNativeAuthCapsule, supportsNativeAuthCapsule } from "./native-auth-capsule";
 import { installGrokIsolation, validateGrokIsolationInspection } from "./grok-isolation";
@@ -42,6 +43,17 @@ type InitializingRuntime = {
 /** Backends with both an audited auth capsule and a concrete session driver. */
 export function isAuditedNativeSessionDriverBackend(backend: string) {
   return supportsNativeAuthCapsule(backend);
+}
+
+export function prepareNativeSessionEnvironment(
+  adapter: BackendDefinition,
+  worker: WorkerEnvironment,
+  options: ExecOptions,
+  platform: NodeJS.Platform = process.platform,
+) {
+  const env = adapter.buildEnv ? adapter.buildEnv(worker.env, options) : { ...worker.env };
+  adapter.prepareEnvironment?.(env, { worker, platform });
+  return env;
 }
 
 export class NativeSessionManager {
@@ -279,7 +291,7 @@ export class NativeSessionManager {
         authMode: "native-login" as const,
         approvalPolicy: session.approvalPolicy,
       };
-      const env = adapter.buildEnv ? adapter.buildEnv(worker.env, options) : { ...worker.env };
+      const env = prepareNativeSessionEnvironment(adapter, worker, options);
       const processExecutor = new BunSessionExecutor({
         prepare: async (request) => {
           const sandboxOptions = request.purpose === "capability-probe"

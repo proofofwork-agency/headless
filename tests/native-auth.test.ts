@@ -315,6 +315,55 @@ describe("native authentication capsules", () => {
     }
   });
 
+  realDarwinNetworkTest("provider-direct Seatbelt reaches the Codex responses WebSocket endpoint", async () => {
+    const workdir = fixtureRoot("headless-native-codex-network-");
+    const base = fixtureRoot("headless-native-codex-network-worker-");
+    const worker = createWorkerEnvironment({ baseDir: base });
+    const profile = writeDarwinReadOnlySandboxProfile({ workdir, worker, network: "provider-direct" });
+    try {
+      const endpoint = Bun.spawn([
+        DARWIN_SANDBOX_EXEC,
+        "-f",
+        profile,
+        "/usr/bin/curl",
+        "--http1.1",
+        "-sS",
+        "-D",
+        "-",
+        "-o",
+        "/dev/null",
+        "--connect-timeout",
+        "5",
+        "--max-time",
+        "10",
+        "-H",
+        "Connection: Upgrade",
+        "-H",
+        "Upgrade: websocket",
+        "-H",
+        "Sec-WebSocket-Version: 13",
+        "-H",
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+        "https://chatgpt.com/backend-api/codex/responses",
+      ], {
+        cwd: workdir,
+        env: worker.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [exitCode, output, error] = await Promise.all([
+        endpoint.exited,
+        new Response(endpoint.stdout).text(),
+        new Response(endpoint.stderr).text(),
+      ]);
+      expect(exitCode, error).toBe(0);
+      expect(output).toContain("HTTP/");
+    } finally {
+      cleanupSandboxProfile(profile);
+      worker.cleanup();
+    }
+  });
+
   test("does not grant keychain services or provider egress to local auth probes", () => {
     const workdir = fixtureRoot("headless-native-auth-probe-");
     const base = fixtureRoot("headless-native-auth-worker-");
