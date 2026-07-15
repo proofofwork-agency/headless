@@ -7,6 +7,7 @@ import {
   nativeSmokeContainmentSummary,
   nativeSmokeEvidenceValid,
   nativeWriteSmokeContainmentValid,
+  pendingNativeWriteCoderApproval,
 } from "../scripts/native-smoke-evidence";
 
 function smokeResult(backend: string, status: string, acceptedLimitation = false, code: string | null = null) {
@@ -186,6 +187,40 @@ describe("native write smoke harness", () => {
     expect(isNativeWriteMergeOutcome("preserved_no_merge_authority")).toBe(false);
     expect(isNativeWriteMergeOutcome("blocked_conflict")).toBe(false);
     expect(isNativeWriteMergeOutcome(null)).toBe(false);
+  });
+
+  test("selects only the exact pending write-turn coder-tool approval", () => {
+    expect(pendingNativeWriteCoderApproval([
+      {
+        id: "approval-opencode",
+        collaborationId: "job-opencode",
+        kind: "coder_tool",
+        status: "pending",
+        details: { jobId: "job-opencode", backend: "opencode", mode: "write" },
+      },
+      {
+        id: "approval-codex",
+        collaborationId: "job-codex",
+        kind: "coder_tool",
+        status: "pending",
+        details: { jobId: "job-codex", backend: "codex", mode: "write" },
+      },
+    ], "opencode")).toEqual({ approvalId: "approval-opencode", jobId: "job-opencode" });
+  });
+
+  test("fails closed on ambiguous or mismatched coder-tool approval identity", () => {
+    const approval = {
+      id: "approval-opencode",
+      collaborationId: "job-opencode",
+      kind: "coder_tool",
+      status: "pending",
+      details: { jobId: "different-job", backend: "opencode", mode: "write" },
+    };
+    expect(() => pendingNativeWriteCoderApproval([approval], "opencode")).toThrow("malformed");
+    expect(() => pendingNativeWriteCoderApproval([
+      { ...approval, collaborationId: "different-job", details: { ...approval.details, jobId: "different-job" } },
+      { ...approval, id: "second", collaborationId: "different-job", details: { ...approval.details, jobId: "different-job" } },
+    ], "opencode")).toThrow("Multiple");
   });
 
   test("refuses to launch write turns without explicit opt-in", async () => {

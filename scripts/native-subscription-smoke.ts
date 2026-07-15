@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { atomicWriteFile } from "../src/runtime/atomic-write";
 import {
   evaluateNativeSmokeGate,
   nativeSmokeAcceptedLimitation,
@@ -14,6 +15,7 @@ const CLI_TIMEOUT_MS = 90_000;
 const DAEMON_START_TIMEOUT_MS = 10_000;
 const DAEMON_STOP_TIMEOUT_MS = 10_000;
 const MAX_CHILD_OUTPUT_BYTES = 1_000_000;
+const EVIDENCE_PATH = resolve(import.meta.dir, "../docs/internal/release-evidence/native-subscription-smoke.json");
 
 if (process.env[OPT_IN_ENV] !== "1") {
   console.error(`Native subscription smoke is disabled. Set ${OPT_IN_ENV}=1 only on a trusted host with intentionally logged-in CLIs.`);
@@ -130,7 +132,7 @@ try {
     }
   }
   const gate = evaluateNativeSmokeGate(results, repositoryUnchanged, process.platform);
-  console.log(JSON.stringify({
+  const evidence = {
     version: 2,
     releaseGatePassed: gate.releaseGatePassed,
     requiredBackends: gate.requiredBackends,
@@ -142,7 +144,10 @@ try {
     providerCredentialEnvironmentCleared: true,
     repositoryUnchanged,
     results,
-  }, null, 2));
+  };
+  mkdirSync(dirname(EVIDENCE_PATH), { recursive: true, mode: 0o700 });
+  atomicWriteFile(EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+  console.log(JSON.stringify(evidence, null, 2));
   if (!gate.releaseGatePassed) process.exitCode = 1;
 } catch (error) {
   console.error(`Native subscription smoke failed: ${safeDiagnostic(error)}`);

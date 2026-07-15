@@ -1,0 +1,95 @@
+{
+  "version": 2,
+  "releaseGatePassed": true,
+  "requiredBackends": [
+    "codex",
+    "opencode"
+  ],
+  "requiredSatisfied": true,
+  "requiredRealPass": true,
+  "transientRateLimited": [
+    "codex"
+  ],
+  "compiledArtifactsOnly": true,
+  "providerApiKeyEnvironmentCleared": true,
+  "providerCredentialEnvironmentCleared": true,
+  "repositoryUnchanged": true,
+  "results": [
+    {
+      "backend": "claude-code",
+      "binary": "claude",
+      "status": "failed",
+      "acceptedLimitation": false,
+      "code": "RATE_LIMITED",
+      "reason": "Backend rate limit reported.",
+      "durationMs": 4178,
+      "driverKind": "claude-print-resume",
+      "backendVersion": "2.1.210",
+      "authProfileFingerprint": "277e016cdaffde747109892a6273f2c9af5b10126e9b03d6c85856f9f32d46af",
+      "containment": {
+        "mechanism": "native-session:claude-print-resume",
+        "network": "native-direct-unrestricted",
+        "credentialAccess": "backend-native"
+      },
+      "costAmountUsd": 0.011719,
+      "usageTotal": null
+    },
+    {
+      "backend": "codex",
+      "binary": "codex",
+      "status": "failed",
+      "acceptedLimitation": false,
+      "code": "RATE_LIMITED",
+      "reason": "Backend rate limit reported.",
+      "durationMs": 3244,
+      "driverKind": "codex-app-server",
+      "backendVersion": "0.144.4",
+      "authProfileFingerprint": "5672c1c763a5ec3dd10ecf0d431c90c9884d614c1a8c7a6d71f71d1e0fa778ff",
+      "containment": {
+        "mechanism": "native-session:codex-app-server",
+        "network": "native-direct-unrestricted",
+        "credentialAccess": "backend-native"
+      },
+      "costAmountUsd": null,
+      "usageTotal": 9332
+    },
+    {
+      "backend": "opencode",
+      "binary": "opencode",
+      "status": "passed",
+      "acceptedLimitation": false,
+      "code": null,
+      "reason": "Native subscription turn completed with required native-direct-unrestricted containment.",
+      "durationMs": 7389,
+      "driverKind": "opencode-session",
+      "backendVersion": "1.18.1",
+      "authProfileFingerprint": "63db649aabea6fe407d3037b7ffd93b1e79a79a10f75f3e63a0822531076c8f6",
+      "containment": {
+        "mechanism": "native-session:opencode-session",
+        "network": "native-direct-unrestricted",
+        "credentialAccess": "backend-native"
+      },
+      "costAmountUsd": 0,
+      "usageTotal": 4319
+    },
+    {
+      "backend": "grok-build",
+      "binary": "grok",
+      "status": "skipped",
+      "acceptedLimitation": true,
+      "code": "BACKEND_UNSUPPORTED",
+      "reason": "Grok isolation attestation failed before provider access: Grok inspect did not prove project trust is disabled. — documented accepted limitation; does not fail the release gate.",
+      "durationMs": 179,
+      "driverKind": null,
+      "backendVersion": null,
+      "authProfileFingerprint": null,
+      "containment": {
+        "mechanism": null,
+        "network": "denied",
+        "credentialAccess": "none"
+      },
+      "costAmountUsd": null,
+      "usageTotal": null
+    }
+  ]
+}

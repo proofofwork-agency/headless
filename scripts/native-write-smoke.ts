@@ -1,29 +1,31 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { atomicWriteFile } from "../src/runtime/atomic-write";
 import {
   evaluateNativeWriteSmokeGate,
   isNativeWriteMergeOutcome,
   nativeSmokeAcceptedLimitation,
   nativeSmokeContainmentSummary,
   nativeWriteSmokeContainmentValid,
+  pendingNativeWriteCoderApproval,
 } from "./native-smoke-evidence";
 
 const OPT_IN_ENV = "HEADLESS_NATIVE_WRITE_SMOKE";
 const CLI_TIMEOUT_MS = 90_000;
 const EXEC_RUN_TIMEOUT_MS = 120_000;
 const EXEC_WALL_CLOCK_MS = 180_000;
+const CODER_APPROVAL_WAIT_MS = 15_000;
 const DAEMON_START_TIMEOUT_MS = 10_000;
 const DAEMON_STOP_TIMEOUT_MS = 10_000;
 const MAX_CHILD_OUTPUT_BYTES = 1_000_000;
+const EVIDENCE_PATH = resolve(import.meta.dir, "../docs/internal/release-evidence/native-write-smoke.json");
 
 // A single deterministic edit the write turn must make. The whole point of the
 // smoke is that this exact line reaches primary only through an authorized
 // candidate integration, never before.
-const WRITE_SMOKE_FILE = "WRITE_SMOKE.md";
 const WRITE_SMOKE_MARKER = "headless native write smoke OK";
-const WRITE_TASK = `Create a new file named ${WRITE_SMOKE_FILE} in the repository root. Its entire contents must be exactly this one line: ${WRITE_SMOKE_MARKER}. Do not modify, create, or delete any other file, and do not run any shell command or tool other than the single file edit.`;
 
 if (process.env[OPT_IN_ENV] !== "1") {
   console.error(`Native write smoke is disabled. Set ${OPT_IN_ENV}=1 only on a trusted host with intentionally logged-in CLIs.`);
@@ -62,6 +64,8 @@ type BackendWriteSmoke = {
   primaryUnchangedBeforeIntegration: boolean | null;
   primaryAdvanced: boolean;
   editPresentOnPrimary: boolean;
+  coderToolApprovalId: string | null;
+  mergeApprovalId: string | null;
   containment: {
     mechanism: string | null;
     network: string | null;
@@ -130,6 +134,8 @@ try {
         primaryUnchangedBeforeIntegration: null,
         primaryAdvanced: false,
         editPresentOnPrimary: false,
+        coderToolApprovalId: null,
+        mergeApprovalId: null,
         containment: null,
       });
       continue;
@@ -143,7 +149,7 @@ try {
   // primary before its authorized integration.
   const primaryPreservedBeforeIntegration = results.every((result) => result.primaryUnchangedBeforeIntegration !== false);
   const gate = evaluateNativeWriteSmokeGate(results, primaryPreservedBeforeIntegration, process.platform);
-  console.log(JSON.stringify({
+  const evidence = {
     version: 1,
     releaseGatePassed: gate.releaseGatePassed,
     requiredBackends: gate.requiredBackends,
@@ -155,7 +161,10 @@ try {
     providerCredentialEnvironmentCleared: true,
     primaryUnchangedBeforeIntegration: primaryPreservedBeforeIntegration,
     results,
-  }, null, 2));
+  };
+  mkdirSync(dirname(EVIDENCE_PATH), { recursive: true, mode: 0o700 });
+  atomicWriteFile(EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+  console.log(JSON.stringify(evidence, null, 2));
   if (!gate.releaseGatePassed) process.exitCode = 1;
 } catch (error) {
   console.error(`Native write smoke failed: ${safeDiagnostic(error)}`);
@@ -182,6 +191,9 @@ async function smokeWriteBackend(
   signal: AbortSignal,
 ): Promise<BackendWriteSmoke> {
   const startedAt = Date.now();
+  const writeSmokeFile = `WRITE_SMOKE.${definition.backend}.md`;
+  const writeSmokeMarker = `${WRITE_SMOKE_MARKER}: ${definition.backend}`;
+  const writeTask = `Create a new file named ${writeSmokeFile} in the repository root. Its entire contents must be exactly this one line: ${writeSmokeMarker}. Do not modify, create, or delete any other file, and do not run any shell command or tool other than the single file edit.`;
   try {
     const before = await repositorySnapshot(cwd, childEnv, signal);
 
@@ -189,7 +201,8 @@ async function smokeWriteBackend(
     // merge) so the isolation of primary can be proven before an authorized
     // integration. The exec exits non-zero for a preserved/blocked candidate, so
     // the RunResult JSON — not the exit code — is authoritative.
-    const executed = await runBounded([
+    let executionSettled = false;
+    const execution = runBounded([
       process.execPath, cli,
       "exec",
       "--backend", definition.backend,
@@ -201,8 +214,21 @@ async function smokeWriteBackend(
       "--cwd", cwd,
       "--timeout-ms", String(EXEC_RUN_TIMEOUT_MS),
       "--",
-      WRITE_TASK,
+      writeTask,
     ], { cwd, env: childEnv, timeoutMs: EXEC_WALL_CLOCK_MS, signal });
+    void execution.then(
+      () => { executionSettled = true; },
+      () => { executionSettled = true; },
+    );
+    const coderToolApproval = await resolveCoderToolApproval(
+      cli,
+      cwd,
+      childEnv,
+      definition.backend,
+      () => executionSettled,
+      signal,
+    );
+    const executed = await execution;
 
     const runResult = parseObject(executed.stdout, `${definition.backend} exec --json`);
     if (isErrorEnvelope(runResult)) {
@@ -247,6 +273,8 @@ async function smokeWriteBackend(
       primaryUnchangedBeforeIntegration: null,
       primaryAdvanced: false,
       editPresentOnPrimary: false,
+      coderToolApprovalId: coderToolApproval?.approvalId ?? null,
+      mergeApprovalId: null,
       containment: containmentSummary,
     };
 
@@ -270,7 +298,15 @@ async function smokeWriteBackend(
       // Defensive: ask-mode is not expected to auto-merge, but an inline merge is
       // still an authorized integration. Verify primary advanced to the reported
       // resulting commit and the edit is present.
-      const merged = await verifyPrimaryIntegrated(cwd, childEnv, before.head, stringValue(commit?.result), signal);
+      const merged = await verifyPrimaryIntegrated(
+        cwd,
+        childEnv,
+        before.head,
+        stringValue(commit?.result),
+        writeSmokeFile,
+        writeSmokeMarker,
+        signal,
+      );
       return {
         ...base,
         status: merged.ok ? "passed" : "failed",
@@ -296,6 +332,7 @@ async function smokeWriteBackend(
         "--resolution", "native write smoke: authorized candidate integration",
         "--cwd", cwd,
       ], childEnv, signal);
+      base.mergeApprovalId = approvalId;
     }
 
     const integrateRun = await runBounded([
@@ -327,7 +364,15 @@ async function smokeWriteBackend(
       };
     }
 
-    const verified = await verifyPrimaryIntegrated(cwd, childEnv, before.head, resultingCommit, signal);
+    const verified = await verifyPrimaryIntegrated(
+      cwd,
+      childEnv,
+      before.head,
+      resultingCommit,
+      writeSmokeFile,
+      writeSmokeMarker,
+      signal,
+    );
     return {
       ...base,
       status: verified.ok ? "passed" : "failed",
@@ -350,20 +395,22 @@ async function verifyPrimaryIntegrated(
   childEnv: NodeJS.ProcessEnv,
   beforeHead: string,
   expectedHead: string | null,
+  writeSmokeFile: string,
+  writeSmokeMarker: string,
   signal: AbortSignal,
 ) {
   const after = await repositorySnapshot(cwd, childEnv, signal);
   const advanced = after.head !== beforeHead && after.status === "";
   const headMatches = expectedHead === null || after.head === expectedHead;
-  const filePath = join(cwd, WRITE_SMOKE_FILE);
-  const editPresent = existsSync(filePath) && readFileSync(filePath, "utf8").includes(WRITE_SMOKE_MARKER);
+  const filePath = join(cwd, writeSmokeFile);
+  const editPresent = existsSync(filePath) && readFileSync(filePath, "utf8").includes(writeSmokeMarker);
   const ok = advanced && headMatches && editPresent;
   const reason = !advanced
     ? "Primary did not advance to the integrated commit."
     : !headMatches
       ? "Primary advanced to an unexpected commit."
       : !editPresent
-        ? `Integrated commit did not carry ${WRITE_SMOKE_FILE} with the expected marker.`
+        ? `Integrated commit did not carry ${writeSmokeFile} with the expected marker.`
         : "Integrated.";
   return { ok, advanced: advanced && headMatches, editPresent, head: after.head, reason };
 }
@@ -392,8 +439,46 @@ function writeFailure(
     primaryUnchangedBeforeIntegration: null,
     primaryAdvanced: false,
     editPresentOnPrimary: false,
+    coderToolApprovalId: null,
+    mergeApprovalId: null,
     containment: null,
   };
+}
+
+async function resolveCoderToolApproval(
+  cli: string,
+  cwd: string,
+  childEnv: NodeJS.ProcessEnv,
+  backend: string,
+  executionSettled: () => boolean,
+  signal: AbortSignal,
+) {
+  const deadline = Date.now() + CODER_APPROVAL_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (signal.aborted) throw new Error(`Coder-tool approval wait interrupted by ${String(signal.reason)}.`);
+    const listed = await runBounded([
+      process.execPath, cli,
+      "experimental", "approval", "list",
+      "--status", "pending",
+      "--cwd", cwd,
+    ], { cwd, env: childEnv, timeoutMs: 3_000, signal });
+    if (listed.exitCode === 0 && !listed.timedOut && !listed.overflowed) {
+      const approval = pendingNativeWriteCoderApproval(parseJson(listed.stdout, "approval.list"), backend);
+      if (approval) {
+        await runCheckedCli(cli, [
+          "experimental", "approval", "resolve",
+          "--approval-id", approval.approvalId,
+          "--decision", "approved",
+          "--resolution", `native write smoke: authorize ${backend} single write turn`,
+          "--cwd", cwd,
+        ], childEnv, signal);
+        return approval;
+      }
+    }
+    if (executionSettled()) return null;
+    await Bun.sleep(100);
+  }
+  throw new Error(`Pending coder-tool approval for ${backend} did not appear within ${CODER_APPROVAL_WAIT_MS}ms.`);
 }
 
 function startDaemon(cli: string, cwd: string, childEnv: NodeJS.ProcessEnv, signal: AbortSignal) {
@@ -602,12 +687,18 @@ function isErrorEnvelope(value: Record<string, unknown>) {
 }
 
 function parseObject(text: string, label: string) {
-  try {
-    const parsed: unknown = JSON.parse(text);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
-    return parsed as Record<string, unknown>;
-  } catch {
+  const parsed = parseJson(text, label);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${label} did not return one structured JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseJson(text: string, label: string) {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error(`${label} did not return structured JSON.`);
   }
 }
 
