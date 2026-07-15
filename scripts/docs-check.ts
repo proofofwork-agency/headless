@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { generatedCommandReference } from "./generate-command-reference";
+import { HEADLESS_VERSION } from "../src/version";
 
 const root = resolve(import.meta.dir, "..");
 const documents = ["README.md", "SECURITY.md", "CHANGELOG.md", "docs/command-reference.md", "docs/cli-and-tui-guide.md", "docs/mcp-integration.md", "docs/native-login.md", "docs/plan.md"];
@@ -30,8 +31,8 @@ const plugin = JSON.parse(readFileSync(join(root, "plugin", "package.json"), "ut
 if (readFileSync(join(root, "docs", "command-reference.md"), "utf8") !== generatedCommandReference()) {
   failures.push("docs/command-reference.md is stale; run bun run generate:docs.");
 }
-if (pkg.version !== "0.2.0-alpha.0" || plugin.version !== pkg.version || pkg.private !== true || plugin.private !== true) {
-  failures.push("Root/plugin manifests must remain aligned and private at 0.2.0-alpha.0.");
+if (pkg.version !== HEADLESS_VERSION || plugin.version !== pkg.version || pkg.private !== true || plugin.private !== true) {
+  failures.push(`Root/plugin manifests must remain aligned and private at ${HEADLESS_VERSION} (src/version.ts is the single source of truth).`);
 }
 
 if (failures.length) {

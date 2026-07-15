@@ -2,8 +2,10 @@ import React from "react";
 import { Box, Text } from "ink";
 import { controlSummary, healthSummary, shortPath, truncateDisplay, type TuiControlRoomState } from "./model";
 import type { TabSegment } from "./layout";
+import { HEADLESS_VERSION } from "../version";
 import {
   ACCENT,
+  backendTone,
   BLUE,
   CHROME,
   connectionTone,
@@ -13,6 +15,21 @@ import {
   WARN,
   type TuiView,
 } from "./theme";
+
+/** Full-width horizontal divider matching the ContextRelay TUI chrome. */
+export function Rule({ width, tone = CHROME }: { width: number; tone?: string }) {
+  return <Box paddingX={2}><Text color={tone} wrap="truncate">{"─".repeat(Math.max(1, width - 4))}</Text></Box>;
+}
+
+/** Colored status dot; the TUI's glanceable state encoding. */
+export function Dot({ tone }: { tone: string }) {
+  return <Text color={tone}>● </Text>;
+}
+
+/** Backend name rendered in its stable identity color. */
+export function BackendName({ backend, bold = false }: { backend: string; bold?: boolean }) {
+  return <Text bold={bold} color={backendTone(backend)}>{backend}</Text>;
+}
 
 export function ChromeHeader({ state, width }: { state: TuiControlRoomState; width: number }) {
   const tone = connectionTone(state.connection);
@@ -24,12 +41,17 @@ export function ChromeHeader({ state, width }: { state: TuiControlRoomState; wid
   const leftWidth = Math.max(18, width - right.length - 5);
   return (
     <Box paddingX={2} justifyContent="space-between">
-      <Text wrap="truncate"><Text bold color={ACCENT}>◈ HEADLESS</Text><Text color={CHROME}> / OBSERVER</Text></Text>
+      <Text wrap="truncate">
+        <Text color={ACCENT}>◆ </Text>
+        <Text bold>HEADLESS</Text>
+        <Text color={MUTED}> v{HEADLESS_VERSION}</Text>
+        <Text color={CHROME}> · observer</Text>
+      </Text>
       {width >= 120 ? <Box width={leftWidth}>
         <Text wrap="truncate"><Text color={CHROME}>{shortPath(state.projectRoot, Math.max(10, leftWidth - 8))}</Text></Text>
       </Box> : null}
       <Text wrap="truncate">
-        <Text color={tone}>● </Text><Text color={tone}>{right}</Text>
+        <Dot tone={tone} /><Text color={tone}>{right}</Text>
       </Text>
     </Box>
   );
@@ -135,8 +157,8 @@ export function Footer({ hints, right, width }: { hints: Array<[string, string]>
       <Text wrap="truncate">
         {hints.map(([key, action], index) => (
           <React.Fragment key={`${key}-${action}`}>
-            {index > 0 ? <Text color={CHROME}>  </Text> : null}
-            <Text color={BLUE}>{key}</Text>
+            {index > 0 ? <Text color={CHROME}>   </Text> : null}
+            <Text bold color={ACCENT}>{key}</Text>
             <Text color={MUTED}> {action}</Text>
           </React.Fragment>
         ))}

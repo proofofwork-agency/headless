@@ -1,4 +1,5 @@
 import { BaseSessionDriver, type BaseSessionDriverOptions, type OpenSessionResult, type SessionDriverRuntime } from "./base";
+import { HEADLESS_VERSION } from "../../version";
 import { SessionEventAssembler } from "./event-assembler";
 import { SessionDriverError } from "./errors";
 import type { SessionExecutor, SessionTransport } from "./executor";
@@ -238,7 +239,7 @@ function appServerOpenRequest(
 }
 
 function initializeParams() {
-  return { clientInfo: { name: "headless", title: "Headless", version: "0.2.0-alpha.0" } };
+  return { clientInfo: { name: "headless", title: "Headless", version: HEADLESS_VERSION } };
 }
 
 function requireTransport(runtime: SessionDriverRuntime) {

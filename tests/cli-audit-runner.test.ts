@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { CLI_AUDIT_MANIFEST } from "../src/cli";
+import { COMMAND_SPECS } from "../src/cli";
+import { runGitStrict } from "../src/runtime/git";
 
-const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
+const cliPath = process.env.HEADLESS_AUDIT_CLI
+  ? resolve(process.env.HEADLESS_AUDIT_CLI)
+  : new URL("../src/cli.ts", import.meta.url).pathname;
 
 type AuditResult = {
   id: string;
+  command: string;
   status: "PASS" | "FAIL" | "EXPECTED_REJECTION";
   exitCode: number;
   stdout: string;
@@ -29,6 +34,46 @@ export async function runIsolatedCliAudit(): Promise<AuditResult[]> {
   for (const dir of [project, state, home, bin]) mkdirSync(dir, { recursive: true });
   mkdirSync(runtime, { recursive: true });
   writeFileSync(join(project, "marker.txt"), "audit\n");
+  writeFileSync(join(project, "package.json"), JSON.stringify({
+    scripts: {
+      check: "bun -e 'process.exit(0)'",
+      build: "bun -e 'process.exit(0)'",
+    },
+  }));
+  requireGitSuccess(runGitStrict(["init", "-b", "main"], project), "initialize audit repository");
+  requireGitSuccess(runGitStrict(["add", "--all"], project), "stage audit fixture");
+  requireGitSuccess(runGitStrict([
+    "-c", "user.name=Headless CLI Audit", "-c", "user.email=audit@example.test",
+    "commit", "--no-gpg-sign", "-m", "audit fixture",
+  ], project), "commit audit fixture");
+  const fleetFile = join(root, "fleet.json");
+  writeFileSync(fleetFile, JSON.stringify({
+    id: "audit-fleet",
+    name: "Audit fleet",
+    agents: [{ id: "audit-worker", backend: "codex", name: "Audit worker" }],
+  }));
+  const fleetRoundTripFile = join(root, "fleet-roundtrip.json");
+  writeFileSync(fleetRoundTripFile, JSON.stringify({
+    id: "audit-fleet",
+    projectId: "server-owned-project",
+    name: "Audit fleet",
+    authMode: "broker",
+    approvalPolicy: "ask",
+    agents: [{
+      id: "audit-worker", backend: "codex", name: "Audit worker",
+      authMode: "broker", approvalPolicy: "ask", createdAt: 10, updatedAt: 20,
+    }],
+    active: true,
+    createdAt: 10,
+    updatedAt: 20,
+  }));
+  const invalidFleetFile = join(root, "fleet-invalid.json");
+  writeFileSync(invalidFleetFile, JSON.stringify({
+    id: "audit-invalid",
+    name: "Invalid fleet",
+    agents: [{ id: "audit-worker", backend: "codex", name: "Audit worker" }],
+    unexpected: true,
+  }));
   const fakeMcp = join(bin, "mcp-host");
   writeFileSync(fakeMcp, "#!/usr/bin/env bun\nconsole.log(JSON.stringify({ok:true}));\n");
   chmodSync(fakeMcp, 0o700);
@@ -52,44 +97,52 @@ export async function runIsolatedCliAudit(): Promise<AuditResult[]> {
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     HEADLESS_AUDIT_CWD: project,
   };
-  const cases: Array<{ id: string; args: string[]; expected: AuditResult["status"]; expectedError?: string }> = [
-    { id: "help", args: ["--help"], expected: "PASS" },
-    { id: "version", args: ["--version"], expected: "PASS" },
-    { id: "unknown", args: ["definitely-not-a-command"], expected: "EXPECTED_REJECTION" },
-    { id: "exec:conflicting-containment", args: ["exec", "--require-sandbox", "--unsafe-no-sandbox", "prompt"], expected: "EXPECTED_REJECTION", expectedError: "Choose either --require-sandbox or --unsafe-no-sandbox" },
-    { id: "autonomy:unsafe", args: ["experimental", "autonomy", "start", "--unsafe-no-sandbox"], expected: "EXPECTED_REJECTION" },
-    { id: "launch:legacy", args: ["experimental", "launch", "opencode-serve"], expected: "EXPECTED_REJECTION" },
-    { id: "init", args: ["init", "--cwd", project], expected: "PASS" },
-    { id: "daemon:status", args: ["daemon", "status", "--cwd", project], expected: "PASS" },
-    { id: "doctor", args: ["doctor", "--cwd", project], expected: "PASS" },
-    { id: "status", args: ["status", "--cwd", project], expected: "PASS" },
-    { id: "events", args: ["experimental", "events", "--cwd", project], expected: "PASS" },
-    { id: "project:trust-status", args: ["project", "trust", "status", "--cwd", project], expected: "PASS" },
-    { id: "project:trust-grant", args: ["project", "trust", "grant", "--allow-bypass", "--cwd", project], expected: "PASS" },
-    { id: "fleet:profile-list", args: ["experimental", "fleet", "profile", "list", "--cwd", project], expected: "PASS" },
-    { id: "goal:list", args: ["experimental", "goal", "list", "--cwd", project], expected: "PASS" },
-    { id: "approval:list", args: ["experimental", "approval", "list", "--cwd", project], expected: "PASS" },
-    { id: "workflow:list", args: ["experimental", "workflow", "list", "--cwd", project], expected: "PASS" },
-    { id: "autonomy:status", args: ["experimental", "autonomy", "status", "--cwd", project], expected: "PASS" },
-    { id: "pair", args: ["experimental", "pair", "--cwd", project], expected: "PASS" },
-    { id: "ask", args: ["experimental", "ask", "--cwd", project], expected: "PASS" },
-    { id: "coop-proof", args: ["experimental", "coop-proof", "--cwd", project], expected: "PASS" },
-    { id: "mcp:install-claude", args: ["mcp", "install", "claude"], expected: "PASS" },
-    { id: "mcp:status-grok", args: ["mcp", "status", "grok"], expected: "PASS" },
-    { id: "budget:upsert", args: ["experimental", "budget", "upsert", "--id", "audit-budget", "--max-requests", "8", "--max-cost-usd", "5", "--cwd", project], expected: "PASS" },
-    { id: "budget:list", args: ["experimental", "budget", "list", "--cwd", project], expected: "PASS" },
-    { id: "budget:missing-id", args: ["experimental", "budget", "upsert", "--cwd", project], expected: "EXPECTED_REJECTION" },
-    { id: "candidate:missing-id", args: ["experimental", "candidate", "inspect", "--cwd", project], expected: "EXPECTED_REJECTION" },
-    { id: "session:missing-id", args: ["experimental", "session", "status", "--cwd", project], expected: "EXPECTED_REJECTION" },
-    { id: "collaboration:missing-goal", args: ["experimental", "collaboration", "turns", "--cwd", project], expected: "EXPECTED_REJECTION" },
-    { id: "exec:opencode", args: ["exec", "--backend", "opencode", "--model", "openai/test-model", "--unsafe-no-sandbox", "--cwd", project, "ready"], expected: "EXPECTED_REJECTION" },
+  const cases: Array<{ id: string; command: string; args: string[]; expected: AuditResult["status"]; expectedError?: string }> = [
+    { id: "help", command: "help", args: ["--help"], expected: "PASS" },
+    { id: "version", command: "version", args: ["--version"], expected: "PASS" },
+    { id: "unknown", command: "unknown", args: ["definitely-not-a-command"], expected: "EXPECTED_REJECTION" },
+    { id: "exec:conflicting-containment", command: "exec", args: ["exec", "--require-sandbox", "--unsafe-no-sandbox", "prompt"], expected: "EXPECTED_REJECTION", expectedError: "Choose either --require-sandbox or --unsafe-no-sandbox" },
+    { id: "launch:legacy", command: "launch", args: ["experimental", "launch", "opencode-serve"], expected: "EXPECTED_REJECTION" },
+    { id: "init", command: "init", args: ["init", "--cwd", project], expected: "PASS" },
+    { id: "daemon:status", command: "daemon", args: ["daemon", "status", "--cwd", project], expected: "PASS" },
+    { id: "lead:status", command: "lead", args: ["lead", "status", "--cwd", project], expected: "PASS" },
+    { id: "doctor", command: "doctor", args: ["doctor", "--cwd", project], expected: "PASS" },
+    { id: "status", command: "status", args: ["status", "--cwd", project], expected: "PASS" },
+    { id: "tui:help", command: "tui", args: ["tui", "--help"], expected: "PASS" },
+    { id: "events", command: "events", args: ["experimental", "events", "--cwd", project], expected: "PASS" },
+    { id: "project:trust-status", command: "project", args: ["project", "trust", "status", "--cwd", project], expected: "PASS" },
+    { id: "project:trust-grant", command: "project", args: ["project", "trust", "grant", "--allow-bypass", "--cwd", project], expected: "PASS" },
+    { id: "fleet:profile-upsert", command: "fleet", args: ["experimental", "fleet", "profile", "upsert", "--file", fleetFile, "--cwd", project], expected: "PASS" },
+    { id: "fleet:profile-roundtrip", command: "fleet", args: ["experimental", "fleet", "profile", "upsert", "--file", fleetRoundTripFile, "--cwd", project], expected: "PASS" },
+    { id: "fleet:profile-partial", command: "fleet", args: ["experimental", "fleet", "profile", "upsert", "--auth-mode", "native-login", "--approval-policy", "auto", "--cwd", project], expected: "PASS" },
+    { id: "fleet:invalid-structured", command: "fleet", args: ["experimental", "fleet", "profile", "upsert", "--file", invalidFleetFile, "--cwd", project, "--json"], expected: "EXPECTED_REJECTION", expectedError: "Invalid request:" },
+    { id: "fleet:profile-list", command: "fleet", args: ["experimental", "fleet", "profile", "list", "--cwd", project], expected: "PASS" },
+    { id: "goal:list", command: "goal", args: ["experimental", "goal", "list", "--cwd", project], expected: "PASS" },
+    { id: "collaboration:missing-goal", command: "collaboration", args: ["experimental", "collaboration", "turns", "--cwd", project], expected: "EXPECTED_REJECTION" },
+    { id: "approval:list", command: "approval", args: ["experimental", "approval", "list", "--cwd", project], expected: "PASS" },
+    { id: "candidate:missing-id", command: "candidate", args: ["experimental", "candidate", "inspect", "--cwd", project], expected: "EXPECTED_REJECTION" },
+    { id: "session:missing-id", command: "session", args: ["experimental", "session", "status", "--cwd", project], expected: "EXPECTED_REJECTION" },
+    { id: "workflow:list", command: "workflow", args: ["experimental", "workflow", "list", "--cwd", project], expected: "PASS" },
+    { id: "autonomy:status", command: "autonomy", args: ["experimental", "autonomy", "status", "--cwd", project], expected: "PASS" },
+    { id: "orchestrate:unsafe", command: "orchestrate", args: ["experimental", "orchestrate", "--unsafe-no-sandbox"], expected: "EXPECTED_REJECTION" },
+    { id: "council:unsafe", command: "council", args: ["experimental", "council", "--unsafe-no-sandbox"], expected: "EXPECTED_REJECTION" },
+    { id: "gate", command: "gate", args: ["experimental", "gate", "--cwd", project], expected: "PASS" },
+    { id: "mcp:install-claude", command: "mcp", args: ["mcp", "install", "claude"], expected: "PASS" },
+    { id: "mcp:status-grok", command: "mcp", args: ["mcp", "status", "grok"], expected: "PASS" },
+    { id: "skill:list", command: "skill", args: ["experimental", "skill", "list", "--cwd", project], expected: "PASS" },
+    { id: "loop:list", command: "loop", args: ["experimental", "loop", "list", "--cwd", project], expected: "PASS" },
+    { id: "ledger:confirmation", command: "ledger", args: ["experimental", "ledger", "repair-tail", "--cwd", project], expected: "EXPECTED_REJECTION", expectedError: "--confirm" },
+    { id: "budget:upsert", command: "budget", args: ["experimental", "budget", "upsert", "--id", "audit-budget", "--max-requests", "8", "--max-cost-usd", "5", "--cwd", project], expected: "PASS" },
+    { id: "budget:list", command: "budget", args: ["experimental", "budget", "list", "--cwd", project], expected: "PASS" },
+    { id: "budget:missing-id", command: "budget", args: ["experimental", "budget", "upsert", "--cwd", project], expected: "EXPECTED_REJECTION" },
+    { id: "daemon:stop", command: "daemon", args: ["daemon", "stop", "--cwd", project], expected: "PASS" },
   ];
   const results: AuditResult[] = [];
   for (const row of cases) {
     const result = await runCli(row.args, env);
     const errorMatches = !row.expectedError || result.stderr.includes(row.expectedError) || result.stdout.includes(row.expectedError);
     const status: AuditResult["status"] = result.exitCode === (row.expected === "PASS" ? 0 : 1) && errorMatches ? row.expected : "FAIL";
-    results.push({ id: row.id, status, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr });
+    results.push({ id: row.id, command: row.command, status, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr });
   }
   return results;
 }
@@ -121,6 +174,11 @@ function writeExecutable(path: string, body: string) {
   chmodSync(path, 0o700);
 }
 
+function requireGitSuccess(result: ReturnType<typeof runGitStrict>, action: string) {
+  if (result.ok) return;
+  throw new Error(`Unable to ${action}: ${result.stderr || result.stdout}`);
+}
+
 describe("isolated CLI audit runner", () => {
   test("runs deterministic lifecycle and parser rows without external state", async () => {
     const results = await runIsolatedCliAudit();
@@ -128,6 +186,12 @@ describe("isolated CLI audit runner", () => {
     expect(results.find((result) => result.id === "help")?.stdout).toContain("Commands:");
     expect(results.find((result) => result.id === "unknown")?.stderr).toContain("Unknown command");
     expect(results.find((result) => result.id === "init")?.stdout).toContain("external state");
+    const covered = new Set(results.map((result) => result.command));
+    const publicCommands = COMMAND_SPECS.filter((spec) => !("internal" in spec)).map((spec) => spec.name);
+    expect(publicCommands.filter((command) => !covered.has(command))).toEqual([]);
+    const validation = results.find((result) => result.id === "fleet:invalid-structured")!;
+    expect(validation.stdout).not.toContain('"message": "[');
+    expect(JSON.parse(validation.stdout)).toMatchObject({ ok: false, error: { code: "INVALID_REQUEST" } });
   }, 45_000);
 
   test("does not modify the disposable checkout during init", async () => {

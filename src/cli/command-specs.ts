@@ -25,7 +25,7 @@ export const COMMAND_SPECS = [
   {
     name: "daemon",
     valueFlags: ["--cwd", "--extension-config", "--extension-module"],
-    help: "daemon <serve|status> [--cwd dir] [--extension-config /absolute/trusted.json]",
+    help: "daemon <serve|status|stop> [--cwd dir] [--extension-config /absolute/trusted.json]",
   },
   {
     name: "project",
@@ -35,7 +35,7 @@ export const COMMAND_SPECS = [
   {
     name: "fleet",
     valueFlags: ["--profile-id", "--file", "--auth-mode", "--approval-policy", "--cwd", "--extension-config", "--extension-module"],
-    help: "fleet <health|profile upsert|get|list|remove> [--profile-id id] [--file profile.json] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass]",
+    help: "fleet <health|profile get|list|remove> [--profile-id id] | fleet profile upsert [--file profile.json | [--profile-id id] --auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate]",
   },
   {
     name: "goal",

@@ -1,59 +1,107 @@
 ---
-title: Initialize a foreground lead
+title: Subscription quickstart
 sidebar_position: 1
-description: Build Headless, initialize external project state, install MCP, and bind one lead without granting trust or native egress.
+description: Build Headless, bind a foreground lead, grant explicit native-login trust, and run a contained servant without an API key.
 ---
 
-# Initialize a foreground lead
+# Subscription quickstart
 
-Headless is currently installed from source. These commands build the compiled
-binaries, initialize state outside the checkout, install Codex's MCP entry, and
-bind Codex as the project's foreground lead:
+Native login is the primary real-run path: Headless uses the official CLI's
+existing subscription login, not a separate provider API key. It still creates
+an isolated worker home and a backend-specific auth capsule.
+
+## 1. Build from source
+
+The packages are not published. Build the compiled CLI from this checkout:
 
 ```bash
 git clone https://github.com/proofofwork-agency/headless.git
 cd headless
 bun install --frozen-lockfile --ignore-scripts
 bun run build
-./dist/cli.js init --lead codex --cwd .
-./dist/cli.js doctor --cwd .
+
+HEADLESS="$PWD/dist/cli.js"
+PROJECT="/absolute/path/to/your/project"
 ```
 
-Use `claude`, `opencode`, or `grok` instead of `codex` to install and bind a
-different host. Headless updates host-global MCP configuration where required;
-it never writes host configuration into the project checkout.
+## 2. Bind the foreground lead
 
-`init --lead` performs three operations: create external project state, install
-the selected host's MCP registration, and rotate the generation-bound lead
-binding. It does **not** grant project trust, native egress, write authority, or
-approval bypass.
+Choose the CLI that remains visible and acts as lead:
 
-## Run a brokered worker
+```bash
+"$HEADLESS" init --lead codex --cwd "$PROJECT"
+"$HEADLESS" doctor --cwd "$PROJECT"
+```
 
-Broker mode is the default. Supply the matching provider key to the daemon
-environment and use a provider-qualified model:
+Replace `codex` with `claude`, `opencode`, or `grok`. `init --lead` creates
+external per-project state, installs that host's MCP entry, and rotates the
+generation-bound lead binding. It never grants trust, native egress, write
+authority, or approval bypass.
+
+## 3. Explicitly allow native subscription login
+
+Native provider traffic is not broker-destination restricted. Grant trust only
+to a project you understand, and acknowledge unrestricted outbound provider
+egress explicitly:
+
+```bash
+"$HEADLESS" project trust grant \
+  --allow-native-direct-unrestricted \
+  --cwd "$PROJECT"
+```
+
+The grant lives outside the checkout and can be revoked:
+
+```bash
+"$HEADLESS" project trust revoke --cwd "$PROJECT"
+```
+
+## 4. Run a contained servant
+
+The servant may be a different backend from the foreground lead:
+
+```bash
+"$HEADLESS" exec \
+  --backend opencode \
+  --auth-mode native-login \
+  --mode read-only \
+  --timeout-ms 120000 \
+  --json \
+  --cwd "$PROJECT" \
+  -- "Inspect this project and identify its public entry points."
+```
+
+A successful result reports required containment, `backend-native` credential
+evidence, and `native-direct-unrestricted` network evidence. That network label
+is a truthful warning, not a destination allowlist.
+
+## Backend login preparation
+
+| Backend | Prepare the host login | Additional Headless requirement |
+| --- | --- | --- |
+| Codex | Log in with the official Codex CLI | Canonical owner-only `~/.codex/auth.json` |
+| OpenCode | Log in with OpenCode | Canonical owner-only OpenCode auth plus a safe global default model or an explicit model |
+| Claude Code | Log in, then run `claude setup-token` | Store the token at `~/.claude/.headless-setup-token` with mode `0600` |
+| Grok Build | Run `grok login --device-code` | Experimental runs must pass Headless's contained trust-canary attestation |
+
+Read [backend authentication](./backend-auth.md) before using Claude or Grok.
+
+## Broker mode alternative
+
+Broker mode remains the default and accepts provider API keys only in the
+daemon environment. The worker receives an opaque, finite lease rather than
+the key:
 
 ```bash
 : "${OPENAI_API_KEY:?export OPENAI_API_KEY before broker execution}"
-./dist/cli.js exec \
+"$HEADLESS" exec \
   --backend opencode \
   --model openai/gpt-5 \
-  --timeout-ms 60000 \
+  --mode read-only \
   --json \
-  --cwd . \
-  -- "Summarize the public execution boundary."
+  --cwd "$PROJECT" \
+  -- "Summarize the public API."
 ```
 
-## Observe without mutating
-
-```bash
-./dist/cli.js tui --cwd .
-```
-
-The TUI uses an observer credential limited to snapshots and events. Its Config
-view shows trust, lead state, budgets, backend readiness, and daemon state, then
-generates exact commands labeled “run from your shell.” It cannot run them.
-
-Native login is a separate opt-in requiring project trust and unrestricted
-provider-egress acknowledgement. Read the [security model](../security/containment-ledger-broker.md)
-before enabling it.
+Broker mode has tighter network and request authority. Native login avoids a
+separate API key but deliberately trades away broker-only destination control.

@@ -4,7 +4,7 @@ import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
-let packageVersion = '0.2.0-alpha.0';
+let packageVersion = '0.2.0-beta.1';
 try {
   packageVersion = JSON.parse(
     readFileSync(resolve(process.cwd(), '../package.json'), 'utf8'),
@@ -15,7 +15,7 @@ try {
 
 const config = {
   title: 'Headless',
-  tagline: 'Contained AI coding workers behind one auditable local control plane',
+  tagline: 'One visible lead. Every CLI coder becomes a contained, auditable fleet.',
   url: 'https://proofofwork-agency.github.io',
   baseUrl: '/headless/',
   organizationName: 'proofofwork-agency',
@@ -57,6 +57,16 @@ const config = {
           position: 'left',
         },
         {
+          to: '/orchestration/lead-servants',
+          label: 'Orchestration',
+          position: 'left',
+        },
+        {
+          to: '/case-studies/proven-runs',
+          label: 'Proof',
+          position: 'left',
+        },
+        {
           href: 'https://github.com/proofofwork-agency/headless/releases',
           label: `v${packageVersion}`,
           position: 'right',
@@ -82,10 +92,18 @@ const config = {
               label: 'Security model',
               to: '/security/containment-ledger-broker',
             },
+            {
+              label: 'CLI reference',
+              to: '/reference/cli',
+            },
+            {
+              label: 'MIT License',
+              href: 'https://github.com/proofofwork-agency/headless/blob/main/LICENSE',
+            },
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Headless.`,
+      copyright: '© 2026 proofofwork.agency · Released under the MIT License.',
     },
     prism: {
       theme: prismThemes.github,

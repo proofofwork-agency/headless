@@ -12,6 +12,7 @@ import { safeAgentName } from "../runtime/validation";
 import { cleanupWithDiagnostic, recordRuntimeDiagnostic } from "../runtime/diagnostics";
 import { ensureOwnerOnlyFile, ensureProjectStateDirectories, getProjectStatePaths, type ProjectStateOptions } from "../runtime/project-state";
 import { safeJsonParse } from "../runtime/safe-json";
+import { validationErrorDetails, validationErrorMessage } from "../runtime/validation-error";
 import {
   DAEMON_PROTOCOL_VERSION,
   DaemonRequestSchema,
@@ -308,7 +309,12 @@ export class HeadlessDaemon {
     try {
       request = DaemonRequestSchema.parse(safeJsonParse(line));
     } catch (error) {
-      socket.end(`${JSON.stringify(failure(crypto.randomUUID(), error, { code: "INVALID_REQUEST", safeMessage: messageOf(error) }))}\n`);
+      const validation = error instanceof ZodError;
+      socket.end(`${JSON.stringify(failure(crypto.randomUUID(), error, {
+        code: "INVALID_REQUEST",
+        safeMessage: validation ? validationErrorMessage(error) : messageOf(error),
+        details: validation ? validationErrorDetails(error) : undefined,
+      }))}\n`);
       return;
     }
     if (!this.ready) {
@@ -350,7 +356,11 @@ export class HeadlessDaemon {
       socket.end(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: request.id, ok: true, result } satisfies DaemonResponse)}\n`);
     } catch (error) {
       const fallback = error instanceof ZodError || error instanceof TypeError
-        ? { code: "INVALID_REQUEST" as const, safeMessage: messageOf(error) }
+        ? {
+            code: "INVALID_REQUEST" as const,
+            safeMessage: error instanceof ZodError ? validationErrorMessage(error) : messageOf(error),
+            details: error instanceof ZodError ? validationErrorDetails(error) : undefined,
+          }
         : { code: "INTERNAL_ERROR" as const, safeMessage: "The daemon could not complete the request." };
       socket.end(`${JSON.stringify(failure(request.id, error, fallback))}\n`);
     }
@@ -367,7 +377,15 @@ export class HeadlessDaemon {
       const gaps = adapter ? requiredContainmentSecurityGaps(adapter, "read-only") : ["registered backend"];
       const writeGaps = adapter ? requiredContainmentSecurityGaps(adapter, "write") : ["registered backend"];
       const login = adapter && adapter.id in backendMetadata ? backendMetadata[adapter.id as keyof typeof backendMetadata].login : undefined;
-      const presentation = fleetPresentation(agent, availability, gaps, writeGaps, alternatives.filter((id) => id !== agent.id), login);
+      const presentation = fleetPresentation(
+        agent,
+        availability,
+        gaps,
+        writeGaps,
+        alternatives.filter((id) => id !== agent.id),
+        this.state.canonicalProjectRoot,
+        login,
+      );
       return { agent, ...availability, executable: adapter?.probe.versionCommand[0] ?? null, detail: presentation.reason, presentation };
     });
     return {
@@ -395,10 +413,15 @@ export class HeadlessDaemon {
       executable = false;
     }
     let authenticated = false;
+    let trustRequired = false;
     if (executable) {
       if (security.authMode === "native-login") {
         const trust = this.trust.status();
-        if (trust.trusted && trust.nativeLoginAllowed && trust.nativeDirectUnrestrictedAcknowledged && (security.approvalPolicy !== "bypass" || trust.bypassAllowed)) {
+        trustRequired = !trust.trusted
+          || !trust.nativeLoginAllowed
+          || !trust.nativeDirectUnrestrictedAcknowledged
+          || (security.approvalPolicy === "bypass" && !trust.bypassAllowed);
+        if (!trustRequired) {
           const worker = createWorkerEnvironment();
           try {
             authenticated = installNativeAuthCapsule(worker, resolveBackendId(agent.backend)).available;
@@ -430,7 +453,7 @@ export class HeadlessDaemon {
     const health: GoalAgentAvailability["health"] = !executable
       ? "offline"
       : !authenticated || !containmentReady ? "unhealthy" : rateLimitedUntil !== null && rateLimitedUntil > Date.now() ? "degraded" : "healthy";
-    return { authenticated, health, rateLimitedUntil, activeTurns, recentFailures };
+    return { authenticated, trustRequired, health, rateLimitedUntil, activeTurns, recentFailures };
   }
 
   private wait(jobId: string, timeoutMs = 180_000): Promise<Job> {
@@ -1298,12 +1321,22 @@ function fleetPresentation(
   containmentGaps: string[],
   writeContainmentGaps: string[],
   alternatives: string[],
+  projectRoot: string,
   login?: { argv?: [string, ...string[]]; instructions: string; brokerMode: boolean },
 ) {
   const common = { alternatives, brokerAvailable: login?.brokerMode ?? false, credentialForm: "supported provider CLI regular-file login state", loginCommand: login?.argv ?? null, loginInstructions: login?.instructions ?? null };
   if (!agent.enabled) return { code: "disabled", reason: "Agent is disabled in the active fleet profile.", recovery: "Enable the agent or activate another fleet profile.", ...common };
   if (containmentGaps.length) return { code: "blocked_by_containment", reason: `Required project-safety controls are unsupported: ${containmentGaps.join(", ")}.`, recovery: "Exclude this provider from required runs or select a compatible alternative; containment cannot be unblocked from the TUI.", ...common };
   if (availability.rateLimitedUntil && availability.rateLimitedUntil > Date.now()) return { code: "rate_limited", reason: `Provider retry is unavailable until ${new Date(availability.rateLimitedUntil).toISOString()}.`, recovery: "Wait until the retry time or reassign work to an available alternative.", retryAt: availability.rateLimitedUntil, ...common };
+  if (availability.trustRequired) {
+    const bypass = agent.approvalPolicy === "bypass" ? " --allow-bypass" : "";
+    return {
+      code: "trust_required",
+      reason: "Project trust with native acknowledgement is not granted.",
+      recovery: `headless project trust grant --allow-native-direct-unrestricted${bypass} --cwd ${JSON.stringify(projectRoot)}`,
+      ...common,
+    };
+  }
   if (!availability.authenticated) return { code: "login_required", reason: "Supported provider login state was not found.", recovery: login?.instructions ?? "Run the provider's declared login flow, then refresh Fleet health.", ...common };
   if (availability.health === "offline") return { code: "provider_unavailable", reason: "Provider executable is unavailable on PATH.", recovery: "Install or restore the declared provider CLI, inspect Events, then refresh health.", ...common };
   if (availability.health !== "healthy") return { code: "provider_unavailable", reason: "Provider health checks did not report ready.", recovery: "Retry health, inspect Events, or reassign to an available alternative.", ...common };

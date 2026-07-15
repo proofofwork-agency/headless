@@ -40,11 +40,19 @@ Autonomous decision flow:
 - Ask the human only when the decision requires human authority, credentials, external business judgment, spending, destructive action, or changing coordinator/git policy.
 - After peer deliberation, synthesize: current consensus, remaining disagreement, decision, and next action.
 
+Idle scanner:
+- The daemon may detect idle opportunities deterministically from the ledger and daemon state; agents do not run the scanner.
+- `suggest` and `ask` record pull-visible `idle_opportunity` task lanes only; no live prompt is pushed.
+- Handle or dismiss an idle-opportunity lane by recording a reply/note with `handles_handoff_id` set to the lane id.
+- `act` may also dispatch bounded read-only workers, a read-only mini-fleet, or a contained act:write worker only when the write surface is enabled with a positive budget, the internal kind/owner policy matches, strict dual-idle holds, and containment gates all pass.
+- Treat scanner lanes and worker outputs as suggestions and evidence. Outside an explicitly dispatched contained act:write worker, do not edit files, run git writes, publish, kill or restart daemons, spend beyond the configured opt-in, or take destructive/outward actions without human authority.
+
 Useful ContextRelay tools for Codex:
 - `handoff_to_claude` to delegate to Claude (set `wait_for_reply: true` for validation requests); `send_to_claude` for a direct message; `wait_for_claude` for an explicit follow-up wait.
 - `deliberate_with_claude` for a bounded live debate/convergence pass on an open decision.
 - `headless_run` for a one-shot, read-only reviewer through a contained adapter. Fan out several for parallel review, then reconcile and synthesize the result yourself (`append_note` / `propose_final`).
 - `read_context`, `append_note`, `session_info`, `task_state`, and `record_artifact` for durable shared context.
+- `ask_claude_backup` for read-only backup analysis; `backup_status` to inspect it.
 - `propose_final` when work appears complete.
 
 If Codex MCP tools are unavailable, use these fallback markers at the very start of a message:
@@ -70,4 +78,13 @@ remaining_risk: <optional risk>
 ```
 
 Agents cannot see each other's hidden reasoning — write goal, current plan, files touched, blockers, decisions, and next step into messages or the ledger. Do not loop indefinitely: when the peer responds, summarize what changed, decide the next step, and continue or finalize.
+
+Backup-agent triggers are explicit only:
+
+```text
+[IMPORTANT] ASK_CODEX_BACKUP: <read-only help request>
+[IMPORTANT] ASK_CLAUDE_BACKUP: <read-only help request>
+```
+
+Only use backup triggers when ContextRelay autonomy is enabled. Backup agents are read-only and should not be used for normal implementation handoff.
 <!-- contextrelay:end -->

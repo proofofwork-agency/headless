@@ -8,9 +8,9 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | --- | --- | --- | --- |
 | `lead` | Beta 1 | — | `lead <use <host>|status|release> [--cwd dir]   Configure the externally launched foreground lead.` |
 | `exec` | Beta 1 | run | `exec | run [--backend id] [--mode read-only|write] [--model m] [--agent a] [--session-id id] [--timeout-ms n] [--cwd dir] [--extension-config /absolute/trusted.json] [--json] [--stream] [--require-sandbox|--unsafe-no-sandbox] "prompt"` |
-| `daemon` | Beta 1 | — | `daemon <serve|status> [--cwd dir] [--extension-config /absolute/trusted.json]` |
+| `daemon` | Beta 1 | — | `daemon <serve|status|stop> [--cwd dir] [--extension-config /absolute/trusted.json]` |
 | `project` | Beta 1 | — | `project trust <status|grant|revoke> [--allow-native-direct-unrestricted] [--allow-bypass] [--cwd dir]` |
-| `fleet` | Experimental | — | `experimental fleet <health|profile upsert|get|list|remove> [--profile-id id] [--file profile.json] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass]` |
+| `fleet` | Experimental | — | `experimental fleet <health|profile get|list|remove> [--profile-id id] | fleet profile upsert [--file profile.json | [--profile-id id] --auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate]` |
 | `goal` | Experimental | — | `experimental goal <start|run|send|follow|status|list|cancel|result> [--goal-id id] [--mode read-only|write] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--detach] [--timeout-ms n]` |
 | `collaboration` | Experimental | — | `experimental collaboration <turns|messages|acknowledge|transfer-synthesizer> --goal-id id [--message-id id ...] [--retain]` |
 | `approval` | Experimental | — | `experimental approval <list|resolve> [--goal-id id] [--approval-id id --decision approved|rejected --resolution text]` |

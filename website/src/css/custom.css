@@ -1,13 +1,15 @@
 :root {
-  --ifm-color-primary: #0f766e;
-  --ifm-color-primary-dark: #0d6a63;
-  --ifm-color-primary-darker: #0c645e;
-  --ifm-color-primary-darkest: #0a524d;
-  --ifm-color-primary-light: #11827a;
-  --ifm-color-primary-lighter: #128880;
-  --ifm-color-primary-lightest: #149a91;
+  --ifm-color-primary: #125f5a;
+  --ifm-color-primary-dark: #105651;
+  --ifm-color-primary-darker: #0f514d;
+  --ifm-color-primary-darkest: #0c433f;
+  --ifm-color-primary-light: #146863;
+  --ifm-color-primary-lighter: #156d68;
+  --ifm-color-primary-lightest: #187c76;
   --ifm-code-font-size: 95%;
-  --docusaurus-highlighted-code-line-bg: rgba(15, 118, 110, 0.12);
+  --ifm-font-family-base: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ifm-heading-font-family: "Space Grotesk", Inter, ui-sans-serif, system-ui, sans-serif;
+  --docusaurus-highlighted-code-line-bg: rgba(18, 95, 90, 0.12);
 }
 
 [data-theme='dark'] {
@@ -19,4 +21,60 @@
   --ifm-color-primary-lighter: #88f1df;
   --ifm-color-primary-lightest: #b2f7ec;
   --docusaurus-highlighted-code-line-bg: rgba(94, 234, 212, 0.14);
+}
+
+.hero-panel {
+  margin: 1.5rem 0 2rem;
+  padding: clamp(1.5rem, 4vw, 3rem);
+  overflow: hidden;
+  color: #ecfeff;
+  background:
+    radial-gradient(circle at 90% 10%, rgba(94, 234, 212, 0.3), transparent 32%),
+    linear-gradient(135deg, #102a2e 0%, #123c3d 48%, #0f5d58 100%);
+  border: 1px solid rgba(94, 234, 212, 0.35);
+  border-radius: 1.25rem;
+  box-shadow: 0 24px 70px rgba(6, 35, 38, 0.2);
+}
+
+.hero-panel h2 {
+  max-width: 15ch;
+  margin-bottom: 0.75rem;
+  color: #fff;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  line-height: 1.02;
+}
+
+.hero-panel p {
+  max-width: 62ch;
+  margin-bottom: 0;
+  color: #ccfbf1;
+  font-size: 1.1rem;
+}
+
+.proof-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0 2rem;
+}
+
+.proof-card {
+  padding: 1.1rem;
+  background: var(--ifm-card-background-color);
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 0.85rem;
+}
+
+.proof-card strong {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: var(--ifm-color-primary);
+  font-size: 1.05rem;
+}
+
+.status-strip {
+  padding: 0.85rem 1rem;
+  background: rgba(245, 158, 11, 0.1);
+  border-left: 4px solid #f59e0b;
+  border-radius: 0.25rem;
 }

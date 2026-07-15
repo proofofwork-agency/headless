@@ -29,7 +29,9 @@ import {
   GoalStartParamsSchema,
 } from "../daemon/protocol";
 
-export const MCP_VERSION = "0.2.0-alpha.0";
+import { HEADLESS_VERSION } from "../version";
+
+export const MCP_VERSION = HEADLESS_VERSION;
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 

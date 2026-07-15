@@ -1,61 +1,85 @@
 ---
-title: Containment, broker, and ledger
+title: Security model
 sidebar_position: 1
-description: The OS boundary, default broker authority, native-login exception, durable ledger, and observer-only TUI.
+description: Required OS containment, bounded authentication, broker leases, approvals, gated worktrees, durable evidence, and observer-only access.
 ---
 
-# Containment, broker, and ledger
+# Security model
 
-Headless assumes every backend can be prompt-injected or malicious. Tool-deny
-flags are defense in depth; the security boundary is the authenticated daemon,
-its policy and budgets, operating-system containment, scoped credentials, and
-durable verification.
+Headless assumes every backend can be prompt-injected, buggy, or malicious.
+Backend flags are defense in depth. The actual boundary is the authenticated
+daemon, strict runtime contracts, OS containment, finite authority, durable
+state, and fail-closed recovery.
 
 ## Required containment
 
-Every required worker gets isolated HOME, XDG, runtime, cache, and temporary
-roots. The project is read-only unless a daemon-leased write worktree is
-explicitly admitted. The real home, sibling-provider credentials, ambient API
-keys, Git/SSH state, shell startup files, host agent sockets, project `.env`
-files, and project-controlled backend plugins are withheld.
+Every worker receives isolated HOME, XDG, runtime, cache, and temporary roots.
+The project is read-only unless the daemon admits a leased write worktree.
+Ambient API keys, sibling-provider logins, Git and SSH credentials, shell
+startup files, keychain exports, host agent sockets, repository `.env` files,
+and project-controlled backend plugins are withheld.
 
-macOS uses a probed default-deny Seatbelt profile. Linux uses bubblewrap,
-namespaces, a loopback relay where needed, and an architecture-checked seccomp
-filter. Missing boundary capabilities fail with `CONTAINMENT_UNAVAILABLE`; an
-optional cooperation-helper failure never silently weakens the sandbox.
+- **macOS:** a probed, default-deny Seatbelt profile limits file, process,
+  socket, signal, and network operations.
+- **Linux:** bubblewrap namespaces and an architecture-checked seccomp filter
+  provide the boundary; broker and run-tool relays are explicit capabilities.
+- **Windows:** execution fails before launch with `UNSUPPORTED_PLATFORM`.
 
-## Broker by default
+Missing required boundary capabilities return `CONTAINMENT_UNAVAILABLE`.
+Headless does not silently fall back to an unsafe worker.
 
-Broker workers receive an opaque run-scoped lease rather than a provider key.
-The daemon validates provider, model, endpoint, request body, duration, request
-count, input/output tokens, and priced cost before forwarding. Aggregate limits
-are shared across every lease for the reservation, and crash-unknown usage is
-exhausted rather than reused.
+## Two authentication modes
 
-Native login is an explicit exception. It requires project trust plus
-`--allow-native-direct-unrestricted`, copies only a backend allowlist of bounded
-regular files, and reports `native-direct-unrestricted` with unknown cost unless
-the CLI supplies a real charge. Keychain-only Claude login on macOS remains
-unsupported under required Seatbelt containment; Headless will not expose the
-real home or forward an ambient token to make it work.
+| Property | Broker, default | Native login, explicit |
+| --- | --- | --- |
+| Worker credential | Opaque run-scoped lease | Selected backend's bounded auth capsule |
+| Network | Broker-only path | Unrestricted outbound provider IP access |
+| Request and cost enforcement | Broker request/token/cost caps | Project budgets plus backend-reported evidence |
+| Project consent | Normal authority policy | Trust plus explicit unrestricted-egress acknowledgement |
 
-Native one-shots and sessions run the same backend environment-preparation hook
-after isolation. Codex receives read-only system CA bundle paths so TLS works
-without widening Seatbelt; the hook is tested not to restore credentials or
-host control paths.
+Auth capsules accept only canonical, single-link regular files from fixed
+locations. Claude's setup-token is a special environment capsule: a validated,
+owner-only `~/.claude/.headless-setup-token` is fingerprinted and injected only
+into the contained Claude native-login process. The raw token never enters
+daemon state, logs, results, or the ledger.
 
-## Durable state and observer authority
+Grok remains experimental. Headless creates a worker-owned inert trust canary
+and requires a network-denied `grok inspect --json` to prove that project
+instructions, hooks, skills, plugins, MCP, LSP, permissions, and compatibility
+surfaces remain disabled before provider access.
 
-Project state lives outside the checkout and is keyed by the canonical-root
-hash. Jobs reach a durable terminal result before completion events are
-projected. Protected records retain hash-chain verification, and known schema
-evolution is decoded only at durable read boundaries; new writes and RPC remain
-strict.
+## Approval and write boundaries
 
-The TUI has a dedicated observer credential limited to `ping` and
-`observer.*`. Its Config pane reads the same snapshots as its log views and
-only generates root-CLI commands. It cannot dispatch work, resolve approvals,
-change trust or budgets, integrate candidates, or control provider processes.
+Read-only is the default. A contained write turn requires a one-turn coder-tool
+approval. Work then occurs in a daemon-leased worktree—not primary—and the
+candidate must pass bounded diff inspection, secret scanning, configured
+project gates, budget and policy finality, and a separate authorized integration
+decision. A timeout, conflict, unknown state, or failed gate leaves primary
+unchanged.
 
-For the complete threat model and limitations, read the repository's
-[SECURITY.md](https://github.com/proofofwork-agency/headless/blob/main/SECURITY.md).
+The live Breakout capstone demonstrated this boundary: timed-out candidates
+were refused, a passing candidate waited for explicit approval, and only then
+did a journaled fast-forward advance primary.
+
+## Durable evidence and fail-closed recovery
+
+Terminal results are durable before completion events. Protected records carry
+hash-chain evidence. Schema evolution is accepted only at explicit durable read
+boundaries; unknown values fail closed. Crash-unknown broker or delegation
+authority is exhausted rather than reused.
+
+Cross-provider depth-one delegation uses an atomic linked hold across parent
+and target provider quotas. Recovery replays exact token-free observations and
+settlement digests. A contradictory hold blocks readiness until an admin
+inspects and quarantines one exact link with its expected digest; there is no
+automatic bulk discard.
+
+## Observer-only TUI
+
+The TUI credential is limited to `ping` and `observer.*`. The log and Config
+views can read snapshots/events and generate copy-paste root commands. They
+cannot submit work, resolve approvals, integrate candidates, change trust or
+budgets, or control provider processes.
+
+Read the complete [SECURITY.md](https://github.com/proofofwork-agency/headless/blob/main/SECURITY.md)
+before using native credentials or write mode.
