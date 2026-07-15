@@ -100,6 +100,14 @@ headless doctor --cwd "$PROJECT"
 
 The Linux relay round-trip probe is diagnostic and gates only its dedicated cooperation test. It does not deny unrelated contained runs; a real helper transport failure is reported by that helper call.
 
+### Depth-one worker delegation
+
+An eligible contained worker receives `run.delegate` in its run-scoped helper operation list. This is a worker-to-daemon operation, not a root CLI subcommand. It asks the daemon to create one independent sibling job and returns either the child's bounded `RunResult` or a structured denial/failure; the parent keeps running.
+
+V1 requires both jobs to be read-only and required-contained. The child must use broker authentication (or a credential-free backend), name a different backend on the same provider, avoid the active foreground-lead backend, and fit an immediately available worker and budget-concurrency slot. Cross-provider delegation is denied until linked target-provider holds exist. A delegated child never receives `run.delegate`.
+
+The request may choose a positive `budgetFraction` up to `0.5`; omission uses `0.25`. Headless atomically carves the child slice from the parent's remaining request, token, cost, artifact, retry, and time reservation instead of granting new project spend authority. The child deadline cannot exceed the parent's remaining deadline. Approval composes monotonically: `ask` stays `ask`, `auto` stays `auto`, and `bypass` becomes `auto`. An approval requirement creates no waiting child.
+
 ## Durable work and communication
 
 Advanced commands live under `headless experimental`:

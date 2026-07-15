@@ -1,6 +1,6 @@
 # Depth-one worker delegation design
 
-Status: Phase 7 decision draft. This is not an implementation claim.
+Status: Implemented experimental Phase 7 contract. The implementation and contained end-to-end tests pass on macOS and Linux; this does not promote orchestration into the Gate A stable surface.
 
 ## Objective
 
@@ -20,7 +20,7 @@ This surface is distinct from goal/fleet `DelegationSchema`. Call its durable re
 
 ## Run-tool contract
 
-Add `run.delegate` to the depth-0 run-tool operation set with strict parameters:
+`run.delegate` is part of the depth-0 run-tool operation set with strict parameters:
 
 ```ts
 {
@@ -35,19 +35,20 @@ Add `run.delegate` to the depth-0 run-tool operation set with strict parameters:
 
 The protocol request UUID is the idempotency key and must be passed to the handler by the endpoint, not copied from `params`. The immutable endpoint scope supplies project, parent job, session, and principal. The handler re-reads the durable parent job/request and requires it still be running.
 
-The endpoint needs an operation allowlist per issued credential. Omitting `run.delegate` from a child credential is defense in depth; daemon admission must independently check the durable depth/link because a hidden operation can still be forged.
+The endpoint has an operation allowlist per issued credential. Omitting `run.delegate` from a child credential is defense in depth; daemon admission independently checks the durable depth/link because a hidden operation can still be forged.
 
 `run.delegate` may wait longer than the endpoint's current five-second socket idle timeout. Its transport deadline is the child's bounded deadline plus a small reply margin, always below the parent endpoint expiry. Request and response byte caps remain unchanged; the returned child result uses the existing bounded `RunResult` projection.
 
 ## Durable relationship and authority
 
-Add a strict nullable child-job field (legacy reads default to null):
+The strict nullable child-job field is (legacy reads default to null):
 
 ```ts
 delegationOf: null | {
   parentJobId: string;
   requestId: string;
   depth: 1;
+  budgetFraction: number;
 }
 ```
 
@@ -69,16 +70,16 @@ Run the normal child policy and pricing preflight before creating a runnable chi
 
 ## Budget inheritance and deadline
 
-The child gets no ordinary independent `BudgetStore.reserve()` call. Add an atomic sub-reservation primitive:
+The child gets no ordinary independent `BudgetStore.reserve()` call. The atomic sub-reservation primitive:
 
 1. Read the parent reservation and its broker lease consumption under one daemon-owned lock.
 2. Compute the parent's remaining requests, input/output tokens, priced cost, artifact bytes, retries, and time. Unknown usage under a configured bound fails closed.
 3. Cap every child dimension by the requested fraction and the hard 50% ceiling. The child's priced estimate and finite broker request/token lease must fit all caps.
 4. Transfer that allocation from parent to child atomically, recording `parentReservationId`; the parent can no longer spend the carved slice.
-5. Apply target-provider budget scopes as additional linked holds, never as a second project-wide spend allocation. Deduplicate shared budget IDs at commit.
+5. Require the child to resolve to the same provider as the parent. Cross-provider linked holds remain out of scope in v1; no second project-wide spend allocation is created.
 6. On child completion, charge actual usage once and return provably unused allocation to the parent. On crash-unknown, exhaust the child slice; never silently return it.
 
-This requires a versioned reservation-envelope extension: today's reservation is an immutable admission estimate and does not expose a transferable remaining request/token/cost envelope. Retrofitting delegation as two ordinary reservations would permit overcommit or double charging.
+The versioned reservation envelope exposes a transferable remaining request/token/cost allocation for this purpose. Retrofitting delegation as two ordinary reservations would permit overcommit or double charging and remains forbidden.
 
 Set `childDeadlineAt = min(now + requestedTimeoutMs, parentDeadlineAt - replyMargin)`. Queue time is part of this ceiling. Reject when too little time remains. Parent cancellation/terminal recovery cascades cancellation to a live child; a child terminal state never cancels or fails the parent.
 
@@ -103,7 +104,7 @@ The child `Job.delegationOf` is the durable source of parent-child attribution. 
 
 Emit the existing ledger `worker_spawned`/`headless_result` lifecycle with daemon-derived parent/child metadata, or add a typed run-delegation event if those projections cannot express the relationship without unvalidated `meta`. Hash-chain/archive behavior is unchanged.
 
-The observer snapshot already contains jobs and bounded run events, so no mutating route or new observer scope is needed. Extend the job/event schemas only. The TUI should indent a delegated child below its parent and show backend, state, elapsed/deadline, allocated fraction, actual cost/usage, and terminal error. It must not expose prompt content or add cancel/retry controls.
+The observer snapshot contains jobs, delegation projections, and bounded run events, so no mutating route or new observer scope is needed. The TUI indents a delegated child below its parent and shows backend, state, elapsed/deadline, allocated fraction, actual cost/usage, and terminal error. It does not expose prompt content or add cancel/retry controls.
 
 ## Threat review
 
@@ -123,15 +124,15 @@ The observer snapshot already contains jobs and bounded run events, so no mutati
 ## Acceptance gate
 
 - Contract tests reject extra fields, unknown operations, depth 2, unsafe/write/native delegation, same/lead backend, and forged parent/depth/request IDs.
-- Budget tests prove atomic 50% caps across every dimension, no double charge, unused return, crash-unknown exhaustion, provider-scoped holds, and concurrent calls admitting at most one child.
+- Budget tests prove atomic 50% caps across every dimension, no double charge, unused return, crash-unknown exhaustion, same-provider enforcement, and concurrent calls admitting at most one child.
 - Scheduler tests prove no max-concurrency deadlock and retryable immediate capacity denial.
 - End-to-end tests prove success, child failure/timeout/cancel, parent continuation, cancellation cascade, restart recovery, idempotent replay, redacted bounded audit, and child run-tool omission of `run.delegate`.
 - Observer/TUI tests prove parent-child grouping from snapshots/events and unchanged observer method denial for all non-observer routes.
 
-## Open questions for the human
+## Locked v1 decisions
 
-1. **One child or multiple?** Recommend one admitted child in v1. Multiple children need an aggregate initial-parent cap, not repeated fractions of a shrinking remainder.
-2. **Broker-only v1?** Recommend yes. Native CLI usage cannot currently be sub-leased or cost-accounted strongly enough to satisfy inherited spend authority.
-3. **Cross-provider targets?** Recommend enabling them only with linked target-provider holds described above; otherwise ship same-provider delegation first rather than weaken provider budgets.
-4. **Fraction default?** Recommend 25% default with a hard 50% maximum. The daemon allocates only the child's validated need, not the whole percentage automatically.
-5. **Bypass composition?** Recommend `bypass -> auto`, not `bypass` and not `ask`, so the child remains autonomous without inheriting administrative bypass.
+1. One admitted child per parent. Rejected preflight may be retried; an admitted child consumes the only slot.
+2. Broker-authenticated or credential-free children only. Native login is not delegated.
+3. Same-provider targets only until linked target-provider holds are implemented; the target backend must still differ from the parent and active lead.
+4. `budgetFraction` defaults to `0.25` and has a hard `0.5` maximum. The daemon transfers only the validated bounded allocation.
+5. Approval composition is `ask -> ask`, `auto -> auto`, and `bypass -> auto`.

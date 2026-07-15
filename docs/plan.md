@@ -4,7 +4,7 @@ This is an acceptance checklist, not a completion claim. Publication happens per
 
 ## Product vision (context for every gate)
 
-Any supported CLI coder — OpenCode, Claude Code, Codex, Grok (experimental), more later — can become the single externally launched **lead**. The lead uses the other backends as contained headless workers: one orchestrator, multiple servants, with deliberation, judge panels (councils), fleets, goals, workflows, tasks, and skills. Headless is the successor of ContextRelay: every coordination capability that required two terminals there is daemon-authoritative and contained here. The TUI is the observability pane for this loop. End-state UX: open one CLI coder, bind it as lead, and go. All writes flow through leased worktrees and candidate gates — never ambient write access. Worker-initiated delegation remains denied until an explicitly bounded design (depth- and budget-capped) passes its own gate.
+Any supported CLI coder — OpenCode, Claude Code, Codex, Grok (experimental), more later — can become the single externally launched **lead**. The lead uses the other backends as contained headless workers: one orchestrator, multiple servants, with deliberation, judge panels (councils), fleets, goals, workflows, tasks, and skills. Headless is the successor of ContextRelay: every coordination capability that required two terminals there is daemon-authoritative and contained here. The TUI is the observability pane for this loop. End-state UX: open one CLI coder, bind it as lead, and go. All writes flow through leased worktrees and candidate gates — never ambient write access. Experimental worker-initiated delegation is hard-capped at depth one, one read-only child, same-provider broker authority, inherited deadlines, and an atomic slice of the parent's reservation.
 
 The orchestration surfaces are the product, not compatibility baggage; the contained execution kernel is their substrate. Gates below sequence hardening — they do not deprecate the vision.
 
@@ -22,6 +22,7 @@ The orchestration surfaces are the product, not compatibility baggage; the conta
 - Native workers report native-direct-unrestricted/backend-native access and unknown cost unless the CLI reports a charge. Broker workers use a run-scoped lease and broker-only egress.
 - Model is optional for native execution; broker/provider policy may require an explicit model for pricing and request bounds.
 - Goals follow a bounded durable plan/delegate/execute/critique/revise/gate/decide/integrate loop with addressed messages, actual artifacts, and typed finality.
+- Worker `run.delegate` admission is daemon-derived and non-queueing: one depth-one read-only child, no native credentials or cross-provider pivot in v1, no delegate operation on the child, and no spend authority beyond the parent's atomic sub-reservation.
 - Every expected failure returns a structured terminal result.
 - macOS and Linux are required; Windows returns `UNSUPPORTED_PLATFORM` before launch.
 - v1 repository state is verified before a crash-idempotent write-ahead import and remains unchanged.
@@ -52,9 +53,9 @@ Scope: the lead's multi-agent surfaces — deliberation fan-out, councils/judge 
 
 | Area | Evidence required before Gate B publish |
 | --- | --- |
-| Contracts | Runtime validation and golden tests for fleet/agent profiles, goals, turns, delegations, directed messages, reviews, votes, approvals, candidates, workflow DAGs/steps, councils, and finality decisions. |
-| Daemon | Fleet/goal/collaboration/candidate operations, durable workflows, and their restart recovery under the same authentication and queueing guarantees as Gate A. |
-| Collaboration | Iterative questions/revisions, addressed acknowledged messages, actual artifact/diff delivery, sticky task synthesis and health failover without authority promotion, active-lead backend exclusion for automatic routing, optional election, four-worker/64-queue defaults, overflow, deterministic idle opportunities, rate-limit requeue bounds, approval modes, and finality enforcement. |
+| Contracts | Runtime validation and golden tests for fleet/agent profiles, goals, turns, planned delegations, depth-one run-tool delegation links, directed messages, reviews, votes, approvals, candidates, workflow DAGs/steps, councils, and finality decisions. |
+| Daemon | Fleet/goal/collaboration/candidate operations, durable workflows, one-child `run.delegate` admission/recovery/cancellation, and their restart recovery under the same authentication and queueing guarantees as Gate A. |
+| Collaboration | Iterative questions/revisions, addressed acknowledged messages, actual artifact/diff delivery, sticky task synthesis and health failover without authority promotion, active-lead backend exclusion for automatic routing, optional election, four-worker/64-queue defaults, overflow, deterministic idle opportunities, rate-limit requeue bounds, approval modes, finality enforcement, and bounded same-provider worker delegation with atomic parent-budget inheritance. |
 | Councils/workflows | Persisted restartable DAGs and atomically phase-bound/restart-resumed councils, actual dependency results/diffs, bounded budget-checked retries and terminal cancellation recovery, real proposal/candidate/review inputs, strict-majority attributable cross-referencing votes, candidate-job test finality, deterministic routing, queueing under caps, and enforced terminal decisions. |
 | End-to-end evidence | One recorded contained smoke: a real bound lead attaches via MCP, fans out `headless_deliberate` to at least two other backends, runs `council_deliberate` through vote and decision, and the full trace is verifiable in the ledger and visible in the TUI events view. |
 | Integrations | CLI/MCP/plugin use daemon authority, the OpenCode plugin shares attach/heartbeat behavior, the TUI is observer-only, and release configs invoke only compiled files. |
@@ -76,8 +77,9 @@ These must be closed or the affected gate must remain unpublished:
 
 1. The manually triggered protected provider-smoke workflow must pass with one bounded real broker request for OpenAI, Anthropic, Gemini, and xAI. Its `provider-smoke` GitHub environment requires secrets `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, and `XAI_API_KEY`, plus variables `HEADLESS_SMOKE_OPENAI_MODEL`, `HEADLESS_SMOKE_ANTHROPIC_MODEL`, `HEADLESS_SMOKE_GEMINI_MODEL`, and `HEADLESS_SMOKE_XAI_MODEL`. The harness exists, but this repository does not claim the credentialed run has passed. (Gate A)
 2. Opt-in native-subscription smoke must pass without API keys for installed, already logged-in Claude, Codex, and OpenCode CLIs. Each run must omit model, remain read-only and required-contained, report native-direct-unrestricted/backend-native evidence, leave the primary checkout unchanged, and retain the selected driver/version/auth fingerprint without auth contents. Grok remains experimental until its full characterization gate passes. See [native-login.md](./native-login.md#opt-in-real-subscription-smoke). (Gate A)
-3. The complete macOS/Linux workflow must pass in hosted CI in both authentication network modes; local argument-construction tests are not a substitute for real sandbox execution. (Gate A)
-4. The recorded lead→deliberate→council end-to-end smoke described under Gate B. (Gate B)
+3. The recorded lead→deliberate→council end-to-end smoke described under Gate B. (Gate B)
+
+The complete current branch, including depth-one contained delegation, has passed the hosted macOS and Linux workflow. That evidence closes the former CI-bootstrap blocker but is not a substitute for either credentialed Gate A smoke above, and it must be re-run after relevant changes.
 
 Do not carry forward an older local release pass after control-plane, native-auth, session-driver, fleet, TUI, or package changes. Re-run `release:check`, clean tarball installation, compiled `headless`/`hless`/`headless-mcp`/daemon/TUI/plugin startup, real Seatbelt, privileged bubblewrap/seccomp, and generated-artifact cleanliness from the final tree. The repository makes no claim that either real-account smoke has passed until its evidence is recorded.
 

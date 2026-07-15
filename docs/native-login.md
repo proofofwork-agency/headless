@@ -53,6 +53,8 @@ Host `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, and alternate config paths are intent
 
 An unavailable, invalid, symlinked, or oversized login produces `NATIVE_AUTH_UNAVAILABLE`. Native authentication deliberately means the official backend can use its own scoped account state and contact its provider; it does not claim broker-style network or credential invisibility.
 
+One-shot and persistent native-session launches apply the selected backend's `prepareEnvironment` hook after the isolated baseline environment is built. These hooks may add only backend control values and read-only system trust-store paths; they do not restore ambient API keys, OAuth tokens, keychain exports, real-home paths, or host sockets. In particular, Codex receives `SSL_CERT_FILE=/etc/ssl/cert.pem` and `SSL_CERT_DIR=/etc/ssl/certs` so TLS validation works from its isolated home without widening the Seatbelt network profile. Claude's keychain-only limitation above is separate and is not bypassed by environment preparation.
+
 Grok hardening prepares a Headless-owned `config.toml` in its isolated `GROK_HOME`, explicit environment-level disables for every Cursor/Claude/Codex compatibility cell, no memory/subagents/web fetch/update/telemetry, a Headless system-prompt override, a mode-specific built-in tool allowlist, and startup-snapshot masks for existing project control paths. Before any provider access, a contained, network-denied `grok inspect --json` must attest that native project surfaces and every compatibility cell are disabled. Grok remains experimental and blocked when the installed version cannot produce that evidence.
 
 ## Approval policies
