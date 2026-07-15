@@ -348,7 +348,11 @@ function observationFromHoldOrUnknown(hold: LinkedHoldRecord): LinkedHoldSettlem
 }
 
 function requireCounterAtLeast(actual: number | null, expected: number | null, label: string) {
-  if (expected !== null && (actual === null || actual < expected)) throw new Error(`Terminal linked ${label} charge is missing.`);
+  // A null aggregate is the BudgetStore's fail-closed representation for an
+  // interrupted run: the dimension is exhausted and cannot authorize more
+  // spend. It is therefore at least as restrictive as each numeric linked
+  // charge; only a known numeric under-charge contradicts the journal.
+  if (expected !== null && actual !== null && actual < expected) throw new Error(`Terminal linked ${label} charge is missing.`);
 }
 
 function messageOf(error: unknown) {

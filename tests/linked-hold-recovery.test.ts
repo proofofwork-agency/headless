@@ -89,9 +89,112 @@ describe("cross-provider linked-hold startup recovery", () => {
     expect(existsSync(fixture.paths.socketPath)).toBe(false);
     expect(new BudgetStore(fixture.paths).getLinkedProviderHold(fixture.linkId)?.state).toBe("recovery_required");
   });
+
+  test("replays a durable mid-settlement digest before readiness without double charge or quota return", async () => {
+    const fixture = recoveryFixture("settling");
+    const before = fixture.budgets.getLinkedProviderHold(fixture.linkId)!;
+    expect(before.state).toBe("settling");
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.paths.canonicalProjectRoot, state: fixture.stateOptions });
+    await daemon.start();
+    await daemon.stop();
+
+    const recoveredStore = new BudgetStore(fixture.paths);
+    const recovered = recoveredStore.getLinkedProviderHold(fixture.linkId)!;
+    expect(recovered).toMatchObject({
+      state: "settled",
+      terminalSettlementDigest: before.terminalSettlementDigest,
+      usageProjection: before.usageProjection,
+      settlementObservation: before.settlementObservation,
+    });
+    expect(recoveredStore.getReservation("child-job")).toBeNull();
+    expect(recoveredStore.getState().budgets.find((budget) => budget.id === "target")?.usedRequests).toBe(0);
+    const once = JSON.stringify(recoveredStore.getState().linkedHolds);
+
+    const second = new HeadlessDaemon({ projectRoot: fixture.paths.canonicalProjectRoot, state: fixture.stateOptions });
+    await second.start();
+    await second.stop();
+    expect(JSON.stringify(new BudgetStore(fixture.paths).getState().linkedHolds)).toBe(once);
+  });
+
+  test("quarantines one corrupt link offline, restores readiness, and preserves every other hold byte-for-byte", async () => {
+    const fixture = recoveryFixture("settling");
+    const otherLinkId = seedUnrelatedRolledBackHold(fixture);
+    const otherBefore = JSON.stringify(fixture.budgets.getLinkedProviderHold(otherLinkId));
+    const raw = JSON.parse(readFileSync(fixture.paths.budgetsPath, "utf8"));
+    raw.linkedHolds.find((hold: { linkId: string }) => hold.linkId === fixture.linkId).terminalSettlementDigest = "f".repeat(64);
+    writeFileSync(fixture.paths.budgetsPath, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+
+    const blocked = new HeadlessDaemon({ projectRoot: fixture.paths.canonicalProjectRoot, state: fixture.stateOptions });
+    await expect(blocked.start()).rejects.toThrow("operator action");
+    expect(existsSync(fixture.paths.socketPath)).toBe(false);
+    expect(JSON.stringify(new BudgetStore(fixture.paths).getLinkedProviderHold(otherLinkId))).toBe(otherBefore);
+
+    const inspected = await inspectLinkedHoldOffline(fixture.paths.canonicalProjectRoot, fixture.linkId, fixture.stateOptions);
+    await expect(quarantineLinkedHoldOffline({
+      projectRoot: fixture.paths.canonicalProjectRoot,
+      state: fixture.stateOptions,
+      linkId: fixture.linkId,
+      expectedDigest: "0".repeat(64),
+      resolution: "exhaust",
+      confirm: true,
+    })).rejects.toThrow("changed after inspection");
+    const quarantined = await quarantineLinkedHoldOffline({
+      projectRoot: fixture.paths.canonicalProjectRoot,
+      state: fixture.stateOptions,
+      linkId: fixture.linkId,
+      expectedDigest: inspected.recordDigest,
+      resolution: "exhaust",
+      confirm: true,
+    });
+    expect(JSON.stringify(new BudgetStore(fixture.paths).getLinkedProviderHold(otherLinkId))).toBe(otherBefore);
+
+    const ready = new HeadlessDaemon({ projectRoot: fixture.paths.canonicalProjectRoot, state: fixture.stateOptions });
+    await ready.start();
+    await ready.stop();
+    const reopened = new BudgetStore(fixture.paths);
+    expect(reopened.getLinkedProviderHold(fixture.linkId)).toBeNull();
+    expect(JSON.stringify(reopened.getLinkedProviderHold(otherLinkId))).toBe(otherBefore);
+    expect(reopened.manualRecoveryMarkers()).toContainEqual(expect.objectContaining({
+      linkId: fixture.linkId,
+      resolution: "exhaust",
+      auditEventId: quarantined.auditEventId,
+      auditedAt: expect.any(Number),
+    }));
+    expect(new RunEventStore(fixture.paths.runEventsPath).protectedSnapshot({ limit: 100 }).records)
+      .toContainEqual(expect.objectContaining({ event: expect.objectContaining({
+        eventId: quarantined.auditEventId,
+        rule: "linked-hold-manual-recovery",
+      }) }));
+  });
 });
 
 describe("offline linked-hold operator recovery", () => {
+  test("refuses a non-isolatable child-allocation corruption without releasing either side", async () => {
+    const fixture = recoveryFixture("held");
+    const raw = JSON.parse(readFileSync(fixture.paths.budgetsPath, "utf8"));
+    raw.reservations.find((reservation: { id: string }) => reservation.id === "child-job").envelope.requests = 1;
+    writeFileSync(fixture.paths.budgetsPath, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+    const budgets = new BudgetStore(fixture.paths);
+    expect(() => recoverLinkedProviderHolds({ budgets, broker: restartBroker(fixture.paths), jobs: fixture.jobs })).toThrow("operator action");
+    const inspected = await inspectLinkedHoldOffline(fixture.paths.canonicalProjectRoot, fixture.linkId, fixture.stateOptions);
+    const parentBefore = budgets.getReservation("parent-job")!.envelope;
+    const childBefore = budgets.getReservation("child-job")!.envelope;
+
+    await expect(quarantineLinkedHoldOffline({
+      projectRoot: fixture.paths.canonicalProjectRoot,
+      state: fixture.stateOptions,
+      linkId: fixture.linkId,
+      expectedDigest: inspected.recordDigest,
+      resolution: "exhaust",
+      confirm: true,
+    })).rejects.toThrow("no longer matches its durable hold");
+    const unchanged = new BudgetStore(fixture.paths);
+    expect(unchanged.getLinkedProviderHold(fixture.linkId)?.state).toBe("recovery_required");
+    expect(unchanged.getReservation("parent-job")?.envelope).toEqual(parentBefore);
+    expect(unchanged.getReservation("child-job")?.envelope).toEqual(childBefore);
+    expect(unchanged.manualRecoveryMarkers()).toEqual([]);
+  });
+
   test("inspects one exact link, enforces the digest, writes evidence first, and releases only zero egress", async () => {
     const fixture = recoveryFixture("admitted");
     fixture.budgets.markLinkedRecoveryRequired(fixture.linkId, "injected admitted-state contradiction");
@@ -324,9 +427,9 @@ function runRequest(paths: ProjectStatePaths, backend: string, prompt: string, m
   };
 }
 
-function testBudget(paths: ProjectStatePaths, id: string, provider: string | null, maxRequests: number) {
+function testBudget(paths: ProjectStatePaths, id: string, provider: string | null, maxRequests: number, principal = "worker") {
   return BudgetSchema.parse({
-    id, projectId: paths.projectId, principal: "worker", sessionId: null, workflowId: null, provider,
+    id, projectId: paths.projectId, principal, sessionId: null, workflowId: null, provider,
     maxRequests, maxInputTokens: 500_000, maxOutputTokens: 100_000, maxCostUsd: 20,
     maxArtifactBytes: 1_000_000, maxConcurrency: 8, maxRetries: 2, expiresAt: null,
     usedRequests: 0, usedUsage: { input: 0, output: 0, reasoning: 0, cached: 0, providerTotal: 0 },
@@ -369,4 +472,43 @@ function unrelatedHold(source: ReturnType<BudgetStore["getLinkedProviderHold"]> 
     settlementObservation: null,
     recoveryReason: null,
   };
+}
+
+function seedUnrelatedRolledBackHold(fixture: ReturnType<typeof recoveryFixture>) {
+  fixture.budgets.upsertBudget(testBudget(fixture.paths, "other-parent-budget", "anthropic", 4, "other-worker"));
+  expect(fixture.budgets.reserve({
+    id: "other-parent",
+    projectId: fixture.paths.projectId,
+    principal: "other-worker",
+    sessionId: null,
+    workflowId: null,
+    provider: "anthropic",
+    inputTokens: 1_000,
+    outputTokens: 200,
+    costUsd: 2,
+    artifactBytes: 64,
+    retries: 0,
+  }).allowed).toBe(true);
+  expect(fixture.budgets.activate("other-parent").allowed).toBe(true);
+  const prepared = fixture.budgets.prepareLinkedProviderHold({
+    parentJobId: "other-parent",
+    parentReservationId: "other-parent",
+    childReservationId: "other-child",
+    requestId: "123e4567-e89b-42d3-a456-426614174077",
+    parentBackend: "claude-code",
+    targetBackend: "codex",
+    parentProvider: "anthropic",
+    targetProvider: "openai",
+    budgetFraction: 0.25,
+    parentDeadlineAt: Date.now() + 100_000,
+    childDeadlineAt: Date.now() + 80_000,
+    approvalPolicy: "auto",
+    parentAllocation: { requests: 1, inputTokens: 250, outputTokens: 50, costUsd: 0.5, artifactBytes: 16, retries: 0 },
+    targetReservation: { requests: 1, inputTokens: 250, outputTokens: 50, costUsd: 0.5, artifactBytes: 16, retries: 0 },
+    requestDigest: "d".repeat(64),
+    promptDigest: "e".repeat(64),
+    promptBytes: 16,
+  });
+  fixture.budgets.rollbackLinkedProviderHold(prepared.hold!.linkId);
+  return prepared.hold!.linkId;
 }
