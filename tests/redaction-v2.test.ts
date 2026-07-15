@@ -19,6 +19,22 @@ describe("stream-safe redaction", () => {
     expect(result.text).not.toContain(token);
   });
 
+  test("consumes trailing base64url dashes from daemon-issued credentials", () => {
+    const brokerToken = `hls_${"B".repeat(63)}-`;
+    const runToolToken = `hlt_${"R".repeat(63)}-`;
+
+    expect(redactAndTruncate(brokerToken)).toEqual({
+      text: "[REDACTED_HEADLESS_BROKER_TOKEN]",
+      redacted: true,
+      truncated: false,
+    });
+    expect(redactAndTruncate(runToolToken)).toEqual({
+      text: "[REDACTED_HEADLESS_RUN_TOOL_TOKEN]",
+      redacted: true,
+      truncated: false,
+    });
+  });
+
   test("does not mistake ordinary secret-domain function calls for credentials", () => {
     const source = [
       "const secret = makeSecret(options);",
@@ -47,7 +63,9 @@ describe("stream-safe redaction", () => {
   test("cannot reconstruct secrets split at arbitrary chunk boundaries", () => {
     const secrets = [
       `hls_${"B".repeat(43)}`,
+      `hls_${"B".repeat(63)}-`,
       `hlt_${"R".repeat(64)}`,
+      `hlt_${"R".repeat(63)}-`,
       `sk-${"c".repeat(32)}`,
       `anthropic-${"d".repeat(32)}`,
       `Bearer ${"e".repeat(40)}`,

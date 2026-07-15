@@ -10,8 +10,12 @@ export const SECRET_PATTERNS: Array<[RegExp, string]> = [
   // Daemon-issued provider broker leases are base64url values longer than the
   // `hls_<uuid>` message identifiers used by integrations. Keep the minimum
   // length above a UUID so ordinary message IDs are not destroyed.
-  [/\b(hls_[A-Za-z0-9_-]{40,})\b/g, "[REDACTED_HEADLESS_BROKER_TOKEN]"],
-  [/\b(hlt_[A-Za-z0-9_-]{40,})\b/g, "[REDACTED_HEADLESS_RUN_TOOL_TOKEN]"],
+  // Base64url credentials may legitimately end in `-`. A trailing `\b`
+  // backtracks before that non-word character and leaks the suffix, making
+  // redaction depend on random token bytes. Bound against the complete token
+  // alphabet instead so every credential byte is consumed deterministically.
+  [/(?<![A-Za-z0-9_-])(hls_[A-Za-z0-9_-]{40,})(?![A-Za-z0-9_-])/g, "[REDACTED_HEADLESS_BROKER_TOKEN]"],
+  [/(?<![A-Za-z0-9_-])(hlt_[A-Za-z0-9_-]{40,})(?![A-Za-z0-9_-])/g, "[REDACTED_HEADLESS_RUN_TOOL_TOKEN]"],
   [/\bBearer\s+[A-Za-z0-9._~+/=-]{16,}\b/gi, "Bearer [REDACTED_BEARER_TOKEN]"],
   [/\b(xox[baprs]-[A-Za-z0-9-]{10,})\b/g, "[REDACTED_SLACK_TOKEN]"],
   [/\b(gh[pousr]_[A-Za-z0-9_]{20,})\b/g, "[REDACTED_GITHUB_TOKEN]"],
