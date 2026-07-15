@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { connectOrStartDaemon } from "../src/daemon/connect";
 import { HeadlessDaemon } from "../src/daemon/server";
 import {
   __handleCallToolForTest,
+  __handleListToolsForTest,
   mcpToolDefinitions,
   mcpToolsForScopes,
   server,
@@ -122,6 +124,14 @@ describe("MCP authenticated daemon integration", () => {
     expect(message?.source).toBe("integration:lead-codex-g1");
     expect(message?.message?.from).toBe("integration:lead-codex-g1");
     expect(message?.source).not.toBe("coordinator");
+  });
+
+  test("returns SDK-conformant object input schemas from the authenticated tools/list path", async () => {
+    const listed = ListToolsResultSchema.parse(await __handleListToolsForTest());
+    expect(listed.tools.length).toBeGreaterThan(0);
+    expect(listed.tools.every((tool) => tool.inputSchema.type === "object")).toBe(true);
+    const composed = listed.tools.find((tool) => tool.name === "headless_goal")?.inputSchema;
+    expect(Array.isArray(composed?.anyOf)).toBe(true);
   });
 
   test("persists a redacted durable message and drains it without a host-channel fallback", async () => {

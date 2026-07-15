@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "releaseGatePassed": true,
+  "compiledArtifactsOnly": true,
+  "actualMcpStdio": true,
+  "lead": {
+    "host": "codex",
+    "attached": true
+  },
+  "deliberation": {
+    "attempts": 1,
+    "successfulBackends": [
+      "claude-code",
+      "opencode",
+      "grok-build"
+    ],
+    "jobs": [
+      {
+        "jobId": "b258cad8-e91a-42be-a054-5599a9d7785c",
+        "backend": "claude-code",
+        "status": "succeeded",
+        "errorCode": null
+      },
+      {
+        "jobId": "0cfc6985-ab0d-407d-9dc1-5d6b723d2356",
+        "backend": "opencode",
+        "status": "succeeded",
+        "errorCode": null
+      },
+      {
+        "jobId": "49860630-a8af-4ef3-8001-5c8b058bec52",
+        "backend": "grok-build",
+        "status": "succeeded",
+        "errorCode": null
+      }
+    ]
+  },
+  "council": {
+    "councilId": "c73e0fdb-01ae-413a-b1f8-cde3ac3fba21",
+    "principal": "integration:lead-codex-g1",
+    "participants": [
+      "claude-code",
+      "opencode"
+    ],
+    "approved": false,
+    "reason": "Council finality failed: Required vote gate has not passed. (0 approvals, 2/2 valid votes).",
+    "validVotes": 2,
+    "phaseJobCounts": {
+      "proposal": 2,
+      "execution": 2,
+      "review": 2,
+      "vote": 2
+    },
+    "votes": [
+      {
+        "agent": "claude-code",
+        "jobId": "a108e439-4aa0-4fcf-a0a5-e02cac9bf561",
+        "references": [
+          "fbd0bb96-2492-48df-9fae-0a11790baf00"
+        ]
+      },
+      {
+        "agent": "opencode",
+        "jobId": "f18c95c5-6429-4cb8-ae78-d16655cae6dc",
+        "references": [
+          "d8f3d6af-f13c-4eee-8872-514e787c0a54"
+        ]
+      }
+    ],
+    "voteJobs": [
+      {
+        "participant": "claude-code",
+        "jobId": "a108e439-4aa0-4fcf-a0a5-e02cac9bf561",
+        "terminalStatus": "succeeded",
+        "parsed": true,
+        "output": "{\"vote\":\"reject\",\"references\":[\"fbd0bb96-2492-48df-9fae-0a11790baf00\"],\"rationale\":\"Per fbd0bb96, every run.delegate attempt returned childJobId:null (blanket POLICY_DENIED), so no council job was ever created and the gate's actual precondition — job-level visibility in both the ledger trace and observer projection — was never exercised by either candidate. Fail-closed behavior was correct and containment held, but the headline acceptance test remains unproven, so Gate B cannot be approved.\"}",
+        "outputBytes": 501,
+        "outputSha256": "1bde409c0e0a9c391b167157e832bdd884a7129130ea1911e4c9a68aace97c82",
+        "outputTruncated": false
+      },
+      {
+        "participant": "opencode",
+        "jobId": "f18c95c5-6429-4cb8-ae78-d16655cae6dc",
+        "terminalStatus": "succeeded",
+        "parsed": true,
+        "output": "The bash/cooperation transport is blocked by a permission rule in this environment (the helper cannot be invoked), so I cannot independently re-query the ledger or projection. I'll cast the vote from the two reviews provided, which converge and are internally consistent.\n\nBased on the evidence:\n- Precondition 1 (native-login fan-out) **failed**: `run.delegate` returned `POLICY_DENIED`, non-retryable, `runs.total` stayed 0.\n- Precondition 2 (job-level dual visibility in ledger **and** projection) was **never exercised** — `childJobId:null` on every attempt, so no job existed to correlate. The only eligible review (d8f3d6af) correctly identifies this as an untested condition, not a proven negative.\n- A genuine observability gap exists: `POLICY_DENIED` events don't surface in the entries stream, so even the denial isn't dual-visible.\n\nCorrect verdict is fail-closed reject.\n\n```json\n{\"vote\":\"reject\",\"references\":[\"d8f3d6af-f13c-4eee-8872-514e787c0a54\"],\"rationale\":\"Both preconditions fail or remain unvalidated. (1) Native-login fan-out was non-retryable POLICY_DENIED with runs.total=0 and childJobId:null on every attempt, so the gate's first condition (a real MCP lead fanning out contained native-login work) is unmet. (2) Because no council job was ever created, the core acceptance test — jobs visible in BOTH the durable ledger trace AND the observer event projection — was never exercised; d8f3d6af correctly frames this as an untested condition rather than a proven negative, and neither candidate nor review ran the one positive control (a successful non-native-login delegate) that would actually validate job-level dual-visibility. Additionally, the denial event itself is not dual-visible: POLICY_DENIED does not surface in the entries stream, an observability gap that means even the negative result can't be confirmed in both sinks. Both reviews reach the correct fail-closed verdict; the gate must stay closed until native-login delegation is explicitly authorized outside this run's scope and both job-level dual-visibility and negative-event projection are empirically verified rather than inferred.\"}\n```",
+        "outputBytes": 2140,
+        "outputSha256": "8c670ee4204cac8305484719b7c22307c1403849ce841975ac88de0d03e0c0e0",
+        "outputTruncated": false
+      }
+    ]
+  },
+  "persistence": {
+    "daemonRestartedBeforeVerification": true,
+    "ledgerArtifactFound": true,
+    "councilRecordMatched": true,
+    "ledgerJobIdsMatched": 11,
+    "observerEventsMatched": 11,
+    "observerTerminalCompletionsMatched": 11
+  }
+}

@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "releaseGatePassed": true,
+  "requiredBackends": [
+    "codex",
+    "opencode"
+  ],
+  "requiredSatisfied": true,
+  "requiredRealPass": true,
+  "transientRateLimited": [],
+  "compiledArtifactsOnly": true,
+  "providerApiKeyEnvironmentCleared": true,
+  "providerCredentialEnvironmentCleared": true,
+  "primaryUnchangedBeforeIntegration": true,
+  "results": [
+    {
+      "backend": "claude-code",
+      "binary": "claude",
+      "status": "passed",
+      "acceptedLimitation": false,
+      "code": "APPROVAL_REQUIRED",
+      "reason": "Native-login write candidate merged_fast_forward to primary after isolated preservation and authorized integration.",
+      "durationMs": 8095,
+      "candidateId": "8a4947c3-43d2-459b-aef8-8c10cc4b7395",
+      "candidateCommit": "dec14fc3154e632427377808899a4c402f254fce",
+      "mergedInline": false,
+      "integrationOutcome": "merged_fast_forward",
+      "resultingCommit": "dec14fc3154e632427377808899a4c402f254fce",
+      "primaryUnchangedBeforeIntegration": true,
+      "primaryAdvanced": true,
+      "editPresentOnPrimary": true,
+      "coderToolApprovalId": "approval_2e7f6757-369b-4c84-ac42-92ca717fc8e9",
+      "mergeApprovalId": "approval_f1b970fb-841a-4f57-ad69-1703f67821f0",
+      "containment": {
+        "mechanism": "darwin-seatbelt-write",
+        "network": "native-direct-unrestricted",
+        "credentialAccess": "backend-native"
+      }
+    },
+    {
+      "backend": "codex",
+      "binary": "codex",
+      "status": "passed",
+      "acceptedLimitation": false,
+      "code": "APPROVAL_REQUIRED",
+      "reason": "Native-login write candidate merged_fast_forward to primary after isolated preservation and authorized integration.",
+      "durationMs": 8902,
+      "candidateId": "2f96b8ca-6c06-42f0-b696-d5533ebf9119",
+      "candidateCommit": "18adef77525f203bcf7132a6fb09fea87674eb9c",
+      "mergedInline": false,
+      "integrationOutcome": "merged_fast_forward",
+      "resultingCommit": "18adef77525f203bcf7132a6fb09fea87674eb9c",
+      "primaryUnchangedBeforeIntegration": true,
+      "primaryAdvanced": true,
+      "editPresentOnPrimary": true,
+      "coderToolApprovalId": "approval_f75ae237-175a-4f1a-bedf-75033905dbce",
+      "mergeApprovalId": "approval_e03c3382-2fc2-44dd-a761-003ace505756",
+      "containment": {
+        "mechanism": "darwin-seatbelt-write",
+        "network": "native-direct-unrestricted",
+        "credentialAccess": "backend-native"
+      }
+    },
+    {
+      "backend": "opencode",
+      "binary": "opencode",
+      "status": "passed",
+      "acceptedLimitation": false,
+      "code": "APPROVAL_REQUIRED",
+      "reason": "Native-login write candidate merged_fast_forward to primary after isolated preservation and authorized integration.",
+      "durationMs": 18697,
+      "candidateId": "17ef5d4c-46de-416e-87c4-84c60ceb1d42",
+      "candidateCommit": "574c6a72d465feac9a4a0378b6dad1b89e3925a8",
+      "mergedInline": false,
+      "integrationOutcome": "merged_fast_forward",
+      "resultingCommit": "574c6a72d465feac9a4a0378b6dad1b89e3925a8",
+      "primaryUnchangedBeforeIntegration": true,
+      "primaryAdvanced": true,
+      "editPresentOnPrimary": true,
+      "coderToolApprovalId": "approval_f24b797c-de3e-437f-872d-059ff392a2a6",
+      "mergeApprovalId": "approval_b0fc6131-0b2e-4f91-9570-0357d9b11994",
+      "containment": {
+        "mechanism": "darwin-seatbelt-write",
+        "network": "native-direct-unrestricted",
+        "credentialAccess": "backend-native"
+      }
+    },
+    {
+      "backend": "grok-build",
+      "binary": "grok",
+      "status": "skipped",
+      "acceptedLimitation": true,
+      "code": "BACKEND_UNSUPPORTED",
+      "reason": "Backend grok-build cannot run in required containment because it does not disable: project configuration, startup hooks, project MCP servers, project skills. — documented accepted limitation; does not fail the release gate.",
+      "durationMs": 363,
+      "candidateId": null,
+      "candidateCommit": null,
+      "mergedInline": false,
+      "integrationOutcome": null,
+      "resultingCommit": null,
+      "primaryUnchangedBeforeIntegration": null,
+      "primaryAdvanced": false,
+      "editPresentOnPrimary": false,
+      "coderToolApprovalId": null,
+      "mergeApprovalId": null,
+      "containment": null
+    }
+  ]
+}

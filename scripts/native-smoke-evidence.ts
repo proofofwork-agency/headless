@@ -24,11 +24,10 @@ export function nativeSmokeContainmentSummary(value: Record<string, unknown> | n
 
 // Required subscription backends for the kernel-beta native gate. Grok stays
 // experimental (isolation-attestation-gated) and is never required. macOS Claude
-// Code keeps its live OAuth token in the login Keychain, which required
-// containment cannot read; only the regular ~/.claude/.credentials.json file is
-// copyable and it is commonly a stale snapshot. So on macOS the gate requires
-// only Codex and OpenCode and Claude is a documented limitation there; on Linux
-// a file-credential Claude login is required (docs/plan.md Gate A #2).
+// Code keeps its ordinary login token in the login Keychain, which required
+// containment cannot read; operators can opt into the reviewed setup-token
+// capsule, but the macOS baseline gate still requires Codex and OpenCode. On
+// Linux a file-credential Claude login is required (docs/plan.md Gate A #1).
 export function requiredNativeSmokeBackends(platform: NodeJS.Platform) {
   return platform === "darwin"
     ? (["codex", "opencode"] as const)
@@ -37,8 +36,9 @@ export function requiredNativeSmokeBackends(platform: NodeJS.Platform) {
 
 // A documented, accepted fail-closed limitation classifies as an informational
 // skip rather than a gate failure: the experimental Grok isolation-attestation
-// gate, and macOS keychain-only Claude auth unavailability. Keyed on the
-// structured terminal code, mirroring the live-agent matrix.
+// gate, and macOS Claude auth unavailability when the optional setup-token
+// capsule is absent. Keyed on the structured terminal code, mirroring the
+// live-agent matrix.
 export function nativeSmokeAcceptedLimitation(
   backend: string,
   code: string | null,
@@ -84,6 +84,30 @@ export function isNativeWriteMergeOutcome(outcome: string | null) {
   return outcome === "merged_fast_forward"
     || outcome === "merged_advanced"
     || outcome === "recovered_applied";
+}
+
+// The native-write harness submits one backend at a time into a disposable
+// project. Select only the pending, daemon-attributed coder-tool approval whose
+// durable collaboration id matches its job id and whose backend/mode match the
+// submitted turn. Any ambiguity fails closed instead of approving unrelated
+// work.
+export function pendingNativeWriteCoderApproval(value: unknown, backend: string) {
+  if (!Array.isArray(value)) throw new Error("approval.list did not return an array.");
+  const matches = value.flatMap((entry) => {
+    const approval = objectValue(entry);
+    const details = objectValue(approval?.details);
+    if (approval?.status !== "pending" || approval.kind !== "coder_tool") return [];
+    if (details?.backend !== backend || details.mode !== "write") return [];
+    const approvalId = stringValue(approval.id);
+    const collaborationId = stringValue(approval.collaborationId);
+    const jobId = stringValue(details.jobId);
+    if (!approvalId || !collaborationId || !jobId || collaborationId !== jobId) {
+      throw new Error(`Pending ${backend} coder-tool approval was malformed.`);
+    }
+    return [{ approvalId, jobId }];
+  });
+  if (matches.length > 1) throw new Error(`Multiple pending coder-tool approvals matched ${backend}.`);
+  return matches[0] ?? null;
 }
 
 // Per-backend release-gate evaluation for the write smoke. Mirrors

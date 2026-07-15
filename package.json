@@ -67,6 +67,7 @@
     "generate:docs": "bun scripts/generate-command-reference.ts",
     "check": "bun run typecheck && bun run typecheck:plugin && bun run lint && bun run format:check && bun run check:docs && bun run test",
     "smoke:pack": "bun scripts/pack-smoke.ts",
+    "smoke:gate-b": "bun scripts/gate-b-mcp-smoke.ts",
     "smoke:native": "bun scripts/native-subscription-smoke.ts",
     "smoke:native-write": "bun scripts/native-write-smoke.ts",
     "smoke:providers": "bun scripts/provider-smoke.ts",

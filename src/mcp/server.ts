@@ -77,7 +77,7 @@ const McpCollaborationAdvertisedSchema = z.discriminatedUnion("action", [
 const McpApprovalAdvertisedSchema = ApprovalListParamsSchema.extend({ action: z.literal("list") }).strict();
 const McpCandidateAdvertisedSchema = CandidateIdParamsSchema.extend({ action: z.literal("inspect") }).strict();
 
-const TOOL_DEFINITIONS = [
+const RAW_TOOL_DEFINITIONS = [
   { name: "headless_run", description: "Submit one daemon-owned contained job and return its complete structured result.", inputSchema: zodToJsonSchema(McpRunSchema, { target: "openApi3" }) },
   { name: "headless_deliberate", description: "Fan out a read-only question to multiple daemon-owned backends and return every structured result.", inputSchema: { type: "object", properties: { question: { type: "string" }, backends: { type: "string", description: "Comma-separated backend IDs." }, authMode: { type: "string", enum: ["native-login", "broker"] }, approvalPolicy: { type: "string", enum: ["ask", "auto", "bypass"] }, timeoutMs: { type: "integer", minimum: 1, maximum: 86_400_000 }, sessionId: { type: "string" } }, required: ["question"] } },
   { name: "headless_project_trust", description: "Inspect native-login trust for the daemon-owned project.", inputSchema: zodToJsonSchema(McpProjectTrustAdvertisedSchema, { target: "openApi3" }) },
@@ -106,7 +106,34 @@ const TOOL_DEFINITIONS = [
   { name: "council_deliberate", description: "Run daemon-owned proposal, execution, review, vote, and decision phases over actual candidate outputs.", inputSchema: { type: "object", properties: { question: { type: "string" }, agents: { type: "string", description: "Comma-separated backend IDs." }, mode: { type: "string", enum: ["read-only", "write"] }, authMode: { type: "string", enum: ["native-login", "broker"] }, approvalPolicy: { type: "string", enum: ["ask", "auto", "bypass"] }, timeoutMs: { type: "integer", minimum: 1, maximum: 86_400_000 }, sessionId: { type: "string" } }, required: ["question"] } },
   { name: "headless_workflow_run", description: "Start a durable required-containment workflow DAG from a v0.2 JSON definition.", inputSchema: { type: "object", properties: { definition: { type: "string", maxLength: 2500000, description: "JSON object with steps and optional finality requirements." } }, required: ["definition"] } },
   { name: "headless_workflow_status", description: "List, inspect, wait for, or cancel an authenticated principal's durable workflow.", inputSchema: { type: "object", properties: { action: { type: "string", enum: ["list", "status", "wait", "cancel"] }, workflowId: { type: "string" }, timeoutMs: { type: "integer", minimum: 1, maximum: 86400000 } }, required: ["action"] } },
-];
+] as const;
+
+const TOOL_DEFINITIONS = RAW_TOOL_DEFINITIONS.map((tool) => ({
+  ...tool,
+  inputSchema: mcpObjectInputSchema(tool.inputSchema),
+}));
+
+function mcpObjectInputSchema(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("MCP tool input schema must be an object schema.");
+  }
+  const schema = value as Record<string, unknown>;
+  if (schema.type !== undefined && schema.type !== "object") {
+    throw new Error("MCP tool input schema cannot advertise a non-object root.");
+  }
+  for (const keyword of ["anyOf", "oneOf"] as const) {
+    if (schema[keyword] === undefined) continue;
+    if (!Array.isArray(schema[keyword]) || schema[keyword].some((branch) => (
+      !branch
+      || typeof branch !== "object"
+      || Array.isArray(branch)
+      || (branch as Record<string, unknown>).type !== "object"
+    ))) {
+      throw new Error(`MCP tool ${keyword} branches must all be object schemas before root normalization.`);
+    }
+  }
+  return { ...schema, type: "object" as const };
+}
 
 const TOOL_REQUIRED_SCOPES: Partial<Record<typeof TOOL_DEFINITIONS[number]["name"], CredentialScope[]>> = {
   headless_run: ["run"],
@@ -400,6 +427,7 @@ export { server, TOOL_DEFINITIONS as mcpToolDefinitions };
 
 // Test-only export to drive full internal tool handler paths + error branches + wait + get_messages + council for coverage of mcp/server.ts
 export const __handleCallToolForTest = handleCallTool;
+export const __handleListToolsForTest = handleListTools;
 
 function leadHostFromProcess() {
   const index = process.argv.indexOf("--host");
