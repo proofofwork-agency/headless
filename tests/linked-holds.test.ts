@@ -49,6 +49,12 @@ describe("cross-provider linked-hold persistence contracts", () => {
       transitionNumber: 4,
       brokerEvidence: { ...linkedHold().brokerEvidence, parentCarveId: "parent-carve" },
     })).toThrow("complete token-free target evidence");
+    expect(() => LinkedHoldRecordSchema.parse({
+      ...linkedHold(),
+      state: "settling",
+      transitionNumber: 5,
+      brokerEvidence: leasedBrokerEvidence("a".repeat(64)),
+    })).toThrow("immutable terminal usage evidence");
     const legacyIntentEvidence = { ...linkedHold().brokerEvidence } as Record<string, unknown>;
     delete legacyIntentEvidence.targetTokenHash;
     delete legacyIntentEvidence.targetQuotaScope;
@@ -310,6 +316,85 @@ describe("cross-provider linked-hold persistence contracts", () => {
     expect(store.getState().reservations.filter((reservation) => reservation.parentReservationId === "parent-reservation")).toHaveLength(1);
     expect(store.getState().linkedHolds.filter((hold) => hold.state === "held")).toHaveLength(1);
   });
+
+  test("settles target usage once and atomically returns only proven-unused parent authority", () => {
+    const { store, linkId } = createLeasedStore();
+    const usage = usageProjection();
+    const observation = linkedObservation(linkId, {
+      requests: 1,
+      forwardedRequests: 1,
+      observedCostUsd: 0.2,
+      accountedCostUsd: 0.25,
+      accountedInputTokens: 400,
+      accountedOutputTokens: 80,
+    });
+
+    const begun = store.beginLinkedProviderSettlement(linkId, { disposition: "settled", usage, observation });
+    expect(begun).toMatchObject({ existing: false, hold: { state: "settling", transitionNumber: 5 } });
+    expect(store.getReservation("child-reservation")).not.toBeNull();
+    expect(store.getState().budgets.find((candidate) => candidate.id === "target-only")?.usedRequests).toBe(0);
+
+    const finalized = store.finalizeLinkedProviderSettlement(linkId, begun.digest, "settled");
+    expect(finalized).toMatchObject({
+      existing: false,
+      childReservationPresent: false,
+      unused: { requests: 1, inputTokens: 600, outputTokens: 120, costUsd: 0.75 },
+      hold: { state: "settled", transitionNumber: 6, terminalSettlementDigest: begun.digest },
+    });
+    expect(store.getReservation("child-reservation")).toBeNull();
+    expect(store.getReservation("parent-reservation")?.envelope).toMatchObject({ requests: 7, costUsd: 3.75 });
+    expect(store.getState().budgets.find((candidate) => candidate.id === "target-only")).toMatchObject({
+      usedRequests: 1,
+      usedUsage: { input: 400, output: 80 },
+      usedCost: { amountUsd: 0.25, observedRequests: 1 },
+      usedArtifactBytes: 16,
+    });
+    expect(store.getState().budgets.find((candidate) => candidate.id === "global")).toMatchObject({ usedRequests: 1, usedCost: { amountUsd: 0.25 } });
+
+    expect(store.beginLinkedProviderSettlement(linkId, { disposition: "settled", usage, observation }).existing).toBe(true);
+    expect(store.finalizeLinkedProviderSettlement(linkId, begun.digest, "settled").existing).toBe(true);
+    expect(store.getState().budgets.find((candidate) => candidate.id === "target-only")?.usedRequests).toBe(1);
+    expect(() => store.beginLinkedProviderSettlement(linkId, {
+      disposition: "settled",
+      usage: usageProjection({ requests: 2 }),
+      observation,
+    })).toThrow("conflicts with the durable terminal digest");
+  });
+
+  test("exhausts a nonzero or unknown terminal slice without returning parent authority or double-charging", () => {
+    const { store, linkId } = createLeasedStore();
+    const usage = usageProjection({
+      requests: 2,
+      inputTokens: 1_000,
+      outputTokens: 200,
+      reasoningTokens: null,
+      cachedTokens: null,
+      providerTotalTokens: null,
+      costUsd: 1,
+      costSource: "unknown",
+      pricingId: null,
+      artifactBytes: 64,
+    });
+    const observation = linkedObservation(linkId, { requests: 1, forwardedRequests: 1, activeRequests: 1 });
+    const begun = store.beginLinkedProviderSettlement(linkId, { disposition: "exhausted", usage, observation });
+    const finalized = store.finalizeLinkedProviderSettlement(linkId, begun.digest, "exhausted");
+
+    expect(finalized).toMatchObject({
+      existing: false,
+      unused: { requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
+      hold: { state: "exhausted", transitionNumber: 6 },
+    });
+    expect(store.getReservation("parent-reservation")?.envelope).toMatchObject({ requests: 6, costUsd: 3 });
+    expect(store.getState().budgets.find((candidate) => candidate.id === "target-only")).toMatchObject({
+      usedRequests: 2,
+      usedUsage: { input: 1_000, output: 200 },
+      usedCost: { amountUsd: 1, observedRequests: 2 },
+      usedArtifactBytes: 64,
+    });
+    expect(store.finalizeLinkedProviderSettlement(linkId, begun.digest, "exhausted").existing).toBe(true);
+    expect(store.getState().budgets.find((candidate) => candidate.id === "target-only")?.usedRequests).toBe(2);
+    expect(() => store.finalizeLinkedProviderSettlement(linkId, begun.digest, "settled")).toThrow("conflicts with the durable settlement");
+  });
 });
 
 function fixturePaths() {
@@ -519,6 +604,99 @@ function targetQuotaScope() {
     maxInputTokens: 1_000,
     maxOutputTokens: 200,
     maxCostUsd: 1,
+  };
+}
+
+function leasedBrokerEvidence(linkId: string) {
+  return {
+    parentCarveId: `${linkId}:parent`,
+    targetLeaseId: `${linkId}:target`,
+    targetTokenHash: "e".repeat(64),
+    targetLeaseIssuedAt: 1_200,
+    targetQuotaScope: {
+      provider: "openai",
+      runQuotaId: `headless-linked-target-${linkId}`,
+      budgetQuotaIds: [`headless-linked-target-${linkId}`, "target-only", "global"],
+      maxRequests: 2,
+      maxInputTokens: 1_000,
+      maxOutputTokens: 200,
+      maxCostUsd: 1,
+    },
+    targetRequests: null,
+    targetForwardedRequests: null,
+    targetInputTokens: null,
+    targetOutputTokens: null,
+    targetCostUsd: null,
+    targetActiveRequests: null,
+    targetRevoked: null,
+    targetExpiresAt: 4_500,
+  };
+}
+
+function createLeasedStore() {
+  const paths = fixturePaths();
+  let now = 1_000;
+  const store = new BudgetStore(paths, { now: () => ++now });
+  store.upsertBudget(budget(paths, { id: "parent-only", provider: "anthropic", maxRequests: 4, maxCostUsd: 4 }));
+  store.upsertBudget(budget(paths, {
+    id: "target-only",
+    provider: "openai",
+    maxRequests: 4,
+    maxInputTokens: 2_000,
+    maxOutputTokens: 400,
+    maxCostUsd: 2,
+    maxArtifactBytes: 128,
+  }));
+  store.upsertBudget(budget(paths, {
+    id: "global",
+    provider: null,
+    maxRequests: 8,
+    maxInputTokens: 4_000,
+    maxOutputTokens: 800,
+    maxCostUsd: 8,
+    maxArtifactBytes: 512,
+  }));
+  createParent(store, paths);
+  const prepared = store.prepareLinkedProviderHold(prepareInput());
+  expect(prepared.allowed).toBe(true);
+  const linkId = prepared.hold!.linkId;
+  expect(store.applyLinkedProviderHold(linkId).allowed).toBe(true);
+  expect(store.activate("child-reservation").allowed).toBe(true);
+  store.markLinkedParentCarved(linkId, `${linkId}:parent`);
+  store.markLinkedAdmitted(linkId, "child-reservation");
+  const evidence = leasedBrokerEvidence(linkId);
+  store.markLinkedLeased(linkId, {
+    targetLeaseId: evidence.targetLeaseId!,
+    targetTokenHash: evidence.targetTokenHash!,
+    targetIssuedAt: evidence.targetLeaseIssuedAt!,
+    targetQuotaScope: evidence.targetQuotaScope!,
+    targetExpiresAt: evidence.targetExpiresAt!,
+  });
+  return { store, paths, linkId };
+}
+
+function linkedObservation(linkId: string, overrides: Partial<{
+  requests: number;
+  forwardedRequests: number;
+  observedCostUsd: number;
+  accountedCostUsd: number;
+  accountedInputTokens: number;
+  accountedOutputTokens: number;
+  activeRequests: number;
+  revoked: boolean;
+}> = {}) {
+  return {
+    leaseId: `${linkId}:target`,
+    requests: 0,
+    forwardedRequests: 0,
+    observedCostUsd: 0,
+    accountedCostUsd: 0,
+    accountedInputTokens: 0,
+    accountedOutputTokens: 0,
+    activeRequests: 0,
+    revoked: true,
+    expiresAt: 4_500,
+    ...overrides,
   };
 }
 

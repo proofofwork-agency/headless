@@ -910,7 +910,7 @@ export class HeadlessDaemon {
             const request = this.jobs.request(admitted.job.id);
             if (!request) throw new HeadlessError("INTERNAL_ERROR", "Delegated child request is unavailable.");
             const child = await this.wait(admitted.job.id, request.timeoutMs + 10_000);
-            this.jobAdmission.settleDelegation(child);
+            await this.jobAdmission.settleDelegation(child);
             if (!child.result) throw new HeadlessError("INTERNAL_ERROR", "Delegated child completed without a result.");
             const completion = buildRunEvent(
               { jobId: child.id, sessionId: child.sessionId, sequence: 0 },

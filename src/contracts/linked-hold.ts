@@ -138,6 +138,14 @@ export const LinkedHoldRecordSchema = z.object({
   )) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["brokerEvidence"], message: "A leased linked hold requires complete token-free target evidence." });
   }
+  const settlementStates = new Set(["settling", "settled", "exhausted"]);
+  if (settlementStates.has(record.state) && (record.terminalSettlementDigest === null || record.usageProjection === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["terminalSettlementDigest"], message: "A settling linked hold requires immutable terminal usage evidence." });
+  }
+  const terminalStates = new Set(["settled", "rolled_back", "exhausted"]);
+  if (terminalStates.has(record.state) && record.terminalAt === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["terminalAt"], message: "A terminal linked hold requires a terminal timestamp." });
+  }
   if (record.usageProjection) {
     requireAtMost(record.usageProjection.requests, record.targetReservation.requests, context, ["usageProjection", "requests"], "request usage");
     requireNullableAtMost(record.usageProjection.inputTokens, record.targetReservation.inputTokens, context, ["usageProjection", "inputTokens"], "input token usage");

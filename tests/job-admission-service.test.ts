@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { ProviderBroker } from "../src/broker/server";
-import { RunRequestSchema, type SerializedRunRequest } from "../src/contracts/run";
+import { RunRequestSchema, type RunResult, type SerializedRunRequest } from "../src/contracts/run";
 import { JobAdmissionService, daemonFailureResult, delegatedApprovalPolicy } from "../src/daemon/job-admission-service";
 import type { RunExecutionControls } from "../src/daemon/run-execution-service";
 import { JobStore } from "../src/daemon/job-store";
@@ -418,6 +418,16 @@ describe("job admission service", () => {
       expect(() => fixture.budgets.commit(child.id)).toThrow("ordinary commit is prohibited");
 
       fixture.release("bounded cross-provider child");
+      await waitUntil(() => fixture.budgets.getState().linkedHolds[0]?.state === "settled");
+      expect(fixture.budgets.getState().linkedHolds[0]).toMatchObject({
+        state: "settled",
+        transitionNumber: 6,
+        usageProjection: { requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
+        brokerEvidence: { targetRevoked: true, targetActiveRequests: 0 },
+      });
+      expect(fixture.budgets.getReservation(child.id)).toBeNull();
+      expect(fixture.budgets.getReservation(parent.id)?.envelope.requests).toBe(8);
+      expect(await fixture.service.settleDelegation(fixture.jobs.get(child.id)!)).toBe(false);
       fixture.release("parent with transferable provider authority");
       await fixture.service.waitForIdle();
       fixture.service.dispose();
@@ -485,6 +495,58 @@ describe("job admission service", () => {
       fixture.service.dispose();
     } finally {
       await fixture.broker.stop();
+      restoreEnv("OPENAI_API_KEY", oldOpenAi);
+    }
+  });
+
+  test("settles zero-egress timeouts and parent cancellation but exhausts nonzero failed cross-provider runs", async () => {
+    const oldAnthropic = process.env.ANTHROPIC_API_KEY;
+    const oldOpenAi = process.env.OPENAI_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "fixture-parent-key";
+    process.env.OPENAI_API_KEY = "fixture-target-key";
+    try {
+      for (const terminal of ["failed-nonzero", "timed-out-zero", "parent-cancel-zero"] as const) {
+        const fixture = createFixture({ maxConcurrency: 2, maxQueued: 2 });
+        try {
+          const { parent, child } = await admitLinkedFixture(fixture, terminal);
+          const request = fixture.jobs.request(child.id)!;
+          const lease = fixture.executionControls.get(child.id)!.linkedBrokerLease!;
+          if (terminal === "failed-nonzero") {
+            fixture.broker.observeCost(lease.id, 0.000000001);
+            fixture.release(terminal, daemonFailureResult(request, child.id, "fixture linked failure"));
+          } else if (terminal === "timed-out-zero") {
+            fixture.release(terminal, {
+              ...daemonFailureResult(request, child.id, "fixture linked timeout"),
+              status: "timed_out",
+              error: { code: "TIMED_OUT", message: "fixture linked timeout", retryable: false },
+            });
+          } else {
+            fixture.service.cancel(parent.id);
+            expect(fixture.jobs.get(child.id)?.state).toBe("cancelling");
+            fixture.release(terminal);
+          }
+
+          const expected = terminal === "failed-nonzero" ? "exhausted" : "settled";
+          await waitUntil(() => fixture.budgets.getState().linkedHolds[0]?.state === expected);
+          expect(fixture.budgets.getState().linkedHolds[0]).toMatchObject({
+            state: expected,
+            transitionNumber: 6,
+            usageProjection: terminal === "failed-nonzero"
+              ? { requests: 2, costSource: "unknown" }
+              : { requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
+          });
+          expect(fixture.budgets.getReservation(child.id)).toBeNull();
+          expect(fixture.budgets.getReservation(parent.id)?.envelope.requests).toBe(terminal === "failed-nonzero" ? 6 : 8);
+
+          fixture.release(`parent-${terminal}`);
+          await fixture.service.waitForIdle();
+          fixture.service.dispose();
+        } finally {
+          await fixture.broker.stop();
+        }
+      }
+    } finally {
+      restoreEnv("ANTHROPIC_API_KEY", oldAnthropic);
       restoreEnv("OPENAI_API_KEY", oldOpenAi);
     }
   });
@@ -604,6 +666,53 @@ describe("job admission service", () => {
   });
 });
 
+async function admitLinkedFixture(
+  fixture: ReturnType<typeof createFixture>,
+  label: string,
+) {
+  const parentBackend = `linked-parent-${crypto.randomUUID()}`;
+  const childBackend = `linked-child-${crypto.randomUUID()}`;
+  const parentModel = `parent-model-${crypto.randomUUID()}`;
+  const childModel = `child-model-${crypto.randomUUID()}`;
+  registerBackendDefinition(adapter(parentBackend, { provider: "anthropic", strictAuth: "broker-api-key" }));
+  registerBackendDefinition(adapter(childBackend, { provider: "openai", strictAuth: "broker-api-key" }));
+  adapters.push(parentBackend, childBackend);
+  for (const [id, provider, model, rate] of [
+    [`parent-pricing-${crypto.randomUUID()}`, "anthropic", parentModel, 1_000],
+    [`child-pricing-${crypto.randomUUID()}`, "openai", childModel, 1],
+  ] as const) {
+    registerPricing({ id, provider, model, effectiveFrom: 0, inputUsdPerMillion: rate, outputUsdPerMillion: rate });
+    pricingIds.push(id);
+  }
+  await fixture.broker.start(0);
+  const parent = fixture.service.submit({
+    ...run(parentBackend, `parent-${label}`, "read-only", 30_000, "bypass"),
+    authMode: "broker",
+    model: parentModel,
+  }, "coordinator");
+  await waitUntil(() => fixture.jobs.get(parent.id)?.state === "running");
+  fixture.broker.issueLease({
+    runId: parent.id,
+    provider: "anthropic",
+    models: [parentModel],
+    endpointClasses: ["messages"],
+    expiresAt: Date.now() + 30_000,
+    maxRequests: 8,
+    maxCostUsd: 5,
+  });
+  const child = fixture.service.admitDelegation({
+    parentJobId: parent.id,
+    requestId: crypto.randomUUID(),
+    backend: childBackend,
+    model: childModel,
+    prompt: label,
+    timeoutMs: 5_000,
+    budgetFraction: 0.25,
+  }).job;
+  await waitUntil(() => fixture.jobs.get(child.id)?.state === "running");
+  return { parent, child };
+}
+
 function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
   const root = mkdtempSync(join(tmpdir(), "headless-admission-service-"));
   roots.push(root);
@@ -625,7 +734,7 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
   const approvedTurns: string[] = [];
   const aborted: string[] = [];
   const executionControls = new Map<string, RunExecutionControls>();
-  const releases = new Map<string, () => void>();
+  const releases = new Map<string, (result?: RunResult) => void>();
 
   const broker = new ProviderBroker();
 
@@ -650,10 +759,10 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
       jobs.transition(jobId, "running");
       started.push(request.prompt);
       if (controls.coderToolApproved) approvedTurns.push(request.prompt);
-      await new Promise<void>((resolve) => releases.set(request.prompt, resolve));
-      budgets.commit(jobId);
+      const forced = await new Promise<RunResult | undefined>((resolve) => releases.set(request.prompt, resolve));
+      if (!budgets.linkedProviderHoldForReservation(jobId)) budgets.commit(jobId);
       const cancelled = jobs.get(jobId)?.state === "cancelling";
-      jobs.complete(jobId, cancelled ? {
+      jobs.complete(jobId, forced ?? (cancelled ? {
         ...daemonFailureResult(request, jobId, "fixture cancellation"),
         status: "cancelled",
         error: { code: "CANCELLED", message: "fixture cancellation", retryable: false },
@@ -663,7 +772,7 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
         status: "succeeded",
         error: null,
         output: request.prompt,
-      });
+      }));
     },
     abort: (jobId) => { aborted.push(jobId); },
     completed: () => undefined,
@@ -684,11 +793,11 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
     approvedTurns,
     aborted,
     executionControls,
-    release(prompt: string) {
+    release(prompt: string, result?: RunResult) {
       const resolve = releases.get(prompt);
       if (!resolve) throw new Error(`No active fixture execution for ${prompt}.`);
       releases.delete(prompt);
-      resolve();
+      resolve(result);
     },
   };
 }

@@ -4,6 +4,7 @@ import type { BrokerLeaseCarve, BrokerLeaseScope, BrokerLinkedTargetScope, Provi
 import { getBackendDefinition, resolveBackendId } from "../backends/registry";
 import type { ApprovalRequest } from "../contracts/collaboration";
 import type { Job } from "../contracts/durable";
+import type { LinkedHoldRecord, LinkedHoldUsageProjection } from "../contracts/linked-hold";
 import { RunRequestSchema, type RunResult, type SerializedRunRequest } from "../contracts/run";
 import type { ApprovalStore } from "../runtime/approval-store";
 import type { AuthorityStore } from "../runtime/authority-store";
@@ -74,6 +75,7 @@ export class JobAdmissionService {
   private activeWrites = 0;
   private delegationMutationActive = false;
   private readonly delegationCarves = new Map<string, BrokerLeaseCarve>();
+  private readonly linkedSettlements = new Map<string, Promise<boolean>>();
 
   constructor(private readonly options: JobAdmissionServiceOptions) {
     this.maxConcurrency = Math.max(1, Math.min(options.maxConcurrency ?? 4, 64));
@@ -461,7 +463,15 @@ export class JobAdmissionService {
         expiresAt: issued.lease.expiresAt,
         baseUrl: issued.lease.baseUrl,
       },
-    }).catch((error) => this.completeUnexpectedFailure(childId, request, error)).finally(() => {
+    }).catch((error) => this.completeUnexpectedFailure(childId, request, error)).finally(async () => {
+      const completed = this.options.jobs.get(childId);
+      if (completed && isTerminal(completed)) {
+        try {
+          await this.settleDelegation(completed);
+        } catch (error) {
+          this.diagnostic(`Live linked settlement for ${childId} was deferred to startup recovery.`, error);
+        }
+      }
       this.activeJobs -= 1;
       this.executions.delete(execution);
       this.pump();
@@ -505,7 +515,20 @@ export class JobAdmissionService {
     };
   }
 
-  settleDelegation(child: Job) {
+  async settleDelegation(child: Job) {
+    const linkedHold = this.options.budgets.linkedProviderHoldForReservation(child.id);
+    if (linkedHold) {
+      const pending = this.linkedSettlements.get(child.id);
+      if (pending) return pending;
+      const settlement = this.settleLinkedDelegation(child, linkedHold);
+      this.linkedSettlements.set(child.id, settlement);
+      try {
+        return await settlement;
+      } finally {
+        if (this.linkedSettlements.get(child.id) === settlement) this.linkedSettlements.delete(child.id);
+      }
+    }
+
     const carve = this.delegationCarves.get(child.id);
     const result = child.result;
     let settled = false;
@@ -519,6 +542,47 @@ export class JobAdmissionService {
       }) : this.options.broker.settleRunLeaseCarve(carve);
     }
     const parent = child.delegationOf ? this.options.jobs.get(child.delegationOf.parentJobId) : null;
+    this.auditDelegationCompletion(parent, child);
+    return settled;
+  }
+
+  private async settleLinkedDelegation(child: Job, initialHold: LinkedHoldRecord) {
+    if (!child.result || !isTerminal(child)) {
+      throw new HeadlessError("CONFLICT", "Linked delegation settlement requires a terminal durable child result.");
+    }
+    this.options.broker.revokeLinkedTarget(initialHold.linkId);
+    const observation = await this.drainLinkedTarget(initialHold.linkId);
+    const decision = linkedSettlementDecision(initialHold, child.result, observation);
+    const begun = this.options.budgets.beginLinkedProviderSettlement(initialHold.linkId, decision);
+    const finalized = this.options.budgets.finalizeLinkedProviderSettlement(
+      initialHold.linkId,
+      begun.digest,
+      decision.disposition,
+    );
+    this.options.broker.settleLinkedParent(initialHold.linkId, finalized.unused);
+    if (!finalized.existing) {
+      const parent = child.delegationOf ? this.options.jobs.get(child.delegationOf.parentJobId) : null;
+      this.auditDelegationCompletion(parent, child, {
+        linkId: initialHold.linkId,
+        settlementState: finalized.hold.state,
+        settlementDigest: finalized.hold.terminalSettlementDigest,
+      });
+    }
+    return !finalized.existing;
+  }
+
+  private async drainLinkedTarget(linkId: string) {
+    const deadline = Date.now() + 1_000;
+    let observation = this.options.broker.observeLinkedTarget(linkId);
+    while (observation && observation.activeRequests > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      observation = this.options.broker.observeLinkedTarget(linkId);
+    }
+    return observation;
+  }
+
+  private auditDelegationCompletion(parent: Job | null, child: Job, extra: Record<string, unknown> = {}) {
+    const result = child.result;
     if (parent) this.delegationPolicyEvent(parent, "allowed", "run-delegation-completed", {
       parentJobId: parent.id,
       childJobId: child.id,
@@ -526,6 +590,7 @@ export class JobAdmissionService {
       status: child.state,
       usage: result?.usage ?? null,
       cost: result?.cost ?? null,
+      ...extra,
     });
     if (parent) this.options.auditDelegation?.("headless_result", parent, child, {
       parentJobId: parent.id,
@@ -534,8 +599,8 @@ export class JobAdmissionService {
       status: child.state,
       usage: result?.usage ?? null,
       cost: result?.cost ?? null,
+      ...extra,
     });
-    return settled;
   }
 
   submit(params: Record<string, unknown>, principal: string, options: JobAdmissionSubmitOptions = {}) {
@@ -1463,6 +1528,111 @@ function linkedTargetQuotaEvidence(scope: BrokerLeaseScope) {
     maxInputTokens: runQuota.maxInputTokens,
     maxOutputTokens: runQuota.maxOutputTokens,
     maxCostUsd: scope.maxCostUsd,
+  };
+}
+
+function linkedSettlementDecision(
+  hold: LinkedHoldRecord,
+  result: RunResult,
+  observation: ReturnType<ProviderBroker["observeLinkedTarget"]>,
+): {
+  disposition: "settled" | "exhausted";
+  usage: LinkedHoldUsageProjection;
+  observation: NonNullable<ReturnType<ProviderBroker["observeLinkedTarget"]>> | null;
+} {
+  if (!observation || !observation.revoked || observation.activeRequests !== 0) {
+    return { disposition: "exhausted", usage: exhaustedLinkedUsage(hold), observation };
+  }
+  if (result.status !== "succeeded") {
+    return zeroEgress(observation)
+      ? { disposition: "settled", usage: zeroLinkedUsage(), observation }
+      : { disposition: "exhausted", usage: exhaustedLinkedUsage(hold), observation };
+  }
+  if (zeroEgress(observation) && result.cost.observedRequests === 0) {
+    return { disposition: "settled", usage: zeroLinkedUsage(), observation };
+  }
+
+  const requests = Math.max(result.cost.observedRequests, observation.requests, observation.forwardedRequests);
+  const inputTokens = conservativeLinkedAmount(result.usage.input, observation.accountedInputTokens, requests);
+  const outputTokens = conservativeLinkedAmount(result.usage.output, observation.accountedOutputTokens, requests);
+  const brokerCost = Math.max(observation.observedCostUsd, observation.accountedCostUsd);
+  const costUsd = result.cost.amountUsd === null
+    ? brokerCost > 0 ? brokerCost : requests > 0 ? null : 0
+    : Math.max(result.cost.amountUsd, brokerCost);
+  const artifactBytes = result.diff ? Buffer.byteLength(result.diff.patch) : 0;
+  const usage: LinkedHoldUsageProjection = {
+    requests,
+    inputTokens,
+    outputTokens,
+    reasoningTokens: result.usage.reasoning,
+    cachedTokens: result.usage.cached,
+    providerTotalTokens: result.usage.providerTotal,
+    costUsd,
+    costSource: brokerCost > (result.cost.amountUsd ?? 0) ? "broker" : result.cost.source,
+    pricingId: result.cost.pricingId,
+    artifactBytes,
+  };
+  return linkedUsageFits(hold, usage)
+    ? { disposition: "settled", usage, observation }
+    : { disposition: "exhausted", usage: exhaustedLinkedUsage(hold), observation };
+}
+
+function zeroEgress(observation: NonNullable<ReturnType<ProviderBroker["observeLinkedTarget"]>>) {
+  return observation.requests === 0
+    && observation.forwardedRequests === 0
+    && observation.observedCostUsd === 0
+    && observation.accountedCostUsd === 0
+    && observation.accountedInputTokens === 0
+    && observation.accountedOutputTokens === 0
+    && observation.activeRequests === 0
+    && observation.revoked;
+}
+
+function conservativeLinkedAmount(reported: number | null, brokerBound: number, requests: number) {
+  if (reported === null) return brokerBound > 0 ? brokerBound : requests > 0 ? null : 0;
+  return Math.max(reported, brokerBound);
+}
+
+function linkedUsageFits(hold: LinkedHoldRecord, usage: LinkedHoldUsageProjection) {
+  return usage.requests <= hold.targetReservation.requests
+    && nullableUsageFits(usage.inputTokens, hold.targetReservation.inputTokens)
+    && nullableUsageFits(usage.outputTokens, hold.targetReservation.outputTokens)
+    && nullableUsageFits(usage.costUsd, hold.targetReservation.costUsd)
+    && usage.artifactBytes <= hold.targetReservation.artifactBytes;
+}
+
+function nullableUsageFits(actual: number | null, allocation: number | null) {
+  if (allocation === null) return true;
+  return actual !== null && actual <= allocation;
+}
+
+function zeroLinkedUsage(): LinkedHoldUsageProjection {
+  return {
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    cachedTokens: 0,
+    providerTotalTokens: 0,
+    costUsd: 0,
+    costSource: "broker",
+    pricingId: null,
+    artifactBytes: 0,
+  };
+}
+
+function exhaustedLinkedUsage(hold: LinkedHoldRecord): LinkedHoldUsageProjection {
+  return {
+    requests: hold.targetReservation.requests,
+    inputTokens: hold.targetReservation.inputTokens,
+    outputTokens: hold.targetReservation.outputTokens,
+    reasoningTokens: null,
+    cachedTokens: null,
+    providerTotalTokens: null,
+    costUsd: hold.targetReservation.costUsd,
+    costSource: "unknown",
+    pricingId: null,
+    artifactBytes: hold.targetReservation.artifactBytes,
   };
 }
 
