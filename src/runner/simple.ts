@@ -215,11 +215,24 @@ async function executeSupervisedRun(
     }
     if (adapter.isolationAttestation) {
       const inspection = adapter.isolationAttestation;
-      const attestation = await containedProbeExecutor(options, adapter, cwd, worker, supervisor)(
-        inspection.command,
-        { timeoutMs: inspection.timeoutMs, maxOutputBytes: inspection.maxOutputBytes },
-      );
-      const failure = isolationAttestationFailure(attestation, inspection.validate);
+      const limits = { timeoutMs: inspection.timeoutMs, maxOutputBytes: inspection.maxOutputBytes };
+      const attestation = await containedProbeExecutor(options, adapter, cwd, worker, supervisor)(inspection.command, limits);
+      let failure = isolationAttestationFailure(attestation, inspection.validate);
+      const fallback = inspection.vacuousTrustFallback;
+      if (failure && fallback && !isolationAttestationFailure(attestation, (value) => fallback.validateVacuousPrimary(value, cwd))) {
+        // The target project exposes no trust-gated control surface, so the
+        // backend's trust decision is vacuous there. Prove the trust gate
+        // itself on a worker-owned canary project that always contains a
+        // gated control file; a leaked grant or disabled gate fails closed.
+        try {
+          const canaryCwd = fallback.prepareCanaryCwd(worker);
+          const canary = await containedProbeExecutor(options, adapter, canaryCwd, worker, supervisor)(inspection.command, limits);
+          const canaryFailure = isolationAttestationFailure(canary, inspection.validate);
+          failure = canaryFailure ? `trust-gate canary attestation failed: ${canaryFailure}` : null;
+        } catch (error) {
+          failure = `trust-gate canary attestation could not run: ${messageOf(error)}`;
+        }
+      }
       if (failure) {
         return failedResult(
           options.backend,

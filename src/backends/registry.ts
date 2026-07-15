@@ -14,7 +14,9 @@ import {
   grokProjectControlPaths,
   installGrokIsolation,
   managedGrokExecutable,
+  prepareGrokTrustCanary,
   validateGrokIsolationInspection,
+  validateVacuouslyTrustedGrokInspection,
 } from "../runtime/grok-isolation";
 
 export type BackendDefinitionMetadata = Omit<BackendMetadata, "id"> & { id: string };
@@ -60,6 +62,17 @@ export type BackendDefinition = {
     timeoutMs: number;
     maxOutputBytes: number;
     validate: (value: unknown) => string | null;
+    /**
+     * Second phase for backends whose trust attestation is vacuous in a
+     * project without trust-gated control surfaces: when `validate` rejects
+     * the primary inspection but `validateVacuousPrimary` accepts it, the
+     * runner re-runs the same attestation inside `prepareCanaryCwd(worker)`
+     * and requires the strict `validate` to pass there.
+     */
+    vacuousTrustFallback?: {
+      validateVacuousPrimary: (value: unknown, projectRoot: string) => string | null;
+      prepareCanaryCwd: (worker: WorkerEnvironment) => string;
+    };
   };
   managedExecutable?: (homeDir?: string) => unknown | null;
   prepareEnvironment?: (
@@ -185,6 +198,10 @@ const builtInBackendDefinitions = {
       timeoutMs: 30_000,
       maxOutputBytes: 1_000_000,
       validate: validateGrokIsolationInspection,
+      vacuousTrustFallback: {
+        validateVacuousPrimary: validateVacuouslyTrustedGrokInspection,
+        prepareCanaryCwd: prepareGrokTrustCanary,
+      },
     },
     managedExecutable: managedGrokExecutable,
     prepareCommand: buildGrokCommand,

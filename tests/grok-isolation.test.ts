@@ -4,8 +4,16 @@ import { tmpdir } from "node:os";
 import { delimiter, join, relative } from "node:path";
 import { backendDefinitions } from "../src/backends/registry";
 import { maybeWrapWithSandbox, runHeadless } from "../src/runner/simple";
-import { grokProjectControlPaths, installGrokIsolation, managedGrokExecutable } from "../src/runtime/grok-isolation";
-import { createWorkerEnvironment } from "../src/runtime/worker-environment";
+import {
+  grokProjectControlPaths,
+  grokTrustGatedControlPaths,
+  installGrokIsolation,
+  managedGrokExecutable,
+  prepareGrokTrustCanary,
+  validateGrokIsolationInspection,
+  validateVacuouslyTrustedGrokInspection,
+} from "../src/runtime/grok-isolation";
+import { createWorkerEnvironment, type WorkerEnvironment } from "../src/runtime/worker-environment";
 
 const roots: string[] = [];
 const grokBinary = Bun.which("grok");
@@ -132,6 +140,80 @@ describe("Grok isolated startup", () => {
     expect(existsSync(lateSkill)).toBe(false);
   });
 
+  test("accepts a vacuously trusted inspection only for a project without trust-gated control paths", () => {
+    const project = fixture("headless-grok-vacuous-");
+    const inspection = vacuousGrokInspection();
+
+    expect(validateGrokIsolationInspection(inspection)).toBe("Grok inspect did not prove project trust is disabled.");
+    expect(validateVacuouslyTrustedGrokInspection(inspection, project)).toBeNull();
+    expect(validateVacuouslyTrustedGrokInspection({ ...inspection, projectTrusted: false }, project))
+      .toBe("Grok inspect did not report a vacuously trusted project.");
+    expect(validateVacuouslyTrustedGrokInspection({ ...inspection, hooks: [{}] }, project))
+      .toBe("Grok inspect did not prove hooks is empty.");
+
+    // Instruction files are masked by deny-read but never gate folder trust,
+    // so they keep the vacuous-trust report acceptable.
+    writeFileSync(join(project, "AGENTS.md"), "instructions\n");
+    expect(validateVacuouslyTrustedGrokInspection(inspection, project)).toBeNull();
+
+    // A trust-gated surface means Grok made (or leaked) a real decision.
+    writeFileSync(join(project, ".mcp.json"), "{}\n");
+    expect(validateVacuouslyTrustedGrokInspection(inspection, project))
+      .toBe("Grok reported a trusted project even though the project exposes trust-gated control paths.");
+  });
+
+  test("prepares a worker-owned trust canary that exposes exactly one gated control path", () => {
+    const base = fixture("headless-grok-canary-");
+    const worker = createWorkerEnvironment({ baseDir: base, sourceEnv: { PATH: process.env.PATH } });
+    try {
+      const canary = prepareGrokTrustCanary(worker);
+      expect(canary).toBe(join(worker.root, "grok-trust-canary"));
+      expect(prepareGrokTrustCanary(worker)).toBe(canary);
+      expect(statSync(join(canary, ".mcp.json")).mode & 0o777).toBe(0o600);
+      expect(grokTrustGatedControlPaths(canary)).toEqual([join(canary, ".mcp.json")]);
+      expect(grokTrustGatedControlPaths(fixture("headless-grok-no-controls-"))).toEqual([]);
+    } finally {
+      worker.cleanup();
+    }
+  });
+
+  realGrokInspectTest("attests a gated-config-free project through the trust-gate canary", async () => {
+    const root = fixture("headless-grok-vacuous-real-");
+    const project = join(root, "project");
+    const workerBase = join(root, "workers");
+    mkdirSync(project);
+    mkdirSync(workerBase);
+    const git = Bun.spawnSync(["git", "init", "-q"], { cwd: project, stdout: "pipe", stderr: "pipe" });
+    expect(git.exitCode, git.stderr.toString()).toBe(0);
+    const worker = createWorkerEnvironment({ baseDir: workerBase, sourceEnv: { PATH: process.env.PATH } });
+    try {
+      const installed = installGrokIsolation(worker);
+
+      // The runtime failure shape: a project without gated config reports a
+      // vacuous projectTrusted=true that the strict validator rejects.
+      const primary = await sandboxedGrokInspect(project, worker);
+      expect(primary.projectTrusted).toBe(true);
+      expect(validateGrokIsolationInspection(primary)).toBe("Grok inspect did not prove project trust is disabled.");
+      expect(validateVacuouslyTrustedGrokInspection(primary, project)).toBeNull();
+
+      // The canary forces a real trust decision, so the unchanged strict
+      // validator passes there and proves the gate is active and ungranted.
+      const canaryCwd = prepareGrokTrustCanary(worker);
+      const canary = await sandboxedGrokInspect(canaryCwd, worker);
+      expect(validateGrokIsolationInspection(canary)).toBeNull();
+
+      // Fail-closed: a leaked trust grant for the canary must be detected.
+      writeFileSync(
+        join(installed.grokHome, "trusted_folders.toml"),
+        `[folders."${canaryCwd}"]\ntrusted = true\ndecided_at = 1752500000\n`,
+      );
+      const granted = await sandboxedGrokInspect(canaryCwd, worker);
+      expect(validateGrokIsolationInspection(granted)).toBe("Grok inspect did not prove project trust is disabled.");
+    } finally {
+      worker.cleanup();
+    }
+  });
+
   realGrokInspectTest("real inspect sees no project instructions, skills, hooks, MCP, plugins, LSP, or startup config", async () => {
     const root = fixture("headless-grok-real-inspect-");
     const project = join(root, "project");
@@ -193,6 +275,47 @@ function fixture(prefix: string) {
   const path = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   roots.push(path);
   return path;
+}
+
+function vacuousGrokInspection() {
+  return {
+    projectTrusted: true,
+    projectInstructions: [],
+    hooks: [],
+    skills: [],
+    plugins: [],
+    mcpServers: [],
+    lspServers: [],
+    permissions: { sources: [], loaded: 0 },
+    agents: [{ source: { type: "builtin" } }],
+    externalCompat: { cells: [{ enabled: false, source: "env" }] },
+    configSources: { layers: [{ role: "user" }] },
+  };
+}
+
+async function sandboxedGrokInspect(cwd: string, worker: WorkerEnvironment) {
+  const wrapped = maybeWrapWithSandbox(
+    [grokBinary!, "inspect", "--json"],
+    { backend: "grok-build", prompt: "inspect", cwd, containment: "required", authMode: "broker" },
+    backendDefinitions["grok-build"],
+    cwd,
+    undefined,
+    worker,
+    [grokBinary!],
+  );
+  expect(wrapped.sandboxed, wrapped.reason).toBe(true);
+  try {
+    const child = Bun.spawn(wrapped.cmd, { cwd, env: worker.env, stdout: "pipe", stderr: "pipe" });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exitCode, stderr).toBe(0);
+    return JSON.parse(stdout) as Record<string, unknown> & GrokInspection;
+  } finally {
+    wrapped.cleanup();
+  }
 }
 
 function writeProjectFixture(project: string, markerRoot: string) {
