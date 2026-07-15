@@ -136,6 +136,15 @@ describe("cross-provider linked-hold persistence contracts", () => {
       },
       terminalSettlementDigest: "d".repeat(64),
       usageProjection: usageProjection(),
+      settlementDisposition: "settled",
+      settlementObservation: linkedObservation("a".repeat(64), {
+        requests: 1,
+        forwardedRequests: 1,
+        observedCostUsd: 0.2,
+        accountedCostUsd: 0.25,
+        accountedInputTokens: 400,
+        accountedOutputTokens: 80,
+      }),
       updatedAt: 1_500,
     });
     const state = BudgetStoreStateSchema.parse({
@@ -591,6 +600,9 @@ function linkedHold(overrides: Partial<LinkedHoldRecord> = {}): LinkedHoldRecord
     },
     terminalSettlementDigest: null,
     usageProjection: null,
+    settlementDisposition: null,
+    settlementObservation: null,
+    recoveryReason: null,
     ...overrides,
   };
 }

@@ -129,8 +129,8 @@ export const COMMAND_SPECS = [
   { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "ledger repair-tail --confirm [--cwd dir]   Admin-only partial-tail recovery." },
   {
     name: "budget",
-    valueFlags: ["--id", "--principal", "--session-id", "--workflow-id", "--provider", "--max-requests", "--max-input-tokens", "--max-output-tokens", "--max-cost-usd", "--max-artifact-bytes", "--max-concurrency", "--max-retries", "--expires-at", "--cwd", "--extension-config", "--extension-module"],
-    help: "budget <list|upsert> [--id id] [budget limits] [--cwd dir]",
+    valueFlags: ["--id", "--principal", "--session-id", "--workflow-id", "--provider", "--max-requests", "--max-input-tokens", "--max-output-tokens", "--max-cost-usd", "--max-artifact-bytes", "--max-concurrency", "--max-retries", "--expires-at", "--link-id", "--expected-digest", "--resolution", "--cwd", "--extension-config", "--extension-module"],
+    help: "budget <list|upsert|linked-hold inspect|linked-hold quarantine> [options] [--cwd dir]",
   },
 ] as const satisfies readonly CliCommandSpec[];
 

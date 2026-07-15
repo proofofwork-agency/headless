@@ -3,6 +3,7 @@ import {
   BackendIdSchema,
   IdentifierSchema,
   MAX_RUN_PROMPT_BYTES,
+  PrincipalIdSchema,
   TimestampSchema,
 } from "./common";
 
@@ -78,6 +79,40 @@ export const LinkedHoldUsageProjectionSchema = z.object({
   artifactBytes: count,
 }).strict();
 
+export const LinkedHoldSettlementObservationSchema = z.object({
+  leaseId: IdentifierSchema,
+  requests: count,
+  forwardedRequests: count,
+  observedCostUsd: z.number().nonnegative().finite(),
+  accountedCostUsd: z.number().nonnegative().finite(),
+  accountedInputTokens: count,
+  accountedOutputTokens: count,
+  activeRequests: count,
+  revoked: z.boolean(),
+  expiresAt: TimestampSchema,
+}).strict();
+
+export const LinkedHoldManualRecoveryMarkerSchema = z.object({
+  linkId: digest,
+  parentJobId: IdentifierSchema,
+  recordDigest: digest,
+  resolution: z.enum(["exhaust", "release"]),
+  actor: PrincipalIdSchema,
+  reason: z.string().min(1).max(2_048),
+  decidedAt: TimestampSchema,
+  affectedReservationIds: z.array(IdentifierSchema).max(2),
+  affectedBudgetIds: z.array(IdentifierSchema).max(512),
+  parentUnused: z.object({
+    requests: count,
+    inputTokens: nullableCount,
+    outputTokens: nullableCount,
+    costUsd: nullableCost,
+  }).strict(),
+  quarantineArtifact: z.string().min(1).max(512),
+  auditEventId: IdentifierSchema,
+  auditedAt: TimestampSchema.nullable(),
+}).strict();
+
 export const LinkedHoldRecordSchema = z.object({
   linkId: digest,
   parentJobId: IdentifierSchema,
@@ -111,6 +146,9 @@ export const LinkedHoldRecordSchema = z.object({
   brokerEvidence: LinkedHoldBrokerEvidenceSchema,
   terminalSettlementDigest: digest.nullable(),
   usageProjection: LinkedHoldUsageProjectionSchema.nullable(),
+  settlementDisposition: z.enum(["settled", "exhausted"]).nullable().default(null),
+  settlementObservation: LinkedHoldSettlementObservationSchema.nullable().default(null),
+  recoveryReason: z.string().min(1).max(4_096).nullable().default(null),
 }).strict().superRefine((record, context) => {
   if (record.parentProvider === record.targetProvider) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["targetProvider"], message: "Linked holds require different parent and target providers." });
@@ -139,8 +177,31 @@ export const LinkedHoldRecordSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["brokerEvidence"], message: "A leased linked hold requires complete token-free target evidence." });
   }
   const settlementStates = new Set(["settling", "settled", "exhausted"]);
-  if (settlementStates.has(record.state) && (record.terminalSettlementDigest === null || record.usageProjection === null)) {
+  if (settlementStates.has(record.state) && (
+    record.terminalSettlementDigest === null
+    || record.usageProjection === null
+    || record.settlementDisposition === null
+    || record.settlementObservation === null
+  )) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["terminalSettlementDigest"], message: "A settling linked hold requires immutable terminal usage evidence." });
+  }
+  if (!settlementStates.has(record.state) && record.state !== "recovery_required"
+    && (record.settlementDisposition !== null || record.settlementObservation !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["settlementDisposition"], message: "Only settling or settled linked holds may retain terminal decision evidence." });
+  }
+  if (record.state === "settled" && record.settlementDisposition !== "settled") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["settlementDisposition"], message: "A settled linked hold requires the settled disposition." });
+  }
+  if (record.state === "exhausted" && record.settlementDisposition !== "exhausted") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["settlementDisposition"], message: "An exhausted linked hold requires the exhausted disposition." });
+  }
+  if (record.settlementDisposition === "settled" && record.settlementObservation && (
+    !record.settlementObservation.revoked || record.settlementObservation.activeRequests !== 0
+  )) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["settlementObservation"], message: "A settled linked hold requires a revoked and drained target lease." });
+  }
+  if ((record.state === "recovery_required") !== (record.recoveryReason !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["recoveryReason"], message: "Only recovery-required linked holds must carry a bounded recovery reason." });
   }
   const terminalStates = new Set(["settled", "rolled_back", "exhausted"]);
   if (terminalStates.has(record.state) && record.terminalAt === null) {
@@ -160,6 +221,8 @@ export type LinkedHoldEnvelope = z.infer<typeof LinkedHoldEnvelopeSchema>;
 export type LinkedHoldBrokerEvidence = z.infer<typeof LinkedHoldBrokerEvidenceSchema>;
 export type LinkedHoldTargetQuotaScope = z.infer<typeof LinkedHoldTargetQuotaScopeSchema>;
 export type LinkedHoldUsageProjection = z.infer<typeof LinkedHoldUsageProjectionSchema>;
+export type LinkedHoldSettlementObservation = z.infer<typeof LinkedHoldSettlementObservationSchema>;
+export type LinkedHoldManualRecoveryMarker = z.infer<typeof LinkedHoldManualRecoveryMarkerSchema>;
 export type LinkedHoldRecord = z.infer<typeof LinkedHoldRecordSchema>;
 
 function requireUnique(values: string[], context: z.RefinementCtx, path: Array<string | number>, label: string) {

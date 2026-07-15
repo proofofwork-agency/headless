@@ -37,7 +37,11 @@ const PersistedDurableBrokerQuotaStateSchema = z.union([
 export class DurableBrokerQuotaStore {
   private state: z.infer<typeof DurableBrokerQuotaStateSchema>;
 
-  constructor(private readonly paths: ProjectStatePaths, private readonly now = Date.now) {
+  constructor(
+    private readonly paths: ProjectStatePaths,
+    private readonly now = Date.now,
+    private readonly options: { readOnly?: boolean } = {},
+  ) {
     const existing = readOwnerOnlyJson(paths.brokerQuotasPath, PersistedDurableBrokerQuotaStateSchema);
     if (existing && existing.projectId !== paths.projectId) throw new Error("Broker quota project identity mismatch.");
     this.state = existing?.version === 2 ? existing : DurableBrokerQuotaStateSchema.parse({
@@ -48,12 +52,14 @@ export class DurableBrokerQuotaStore {
       linkedOperations: [],
       updatedAt: existing?.updatedAt ?? this.now(),
     });
-    this.prune();
-    this.persist();
+    if (!options.readOnly) {
+      this.prune();
+      this.persist();
+    }
   }
 
   snapshot() {
-    this.prune();
+    if (!this.options.readOnly) this.prune();
     return this.state.quotas.map(({ expiresAt, updatedAt, ...quota }) => BrokerBudgetQuotaSchema.parse(quota));
   }
 
@@ -62,6 +68,7 @@ export class DurableBrokerQuotaStore {
   }
 
   update(value: BrokerBudgetQuota, expiresAt?: number) {
+    if (this.options.readOnly) throw new Error("Read-only broker quota store cannot be updated.");
     const quota = BrokerBudgetQuotaSchema.parse(value);
     const index = this.state.quotas.findIndex((candidate) => candidate.id === quota.id);
     const current = index < 0 ? null : this.state.quotas[index];
@@ -78,6 +85,7 @@ export class DurableBrokerQuotaStore {
   }
 
   updateLinkedOperation(value: BrokerLinkedOperation) {
+    if (this.options.readOnly) throw new Error("Read-only broker quota store cannot be updated.");
     const operation = BrokerLinkedOperationSchema.parse(value);
     const index = this.state.linkedOperations.findIndex((candidate) => candidate.operationId === operation.operationId);
     if (index < 0) {

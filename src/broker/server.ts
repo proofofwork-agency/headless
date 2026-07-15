@@ -450,6 +450,17 @@ export class ProviderBroker {
     return current?.kind === "target" ? BrokerLinkedTargetObservationSchema.parse(current.observation) : null;
   }
 
+  /** Token-free durable evidence used only by startup/offline linked recovery. */
+  linkedOperationSnapshot(linkId: string) {
+    const ids = linkedProviderOperationIds(digest.parse(linkId));
+    const parent = this.linkedOperations.get(ids.parentOperationId);
+    const target = this.linkedOperations.get(ids.targetOperationId);
+    return {
+      parent: parent ? BrokerLinkedOperationSchema.parse(parent) : null,
+      target: target ? BrokerLinkedOperationSchema.parse(target) : null,
+    };
+  }
+
   /** Revoke a target capability once; exact replays are no-ops. */
   revokeLinkedTarget(linkId: string) {
     const id = linkedOperationId(linkId, "target");
@@ -506,6 +517,37 @@ export class ProviderBroker {
       }
       throw error;
     }
+    return true;
+  }
+
+  /**
+   * Retire a durable parent carve after restart, when no bearer lease survives.
+   * This persists the once-only decision but deliberately cannot restore an
+   * in-memory capability that the crashed process destroyed.
+   */
+  recoverLinkedParentSettlement(linkId: string, value: z.input<typeof BrokerLinkedUnusedSchema>) {
+    const id = linkedOperationId(linkId, "parent");
+    const operation = this.linkedOperations.get(id);
+    if (!operation) return false;
+    if (operation.kind !== "parent") throw linkedConflict("Linked parent recovery found a target operation at the parent id.");
+    const unused = BrokerLinkedUnusedSchema.parse(value);
+    assertUnusedFits(operation.allocation, unused);
+    if (operation.phase === "settled") {
+      if (JSON.stringify(operation.unused) !== JSON.stringify(unused)) {
+        throw linkedConflict("Linked parent recovery conflicts with its recorded settlement.");
+      }
+      return false;
+    }
+    if (this.leases.has(operation.carve.parentLeaseId)) {
+      throw linkedConflict("Linked parent recovery cannot run while the original bearer lease is live.");
+    }
+    this.storeLinkedOperation(BrokerLinkedParentOperationSchema.parse({
+      ...operation,
+      phase: "settled",
+      carve: { ...operation.carve, settled: true },
+      unused,
+      updatedAt: Date.now(),
+    }));
     return true;
   }
 

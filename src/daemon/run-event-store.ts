@@ -151,6 +151,18 @@ export class RunEventStore {
     return this.appendTrusted(context, input);
   }
 
+  /** Append one deterministic protected audit record exactly once across restarts. */
+  appendIdempotent(
+    context: { jobId: string; sessionId?: string | null },
+    input: RunEventInput,
+    eventId: string,
+    timestamp: number,
+  ) {
+    IdentifierSchema.parse(eventId);
+    if (this.hasEventId(eventId)) return null;
+    return this.appendTrusted(context, input, { eventId, timestamp });
+  }
+
   reconcileTerminal(
     context: { jobId: string; sessionId?: string | null },
     result: RunResult,

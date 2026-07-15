@@ -552,6 +552,9 @@ export class JobAdmissionService {
     }
     this.options.broker.revokeLinkedTarget(initialHold.linkId);
     const observation = await this.drainLinkedTarget(initialHold.linkId);
+    if (!observation) {
+      throw new HeadlessError("CONFLICT", "Linked target settlement evidence is unavailable; startup recovery must fail closed.");
+    }
     const decision = linkedSettlementDecision(initialHold, child.result, observation);
     const begun = this.options.budgets.beginLinkedProviderSettlement(initialHold.linkId, decision);
     const finalized = this.options.budgets.finalizeLinkedProviderSettlement(
@@ -1534,13 +1537,13 @@ function linkedTargetQuotaEvidence(scope: BrokerLeaseScope) {
 function linkedSettlementDecision(
   hold: LinkedHoldRecord,
   result: RunResult,
-  observation: ReturnType<ProviderBroker["observeLinkedTarget"]>,
+  observation: NonNullable<ReturnType<ProviderBroker["observeLinkedTarget"]>>,
 ): {
   disposition: "settled" | "exhausted";
   usage: LinkedHoldUsageProjection;
-  observation: NonNullable<ReturnType<ProviderBroker["observeLinkedTarget"]>> | null;
+  observation: NonNullable<ReturnType<ProviderBroker["observeLinkedTarget"]>>;
 } {
-  if (!observation || !observation.revoked || observation.activeRequests !== 0) {
+  if (!observation.revoked || observation.activeRequests !== 0) {
     return { disposition: "exhausted", usage: exhaustedLinkedUsage(hold), observation };
   }
   if (result.status !== "succeeded") {

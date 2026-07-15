@@ -4,8 +4,11 @@ import { BudgetSchema, type Budget } from "../contracts/durable";
 import { BackendIdSchema, IdentifierSchema, MAX_RUN_PROMPT_BYTES, PrincipalIdSchema, ProjectIdSchema, TimestampSchema } from "../contracts/common";
 import {
   LinkedHoldEnvelopeSchema,
+  LinkedHoldManualRecoveryMarkerSchema,
   LinkedHoldRecordSchema,
+  LinkedHoldSettlementObservationSchema,
   LinkedHoldUsageProjectionSchema,
+  type LinkedHoldManualRecoveryMarker,
   type LinkedHoldRecord,
   type LinkedHoldUsageProjection,
 } from "../contracts/linked-hold";
@@ -53,7 +56,7 @@ const LegacyBudgetReservationSchema = ReservationRequestSchema.omit({ id: true }
   createdAt: TimestampSchema,
 }).strict();
 
-const BudgetReservationSchema = LegacyBudgetReservationSchema.extend({
+export const BudgetReservationSchema = LegacyBudgetReservationSchema.extend({
   parentReservationId: IdentifierSchema.nullable().default(null),
   delegationRequestId: z.string().uuid().nullable().default(null),
   budgetFraction: z.number().positive().max(0.5).nullable().default(null),
@@ -81,23 +84,10 @@ const CommitUsageSchema = z.object({
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const providerId = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/);
 
-const LinkedSettlementObservationSchema = z.object({
-  leaseId: IdentifierSchema,
-  requests: z.number().int().nonnegative().safe(),
-  forwardedRequests: z.number().int().nonnegative().safe(),
-  observedCostUsd: z.number().nonnegative().finite(),
-  accountedCostUsd: z.number().nonnegative().finite(),
-  accountedInputTokens: z.number().int().nonnegative().safe(),
-  accountedOutputTokens: z.number().int().nonnegative().safe(),
-  activeRequests: z.number().int().nonnegative().safe(),
-  revoked: z.boolean(),
-  expiresAt: TimestampSchema,
-}).strict();
-
 const BeginLinkedSettlementSchema = z.object({
   disposition: z.enum(["settled", "exhausted"]),
   usage: LinkedHoldUsageProjectionSchema,
-  observation: LinkedSettlementObservationSchema.nullable(),
+  observation: LinkedHoldSettlementObservationSchema,
 }).strict();
 
 const PrepareLinkedProviderHoldSchema = z.object({
@@ -152,6 +142,7 @@ export const BudgetStoreStateSchema = z.object({
   budgets: z.array(BudgetSchema),
   reservations: z.array(BudgetReservationSchema),
   linkedHolds: z.array(LinkedHoldRecordSchema).default([]),
+  manualRecoveries: z.array(LinkedHoldManualRecoveryMarkerSchema).max(10_000).default([]),
   updatedAt: TimestampSchema,
 }).strict();
 
@@ -217,6 +208,7 @@ export class BudgetStore {
       budgets: [],
       reservations: [],
       linkedHolds: [],
+      manualRecoveries: [],
       updatedAt: this.now(),
     });
     this.persist();
@@ -274,6 +266,9 @@ export class BudgetStore {
       brokerEvidence: emptyBrokerEvidence(),
       terminalSettlementDigest: null,
       usageProjection: null,
+      settlementDisposition: null,
+      settlementObservation: null,
+      recoveryReason: null,
     });
     if (this.state.linkedHolds.some((hold) => hold.childReservationId === candidate.childReservationId)) {
       throw new HeadlessError("CONFLICT", "Linked child reservation id is already assigned to another delegation intent.");
@@ -424,7 +419,7 @@ export class BudgetStore {
   beginLinkedProviderSettlement(linkId: string, value: {
     disposition: "settled" | "exhausted";
     usage: LinkedHoldUsageProjection;
-    observation: z.infer<typeof LinkedSettlementObservationSchema> | null;
+    observation: z.infer<typeof LinkedHoldSettlementObservationSchema>;
   }) {
     const id = digest.parse(linkId);
     const input = BeginLinkedSettlementSchema.parse(value);
@@ -465,6 +460,8 @@ export class BudgetStore {
     }
     hold.usageProjection = input.usage;
     hold.terminalSettlementDigest = settlementDigest;
+    hold.settlementDisposition = input.disposition;
+    hold.settlementObservation = input.observation;
     hold.state = "settling";
     hold.transitionNumber += 1;
     hold.updatedAt = this.now();
@@ -483,12 +480,30 @@ export class BudgetStore {
     const current = this.state.linkedHolds.find((candidate) => candidate.linkId === id);
     if (!current) throw new Error(`Unknown linked provider hold: ${id}`);
     if (current.state === "settled" || current.state === "exhausted") {
-      if (current.state !== disposition || current.terminalSettlementDigest !== expectedDigest || !current.usageProjection) {
+      if (current.state !== disposition
+        || current.settlementDisposition !== disposition
+        || current.terminalSettlementDigest !== expectedDigest
+        || !current.usageProjection
+        || !current.settlementObservation
+        || linkedSettlementDigest(id, {
+          disposition,
+          usage: current.usageProjection,
+          observation: current.settlementObservation,
+        }) !== expectedDigest) {
         throw new HeadlessError("CONFLICT", "Linked provider terminal replay conflicts with the durable settlement.");
       }
       return linkedSettlementResult(this.state, current, true);
     }
-    if (current.state !== "settling" || current.terminalSettlementDigest !== expectedDigest || !current.usageProjection) {
+    if (current.state !== "settling"
+      || current.settlementDisposition !== disposition
+      || current.terminalSettlementDigest !== expectedDigest
+      || !current.usageProjection
+      || !current.settlementObservation
+      || linkedSettlementDigest(id, {
+        disposition,
+        usage: current.usageProjection,
+        observation: current.settlementObservation,
+      }) !== expectedDigest) {
       throw new HeadlessError("CONFLICT", "Linked provider hold is not settling under the supplied terminal digest.");
     }
 
@@ -516,6 +531,188 @@ export class BudgetStore {
     next.updatedAt = hold.updatedAt;
     this.persistReplacement(next);
     return linkedSettlementResult(this.state, hold, false);
+  }
+
+  linkedHoldRecordDigest(linkId: string) {
+    const hold = this.getLinkedProviderHold(digest.parse(linkId));
+    if (!hold) throw new HeadlessError("INVALID_REQUEST", "Unknown linked provider hold.");
+    return createHash("sha256").update(JSON.stringify(hold)).digest("hex");
+  }
+
+  manualRecoveryMarkers() {
+    return this.state.manualRecoveries.map((marker) => LinkedHoldManualRecoveryMarkerSchema.parse(marker));
+  }
+
+  markManualRecoveryAudited(linkId: string, eventId: string, auditedAt = this.now()) {
+    const next = BudgetStoreStateSchema.parse(this.state);
+    const marker = next.manualRecoveries.find((candidate) => candidate.linkId === linkId);
+    if (!marker) throw new HeadlessError("INVALID_REQUEST", "Unknown linked-hold manual recovery marker.");
+    if (marker.auditEventId !== eventId) throw new HeadlessError("CONFLICT", "Manual recovery audit event identity changed.");
+    if (marker.auditedAt !== null) return LinkedHoldManualRecoveryMarkerSchema.parse(marker);
+    marker.auditedAt = auditedAt;
+    next.updatedAt = auditedAt;
+    this.persistReplacement(next);
+    return LinkedHoldManualRecoveryMarkerSchema.parse(marker);
+  }
+
+  markLinkedRecoveryRequired(linkId: string, reason: string) {
+    const safeReason = z.string().min(1).max(4_096).parse(reason);
+    const next = BudgetStoreStateSchema.parse(this.state);
+    const hold = next.linkedHolds.find((candidate) => candidate.linkId === digest.parse(linkId));
+    if (!hold) throw new HeadlessError("INVALID_REQUEST", "Unknown linked provider hold.");
+    if (hold.state === "recovery_required") {
+      if (hold.recoveryReason !== safeReason) throw new HeadlessError("CONFLICT", "Linked hold already requires recovery for a different reason.");
+      return LinkedHoldRecordSchema.parse(hold);
+    }
+    hold.state = "recovery_required";
+    hold.recoveryReason = safeReason;
+    hold.transitionNumber += 1;
+    hold.updatedAt = this.now();
+    next.updatedAt = hold.updatedAt;
+    this.persistReplacement(next);
+    return LinkedHoldRecordSchema.parse(hold);
+  }
+
+  /** Atomically restore a provably-unused linked slice and retire its child reservation. */
+  rollbackLinkedProviderHold(linkId: string) {
+    const id = digest.parse(linkId);
+    const next = BudgetStoreStateSchema.parse(this.state);
+    const hold = next.linkedHolds.find((candidate) => candidate.linkId === id);
+    if (!hold) throw new HeadlessError("INVALID_REQUEST", "Unknown linked provider hold.");
+    if (hold.state === "rolled_back") return { hold: LinkedHoldRecordSchema.parse(hold), existing: true };
+    if (["settled", "exhausted"].includes(hold.state)) throw new HeadlessError("CONFLICT", "A terminal charged linked hold cannot be rolled back.");
+
+    const childIndex = next.reservations.findIndex((candidate) => candidate.id === hold.childReservationId);
+    if (hold.state === "intent") {
+      if (childIndex >= 0) throw new HeadlessError("CONFLICT", "An intent unexpectedly owns a child reservation.");
+    } else {
+      if (childIndex < 0) throw new HeadlessError("CONFLICT", "Linked rollback requires its exact child reservation.");
+      const child = next.reservations[childIndex]!;
+      assertLinkedChildReservation(hold, child);
+      const parent = next.reservations.find((candidate) => candidate.id === hold.parentReservationId);
+      if (!parent || parent.parentReservationId !== null || parent.provider !== hold.parentProvider) {
+        throw new HeadlessError("CONFLICT", "Linked rollback cannot isolate the original parent reservation.");
+      }
+      addEnvelope(parent.envelope, hold.parentAllocation);
+      next.reservations.splice(childIndex, 1);
+    }
+    hold.state = "rolled_back";
+    hold.recoveryReason = null;
+    hold.transitionNumber += 1;
+    hold.updatedAt = this.now();
+    hold.terminalAt = hold.updatedAt;
+    next.updatedAt = hold.updatedAt;
+    this.persistReplacement(next);
+    return { hold: LinkedHoldRecordSchema.parse(hold), existing: false };
+  }
+
+  /** Atomically charge the complete linked target slice after crash-unknown egress. */
+  exhaustLinkedProviderHold(linkId: string, observation: z.infer<typeof LinkedHoldSettlementObservationSchema>) {
+    const id = digest.parse(linkId);
+    const exactObservation = LinkedHoldSettlementObservationSchema.parse(observation);
+    const current = this.getLinkedProviderHold(id);
+    if (!current) throw new HeadlessError("INVALID_REQUEST", "Unknown linked provider hold.");
+    if (current.state === "exhausted") return { hold: current, existing: true };
+    if (current.state !== "leased") throw new HeadlessError("CONFLICT", "Only a leased linked hold can be crash-exhausted.");
+    const usage = fullLinkedUsage(current);
+    const settlementDigest = linkedSettlementDigest(id, { disposition: "exhausted", usage, observation: exactObservation });
+    const next = BudgetStoreStateSchema.parse(this.state);
+    const hold = next.linkedHolds.find((candidate) => candidate.linkId === id)!;
+    const childIndex = next.reservations.findIndex((candidate) => candidate.id === hold.childReservationId);
+    if (childIndex < 0) throw new HeadlessError("CONFLICT", "Linked exhaustion requires its exact child reservation.");
+    const child = next.reservations[childIndex]!;
+    assertLinkedChildReservation(hold, child);
+    next.reservations.splice(childIndex, 1);
+    chargeLinkedBudgets(next.budgets, child, usage, this.now());
+    hold.brokerEvidence.targetRequests = exactObservation.requests;
+    hold.brokerEvidence.targetForwardedRequests = exactObservation.forwardedRequests;
+    hold.brokerEvidence.targetInputTokens = exactObservation.accountedInputTokens;
+    hold.brokerEvidence.targetOutputTokens = exactObservation.accountedOutputTokens;
+    hold.brokerEvidence.targetCostUsd = Math.max(exactObservation.observedCostUsd, exactObservation.accountedCostUsd);
+    hold.brokerEvidence.targetActiveRequests = exactObservation.activeRequests;
+    hold.brokerEvidence.targetRevoked = exactObservation.revoked;
+    hold.brokerEvidence.targetExpiresAt = exactObservation.expiresAt;
+    hold.usageProjection = usage;
+    hold.terminalSettlementDigest = settlementDigest;
+    hold.settlementDisposition = "exhausted";
+    hold.settlementObservation = exactObservation;
+    hold.recoveryReason = null;
+    hold.state = "exhausted";
+    hold.transitionNumber += 1;
+    hold.updatedAt = this.now();
+    hold.terminalAt = hold.updatedAt;
+    next.updatedAt = hold.updatedAt;
+    this.persistReplacement(next);
+    return { hold: LinkedHoldRecordSchema.parse(hold), existing: false };
+  }
+
+  /** Single-link offline operator escape hatch. The caller must own the project socket lock. */
+  quarantineLinkedProviderHold(input: {
+    linkId: string;
+    expectedDigest: string;
+    resolution: "exhaust" | "release";
+    actor: string;
+    reason: string;
+    quarantineArtifact: string;
+    auditEventId: string;
+    zeroEgress: boolean;
+  }) {
+    const linkId = digest.parse(input.linkId);
+    const expectedDigest = digest.parse(input.expectedDigest);
+    const existingMarker = this.state.manualRecoveries.find((candidate) => candidate.linkId === linkId);
+    if (existingMarker) {
+      if (existingMarker.recordDigest !== expectedDigest || existingMarker.resolution !== input.resolution) {
+        throw new HeadlessError("CONFLICT", "Manual linked-hold recovery conflicts with the recorded decision.");
+      }
+      return { marker: LinkedHoldManualRecoveryMarkerSchema.parse(existingMarker), existing: true };
+    }
+    const current = this.getLinkedProviderHold(linkId);
+    if (!current) throw new HeadlessError("INVALID_REQUEST", "Unknown linked provider hold.");
+    if (this.linkedHoldRecordDigest(linkId) !== expectedDigest) throw new HeadlessError("CONFLICT", "Linked hold changed after inspection.");
+    if (current.state !== "recovery_required") throw new HeadlessError("CONFLICT", "Only a recovery-required linked hold may be quarantined.");
+
+    const next = BudgetStoreStateSchema.parse(this.state);
+    const holdIndex = next.linkedHolds.findIndex((candidate) => candidate.linkId === linkId);
+    const hold = next.linkedHolds[holdIndex]!;
+    const childIndex = next.reservations.findIndex((candidate) => candidate.id === hold.childReservationId);
+    if (childIndex < 0) throw new HeadlessError("CONFLICT", "The quarantined link cannot be isolated from its child reservation.");
+    const child = next.reservations[childIndex]!;
+    assertLinkedChildReservation(hold, child);
+
+    const parentUnused = input.resolution === "release"
+      ? brokerUnusedFromEnvelope(hold.parentAllocation)
+      : zeroBrokerUnused(hold.parentAllocation);
+    if (input.resolution === "release") {
+      if (!input.zeroEgress) throw new HeadlessError("CONFLICT", "Manual release requires exact zero-egress evidence.");
+      const parent = next.reservations.find((candidate) => candidate.id === hold.parentReservationId);
+      if (!parent || parent.parentReservationId !== null || parent.provider !== hold.parentProvider) {
+        throw new HeadlessError("CONFLICT", "Manual release cannot isolate the original parent reservation.");
+      }
+      addEnvelope(parent.envelope, hold.parentAllocation);
+    } else {
+      chargeLinkedBudgets(next.budgets, child, fullLinkedUsage(hold), this.now());
+    }
+    next.reservations.splice(childIndex, 1);
+    next.linkedHolds.splice(holdIndex, 1);
+    const marker = LinkedHoldManualRecoveryMarkerSchema.parse({
+      linkId,
+      parentJobId: hold.parentJobId,
+      recordDigest: expectedDigest,
+      resolution: input.resolution,
+      actor: input.actor,
+      reason: input.reason,
+      decidedAt: this.now(),
+      affectedReservationIds: [hold.parentReservationId, hold.childReservationId],
+      affectedBudgetIds: [...new Set([...hold.parentBudgetIds, ...hold.targetBudgetIds])],
+      parentUnused,
+      quarantineArtifact: input.quarantineArtifact,
+      auditEventId: input.auditEventId,
+      auditedAt: null,
+    });
+    next.manualRecoveries.push(marker);
+    next.updatedAt = marker.decidedAt;
+    this.persistReplacement(next);
+    return { marker, existing: false };
   }
 
   upsertBudget(value: Budget) {
@@ -1221,6 +1418,7 @@ function migrateV3(state: z.infer<typeof BudgetStoreStateV3Schema>): BudgetStore
     ...state,
     version: 4,
     linkedHolds: [],
+    manualRecoveries: [],
   });
 }
 
@@ -1311,6 +1509,50 @@ function linkedSettlementDigest(
     usage: value.usage,
     observation: value.observation,
   })).digest("hex");
+}
+
+function assertLinkedChildReservation(hold: LinkedHoldRecord, child: BudgetReservation) {
+  if (child.id !== hold.childReservationId
+    || child.parentReservationId !== hold.parentReservationId
+    || child.delegationRequestId !== hold.requestId
+    || child.provider !== hold.targetProvider
+    || JSON.stringify(child.budgetIds) !== JSON.stringify(hold.targetBudgetIds)
+    || JSON.stringify(child.envelope) !== JSON.stringify(hold.targetReservation)) {
+    throw new HeadlessError("CONFLICT", "Linked child reservation no longer matches its durable hold.");
+  }
+}
+
+function fullLinkedUsage(hold: Pick<LinkedHoldRecord, "targetReservation">): LinkedHoldUsageProjection {
+  return LinkedHoldUsageProjectionSchema.parse({
+    requests: hold.targetReservation.requests,
+    inputTokens: hold.targetReservation.inputTokens,
+    outputTokens: hold.targetReservation.outputTokens,
+    reasoningTokens: null,
+    cachedTokens: null,
+    providerTotalTokens: null,
+    costUsd: hold.targetReservation.costUsd,
+    costSource: "unknown",
+    pricingId: null,
+    artifactBytes: hold.targetReservation.artifactBytes,
+  });
+}
+
+function brokerUnusedFromEnvelope(envelope: LinkedHoldRecord["parentAllocation"]) {
+  return {
+    requests: envelope.requests,
+    inputTokens: envelope.inputTokens,
+    outputTokens: envelope.outputTokens,
+    costUsd: envelope.costUsd,
+  };
+}
+
+function zeroBrokerUnused(envelope: LinkedHoldRecord["parentAllocation"]) {
+  return {
+    requests: 0,
+    inputTokens: envelope.inputTokens === null ? null : 0,
+    outputTokens: envelope.outputTokens === null ? null : 0,
+    costUsd: envelope.costUsd === null ? null : 0,
+  };
 }
 
 function linkedCommitUsage(usage: LinkedHoldUsageProjection): z.infer<typeof CommitUsageSchema> {

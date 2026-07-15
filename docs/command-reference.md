@@ -31,4 +31,4 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | `skill` | Experimental | skills | `experimental skill | skills <list|inspect|import|enable|use|revoke> [options]` |
 | `loop` | Experimental | — | `experimental loop <start|list|status|pause|resume|cancel> --confirm [finite policy options]` |
 | `ledger` | Experimental | — | `experimental ledger repair-tail --confirm [--cwd dir]   Admin-only partial-tail recovery.` |
-| `budget` | Experimental | — | `experimental budget <list|upsert> [--id id] [budget limits] [--cwd dir]` |
+| `budget` | Experimental | — | `experimental budget <list|upsert|linked-hold inspect|linked-hold quarantine> [options] [--cwd dir]` |

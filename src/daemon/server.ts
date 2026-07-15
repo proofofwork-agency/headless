@@ -78,6 +78,7 @@ import { optionalString, optionalTimeout, stringArray, stringParam } from "./rou
 import { createCandidateIntegrationService } from "./candidate-service";
 import { RunExecutionService } from "./run-execution-service";
 import { DurableBrokerQuotaStore } from "../runtime/broker-quota-store";
+import { recoverLinkedProviderHolds } from "./linked-hold-recovery";
 import {
   loadDaemonExtensions,
   resolveDaemonExtensionConfig,
@@ -110,7 +111,7 @@ export class HeadlessDaemon {
   private readonly configuredToken?: string;
   private readonly stateOptions?: ProjectStateOptions;
   private readonly waiters = new Map<string, Array<(job: Job) => void>>();
-  private readonly broker: ProviderBroker;
+  private broker!: ProviderBroker;
   private sessions!: PersistentSessionStore;
   private nativeSessions!: NativeSessionManager;
   private trust!: ProjectTrustStore;
@@ -159,14 +160,6 @@ export class HeadlessDaemon {
     this.principal = (options.principal?.trim() || localPrincipal()).slice(0, 128);
     this.configuredToken = options.token;
     this.stateOptions = options.state;
-    const brokerQuotas = new DurableBrokerQuotaStore(this.state);
-    this.broker = new ProviderBroker({
-      unixSocketPath: join(this.state.daemonRuntimeDir, `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`),
-      initialBudgetQuotas: brokerQuotas.snapshot(),
-      persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
-      initialLinkedOperations: brokerQuotas.linkedSnapshot(),
-      persistLinkedOperation: (operation) => brokerQuotas.updateLinkedOperation(operation),
-    });
     this.coordinator = options.coordinator ?? this.principal;
     this.writeGateChecks = options.writeGateChecks ?? DEFAULT_GATES;
     this.jobAdmissionLimits = { maxConcurrency: options.maxConcurrency, maxQueued: options.maxQueued };
@@ -208,6 +201,8 @@ export class HeadlessDaemon {
       chmodSync(this.state.socketPath, 0o600);
       this.loadedExtensions = await loadDaemonExtensions(this.extensionConfig);
       this.initializeOwnedState();
+      recoverLinkedProviderHolds({ budgets: this.budgets, broker: this.broker, jobs: this.jobs });
+      this.reconcileManualLinkedRecoveries();
       this.broker.start();
       // The socket elects the local daemon; durable worktree leases additionally
       // fail closed on a live or foreign-host owner before recovery/admission.
@@ -234,7 +229,7 @@ export class HeadlessDaemon {
       await cleanupWithDiagnostic("daemon.start.run-tools-revoke", () => this.runTools?.revokeAll());
       await cleanupWithDiagnostic("daemon.start.goal-runtime-dispose", () => this.goalRuntime?.dispose());
       await cleanupWithDiagnostic("daemon.start.job-admission-dispose", () => this.jobAdmission?.dispose());
-      await cleanupWithDiagnostic("daemon.start.broker-stop", () => this.broker.stop());
+      await cleanupWithDiagnostic("daemon.start.broker-stop", () => this.broker?.stop());
       await cleanupWithDiagnostic("daemon.start.message-queue-close", () => this.messages?.close());
       this.ownedStateInitialized = false;
       throw error;
@@ -280,7 +275,7 @@ export class HeadlessDaemon {
       this.sockets.clear();
       rmSync(this.state.socketPath, { force: true });
     }
-    this.broker.stop();
+    this.broker?.stop();
     if (this.ownedStateInitialized) {
       this.messages.close();
       this.writeMetadata(false);
@@ -733,6 +728,14 @@ export class HeadlessDaemon {
   private initializeOwnedState() {
     this.token = this.configuredToken ?? loadOrCreateToken(this.state.tokenPath);
     migrateSingleLeadState(this.state);
+    const brokerQuotas = new DurableBrokerQuotaStore(this.state);
+    this.broker = new ProviderBroker({
+      unixSocketPath: join(this.state.daemonRuntimeDir, `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`),
+      initialBudgetQuotas: brokerQuotas.snapshot(),
+      persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
+      initialLinkedOperations: brokerQuotas.linkedSnapshot(),
+      persistLinkedOperation: (operation) => brokerQuotas.updateLinkedOperation(operation),
+    });
     this.jobs = new JobStore(this.state.jobsDir);
     this.tasks = new TaskStore(this.state.tasksDir, { recoverOnOpen: false });
     this.runEvents = new RunEventStore(this.state.runEventsPath, { compactOnOpen: false });
@@ -1000,6 +1003,33 @@ export class HeadlessDaemon {
     });
     this.initializeRouteHandlers();
     this.ownedStateInitialized = true;
+  }
+
+  private reconcileManualLinkedRecoveries() {
+    for (const marker of this.budgets.manualRecoveryMarkers()) {
+      const operations = this.broker.linkedOperationSnapshot(marker.linkId);
+      if (operations.target?.kind === "target" && operations.target.phase !== "prepared") {
+        this.broker.revokeLinkedTarget(marker.linkId);
+      }
+      if (operations.parent?.kind === "parent") {
+        this.broker.recoverLinkedParentSettlement(marker.linkId, marker.parentUnused);
+      }
+      this.runEvents.appendIdempotent({ jobId: marker.parentJobId }, {
+        kind: "policy",
+        decision: "allowed",
+        rule: "linked-hold-manual-recovery",
+        reason: JSON.stringify({
+          linkId: marker.linkId,
+          recordDigest: marker.recordDigest,
+          actor: marker.actor,
+          resolution: marker.resolution,
+          affectedReservationIds: marker.affectedReservationIds,
+          affectedBudgetIds: marker.affectedBudgetIds,
+          quotaOutcome: marker.resolution === "exhaust" ? "exhausted" : "released",
+        }),
+      }, marker.auditEventId, marker.decidedAt);
+      this.budgets.markManualRecoveryAudited(marker.linkId, marker.auditEventId);
+    }
   }
 
   private initializeRouteHandlers() {
