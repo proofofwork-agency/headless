@@ -10,6 +10,7 @@ import {
   LedgerV2,
   LedgerV2IntegrityError,
   repairLedgerPartialTail,
+  verifyLedgerChain,
 } from "../src/runtime/ledger-v2";
 import { getReadContext, getTaskState } from "../src/runtime/ledger-api";
 import { appendEvent, getOrCreateSession } from "../src/runtime/session";
@@ -203,6 +204,71 @@ describe("ledger v2", () => {
     });
     expect(verifierOnly.readAll()).toHaveLength(3);
     expect(() => verifierOnly.append("downgrade", { value: 4 })).toThrow(/Refusing to append an unsigned SHA record/i);
+  });
+
+  test("returns the first broken sequence for byte flips, gaps, and reordered records", () => {
+    const { ledger, ledgerPath, projectId } = fixture();
+    ledger.append("one", { value: 1 });
+    ledger.append("two", { value: 2 });
+    ledger.append("three", { value: 3 });
+    const lines = readFileSync(ledgerPath, "utf8").trimEnd().split("\n");
+    const changed = JSON.parse(lines[1]!) as { payload: { value: number } };
+    changed.payload.value = 200;
+    writeFileSync(ledgerPath, `${lines[0]}\n${JSON.stringify(changed)}\n${lines[2]}\n`, { mode: 0o600 });
+
+    expect(verifyLedgerChain({ ledgerPath, projectId })).toMatchObject({
+      ok: false,
+      recordsChecked: 1,
+      firstBreakAt: { sequence: 2, reason: expect.stringContaining("Hash mismatch") },
+    });
+
+    writeFileSync(ledgerPath, `${lines[0]}\n${lines[2]}\n`, { mode: 0o600 });
+    expect(verifyLedgerChain({ ledgerPath, projectId })).toMatchObject({
+      ok: false,
+      recordsChecked: 1,
+      firstBreakAt: { sequence: 2, reason: expect.stringContaining("Expected sequence 2") },
+    });
+
+    writeFileSync(ledgerPath, `${lines[1]}\n${lines[0]}\n`, { mode: 0o600 });
+    expect(verifyLedgerChain({ ledgerPath, projectId })).toMatchObject({
+      ok: false,
+      recordsChecked: 0,
+      firstBreakAt: { sequence: 1, reason: expect.stringContaining("Expected sequence 1") },
+    });
+  });
+
+  test("verifies mixed HMAC key rotations and reports every observed key id", () => {
+    const { ledger, ledgerPath, projectId, root } = fixture();
+    const firstKey = "first-ledger-key-material-0001";
+    const secondKey = "second-ledger-key-material-0002";
+    ledger.append("sha", { value: 1 });
+    new LedgerV2({
+      ledgerPath,
+      readModelPath: join(root, "first.json"),
+      projectId,
+      principal: "test-principal",
+      hmacKeyring: { first: firstKey },
+      activeHmacKeyId: "first",
+    }).append("first", { value: 2 });
+    new LedgerV2({
+      ledgerPath,
+      readModelPath: join(root, "second.json"),
+      projectId,
+      principal: "test-principal",
+      hmacKeyring: { first: firstKey, second: secondKey },
+      activeHmacKeyId: "second",
+    }).append("second", { value: 3 });
+
+    expect(verifyLedgerChain({
+      ledgerPath,
+      projectId,
+      hmacKeyring: { first: firstKey, second: secondKey },
+    })).toEqual({
+      ok: true,
+      recordsChecked: 3,
+      head: { sequence: 3, hash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      integrity: { algorithm: "hmac-sha256", keyIds: ["first", "second"] },
+    });
   });
 
   test("backs up and repairs only a verified partial tail, then records recovery", () => {

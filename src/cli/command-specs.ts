@@ -126,7 +126,8 @@ export const COMMAND_SPECS = [
   { name: "coop-proof", aliases: ["autonomy-coop-proof"], valueFlags: ["--cwd", "--extension-config", "--extension-module"], internal: true },
   { name: "skill", aliases: ["skills"], valueFlags: ["--source", "--backend", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"], help: "skill | skills <list|inspect|import|enable|use|revoke> [options]" },
   { name: "loop", valueFlags: ["--loop-id", "--file", "--mode", "--deadline-ms", "--max-iterations", "--per-iteration-cost-usd", "--total-cost-usd", "--cwd", "--extension-config", "--extension-module"], help: "loop <start|list|status|pause|resume|cancel> --confirm [finite policy options]" },
-  { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "ledger repair-tail --confirm [--cwd dir]   Admin-only partial-tail recovery." },
+  { name: "verify", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "verify [--evidence] [--json] [--cwd dir]   Verify the tamper-evident ledger and optional evidence files." },
+  { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "ledger <verify [--evidence] [--json] | repair-tail --confirm> [--cwd dir]" },
   {
     name: "budget",
     valueFlags: ["--id", "--principal", "--session-id", "--workflow-id", "--provider", "--max-requests", "--max-input-tokens", "--max-output-tokens", "--max-cost-usd", "--max-artifact-bytes", "--max-concurrency", "--max-retries", "--expires-at", "--link-id", "--expected-digest", "--resolution", "--cwd", "--extension-config", "--extension-module"],
@@ -166,7 +167,7 @@ export function parseCliInvocation(args: string[]): CliInvocation {
     : { kind: "unknown", name };
 }
 
-export const STABLE_COMMAND_NAMES = new Set(["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp", "tui"]);
+export const STABLE_COMMAND_NAMES = new Set(["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp", "tui", "verify"]);
 
 export function renderHelp(includeExperimental = false) {
   return [

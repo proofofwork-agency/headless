@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   evaluateNativeSmokeGate,
   evaluateNativeWriteSmokeGate,
@@ -8,6 +11,7 @@ import {
   nativeSmokeEvidenceValid,
   nativeWriteSmokeContainmentValid,
   pendingNativeWriteCoderApproval,
+  writeReleaseEvidenceFile,
 } from "../scripts/native-smoke-evidence";
 
 function smokeResult(backend: string, status: string, acceptedLimitation = false, code: string | null = null) {
@@ -15,6 +19,32 @@ function smokeResult(backend: string, status: string, acceptedLimitation = false
 }
 
 describe("native subscription smoke harness", () => {
+  test("writes all five bounded provenance fields into fresh evidence JSON", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-evidence-provenance-"));
+    try {
+      const path = join(root, "evidence.json");
+      const written = writeReleaseEvidenceFile({
+        path,
+        evidence: { version: 1, releaseGatePassed: true },
+        provenance: {
+          generatedAt: "2026-07-16T12:00:00.000Z",
+          commit: "b".repeat(40),
+          platform: "test-arm64",
+          headlessVersion: "0.2.0-beta.1",
+          backendVersions: { claude: "2.1.210" },
+        },
+      });
+      const document = JSON.parse(readFileSync(path, "utf8"));
+      expect(Object.keys(document.provenance).sort()).toEqual([
+        "backendVersions", "commit", "generatedAt", "headlessVersion", "platform",
+      ]);
+      expect(document.provenance).toEqual(written.document.provenance);
+      expect(written.sha256).toMatch(/^[a-f0-9]{64}$/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("accepts only canonical native-direct containment evidence", () => {
     const native = { driverKind: "opencode-session", authProfileFingerprint: "fingerprint" };
     const containment = {

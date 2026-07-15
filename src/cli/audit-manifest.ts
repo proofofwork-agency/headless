@@ -25,6 +25,7 @@ const subcommands: Partial<Record<CliCommandName, readonly string[]>> = {
   mcp: ["serve", "install codex", "install grok", "install claude", "install opencode", "remove codex", "remove grok", "remove claude", "remove opencode", "status codex", "status grok", "status claude", "status opencode"],
   skill: ["list", "inspect", "import", "enable", "use", "revoke"],
   loop: ["start", "list", "status", "pause", "resume", "cancel"],
+  ledger: ["verify", "repair-tail"],
   budget: ["list", "upsert", "linked-hold inspect", "linked-hold quarantine"],
 };
 
@@ -64,6 +65,7 @@ function commandRisk(command: CliCommandName): CliAuditCase["risk"] {
 function subcommandRisk(command: CliCommandName, subcommand: string): CliAuditCase["risk"] {
   if (command === "mcp") return /^(install|remove)(?: |$)/.test(subcommand) ? "destructive" : "safe";
   if (command === "budget") return subcommand === "upsert" || subcommand === "linked-hold quarantine" ? "destructive" : "safe";
+  if (command === "ledger") return subcommand === "repair-tail" ? "destructive" : "safe";
   if (command === "collaboration" && (subcommand === "ack" || subcommand === "acknowledge")) return "destructive";
   if (command === "approval" && subcommand === "resolve") return "destructive";
   if (command === "candidate" && (subcommand === "integrate" || subcommand === "reject")) return "destructive";

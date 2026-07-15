@@ -243,6 +243,7 @@ Default help exposes only the Beta 1 kernel commands:
 - `init [--lead <host>]`
 - `mcp install|remove|status|serve`
 - `tui`
+- `verify [--evidence]`
 
 Other commands require `headless experimental`. Their contracts may change
 before the corresponding gate. The [generated command reference](./docs/command-reference.md)
@@ -251,6 +252,9 @@ is checked against the registry.
 ## Verification
 
 ```bash
+headless verify --cwd "$PROJECT"
+headless verify --evidence --cwd "$PROJECT"
+
 bun run check
 bun run build
 bun run smoke:pack
@@ -260,6 +264,11 @@ bun install --frozen-lockfile
 bun run typecheck
 bun run build
 ```
+
+`headless verify` checks every ledger sequence, previous hash, project binding,
+declared SHA/HMAC digest, and rotated key ID. `--evidence` also recomputes each
+latest anchored release-evidence file digest. Either form exits non-zero on a
+break or mismatch.
 
 Do not infer release readiness from a stale count or one live run. Re-run the
 applicable gate from the exact release tree and inspect every skip.

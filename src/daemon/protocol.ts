@@ -79,6 +79,7 @@ export const DaemonMethodSchema = z.enum([
   "ledger.task",
   "ledger.proposeFinal",
   "ledger.event",
+  "ledger.verify",
   "ledger.repairTail",
   "messages.push",
   "messages.pull",
@@ -355,6 +356,7 @@ export const LedgerEventParamsSchema = z.object({
   payload: z.record(z.unknown()),
 }).strict();
 
+export const LedgerVerifyParamsSchema = z.object({ evidence: z.boolean().default(false) }).strict();
 export const LedgerRepairTailParamsSchema = z.object({ confirm: z.literal(true) }).strict();
 
 export const MessagesPushParamsSchema = z.object({

@@ -70,6 +70,8 @@ Persisted RunResult reads have a narrow schema-evolution decoder for the superse
 
 An unkeyed chain detects accidental or unaudited modification but can be recomputed by a state-file writer. HMAC only prevents forgery when `HEADLESS_LEDGER_KEY` is kept outside that writer’s reach. Neither mode detects deletion/rollback of a valid tail without an external head/sequence anchor.
 
+The stable `headless verify` command performs an auditor-requested full-chain scan and exits non-zero at the first sequence, previous-hash, project, digest, key, or HMAC-downgrade break. Opt-in release-evidence smokes atomically write provenance-bearing JSON, hash those exact bytes, and record the relative path and digest through authenticated `ledger.artifact`; `headless verify --evidence` additionally compares each current file with its latest durable anchor. The file does not contain its ledger receipt, avoiding a circular digest.
+
 The same-user operator can read or modify external state and daemon credentials. Filesystem modes prevent access by other users, not by malware already running as the owner.
 
 ## Redaction and resource limits
