@@ -1,6 +1,6 @@
 ---
 title: Gates A, B, and C
-sidebar_position: 1
+sidebar_position: 2
 description: What each cumulative release gate requires, what has been proven live, and why no package is published yet.
 ---
 

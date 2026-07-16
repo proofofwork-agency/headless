@@ -1,80 +1,59 @@
+/**
+ * Headless docs theme — matches the product TUI:
+ * cyan accent (#22d3ee) on near-black surfaces (#202023 / #252525).
+ * Shade ramps follow the Tailwind cyan scale so hover states stay coherent.
+ */
+
+/* Light mode: darker cyan (#0e7490) keeps links and buttons readable on white. */
 :root {
-  --ifm-color-primary: #125f5a;
-  --ifm-color-primary-dark: #105651;
-  --ifm-color-primary-darker: #0f514d;
-  --ifm-color-primary-darkest: #0c433f;
-  --ifm-color-primary-light: #146863;
-  --ifm-color-primary-lighter: #156d68;
-  --ifm-color-primary-lightest: #187c76;
+  --ifm-color-primary: #0e7490;
+  --ifm-color-primary-dark: #0d6882;
+  --ifm-color-primary-darker: #0c627b;
+  --ifm-color-primary-darkest: #0a5165;
+  --ifm-color-primary-light: #0f809e;
+  --ifm-color-primary-lighter: #1086a5;
+  --ifm-color-primary-lightest: #129cc2;
   --ifm-code-font-size: 95%;
-  --ifm-font-family-base: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --ifm-heading-font-family: "Space Grotesk", Inter, ui-sans-serif, system-ui, sans-serif;
-  --docusaurus-highlighted-code-line-bg: rgba(18, 95, 90, 0.12);
+  --ifm-font-family-monospace: ui-monospace, 'SF Mono', SFMono-Regular, Menlo,
+    Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  --docusaurus-highlighted-code-line-bg: rgba(14, 116, 144, 0.1);
 }
 
+/* Dark mode: the TUI palette. */
 [data-theme='dark'] {
-  --ifm-color-primary: #5eead4;
-  --ifm-color-primary-dark: #42e5cc;
-  --ifm-color-primary-darker: #34e2c8;
-  --ifm-color-primary-darkest: #1bc5ad;
-  --ifm-color-primary-light: #7aefdC;
-  --ifm-color-primary-lighter: #88f1df;
-  --ifm-color-primary-lightest: #b2f7ec;
-  --docusaurus-highlighted-code-line-bg: rgba(94, 234, 212, 0.14);
+  --ifm-color-primary: #22d3ee;
+  --ifm-color-primary-dark: #06b6d4;
+  --ifm-color-primary-darker: #0891b2;
+  --ifm-color-primary-darkest: #0e7490;
+  --ifm-color-primary-light: #67e8f9;
+  --ifm-color-primary-lighter: #a5f3fc;
+  --ifm-color-primary-lightest: #cffafe;
+  --ifm-background-color: #202023;
+  --ifm-background-surface-color: #252525;
+  --ifm-navbar-background-color: #252525;
+  --ifm-code-background: #2c2c30;
+  --ifm-toc-border-color: #323236;
+  --docusaurus-highlighted-code-line-bg: rgba(34, 211, 238, 0.12);
 }
 
-.hero-panel {
-  margin: 1.5rem 0 2rem;
-  padding: clamp(1.5rem, 4vw, 3rem);
-  overflow: hidden;
-  color: #ecfeff;
-  background:
-    radial-gradient(circle at 90% 10%, rgba(94, 234, 212, 0.3), transparent 32%),
-    linear-gradient(135deg, #102a2e 0%, #123c3d 48%, #0f5d58 100%);
-  border: 1px solid rgba(94, 234, 212, 0.35);
-  border-radius: 1.25rem;
-  box-shadow: 0 24px 70px rgba(6, 35, 38, 0.2);
+/* Footer (style: 'dark') stays near-black in both color modes. */
+.footer--dark {
+  --ifm-footer-background-color: #1b1b1d;
 }
 
-.hero-panel h2 {
-  max-width: 15ch;
-  margin-bottom: 0.75rem;
-  color: #fff;
-  font-size: clamp(2rem, 5vw, 3.5rem);
-  line-height: 1.02;
+/* Monospace wordmark, like the TUI banner. */
+.navbar__title {
+  font-family: var(--ifm-font-family-monospace);
+  letter-spacing: 0.05em;
 }
 
-.hero-panel p {
-  max-width: 62ch;
-  margin-bottom: 0;
-  color: #ccfbf1;
-  font-size: 1.1rem;
+/* Subtle admonitions: no shadow, thin accent edge. */
+.theme-admonition {
+  border-left-width: 3px;
+  box-shadow: none;
 }
 
-.proof-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-  gap: 1rem;
-  margin: 1.5rem 0 2rem;
-}
-
-.proof-card {
-  padding: 1.1rem;
-  background: var(--ifm-card-background-color);
-  border: 1px solid var(--ifm-color-emphasis-300);
-  border-radius: 0.85rem;
-}
-
-.proof-card strong {
-  display: block;
-  margin-bottom: 0.35rem;
-  color: var(--ifm-color-primary);
-  font-size: 1.05rem;
-}
-
-.status-strip {
-  padding: 0.85rem 1rem;
-  background: rgba(245, 158, 11, 0.1);
-  border-left: 4px solid #f59e0b;
-  border-radius: 0.25rem;
+/* In dark mode, admonition bodies sit on a quiet surface; the left border keeps the type color. */
+[data-theme='dark'] .theme-admonition {
+  background-color: #252528;
 }

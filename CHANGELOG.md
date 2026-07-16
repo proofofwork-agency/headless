@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Publication remains blocked. Both package manifests are private at `0.2.0-alpha.0`; the staged Gate A, B, and C evidence in `docs/plan.md` is an acceptance checklist, not a completion claim.
+Publication remains blocked. Both package manifests are private at `0.2.0-beta.1`; the staged Gate A, B, and C evidence in `docs/plan.md` is an acceptance checklist, not a completion claim.
 
 ### Changed
 
