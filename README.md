@@ -23,11 +23,16 @@ foreground Claude / Codex / OpenCode / Grok lead
 ```
 
 The full documentation lives in the [Docusaurus site sources](./website/README.md):
-[quickstart](./website/docs/getting-started/init-a-lead.md),
-[backend authentication](./website/docs/getting-started/backend-auth.md),
-[security](./website/docs/security/containment-ledger-broker.md),
-[orchestration](./website/docs/orchestration/lead-servants.md), and
-[live case studies](./website/docs/case-studies/proven-runs.md).
+[quickstart](./website/docs/getting-started/quickstart.md),
+[the safety model](./website/docs/concepts/safety-model.md),
+[execution receipts](./website/docs/concepts/receipts.md),
+[leads and the fleet](./website/docs/concepts/leads-and-fleet.md),
+the per-coder guides for
+[Claude](./website/docs/ai-coders/claude.md),
+[Codex](./website/docs/ai-coders/codex.md),
+[OpenCode](./website/docs/ai-coders/opencode.md), and
+[Grok](./website/docs/ai-coders/grok.md), and the
+[recorded case studies](./website/docs/case-studies/proven-runs.md).
 
 ## What works in the current tree
 
@@ -91,7 +96,7 @@ The four adapters are live in the current tree, with different release status:
 | Codex | Canonical `~/.codex/auth.json` | Live contained exec/session evidence |
 | OpenCode | Canonical OpenCode auth plus safe default model or explicit model | Reference backend; live exec/session/write evidence |
 | Claude Code | User-minted `~/.claude/.headless-setup-token` | Capsule implemented and fixture-green; this machine still needs the operator token file for live proof |
-| Grok Build | `grok login --device-code` | Experimental read-only path guarded by the new trust-canary attestation; writes remain blocked |
+| Grok Build | `grok login --device-auth` | Experimental read-only path guarded by the new trust-canary attestation; writes remain blocked |
 
 ### Claude subscription setup-token
 

@@ -64,6 +64,6 @@ headless doctor --cwd "$PROJECT"
 ```
 
 If Claude alone remains unavailable, install its
-[setup-token capsule](../getting-started/backend-auth.md#claude-code-setup-token).
+[setup-token capsule](../ai-coders/claude.md#macos-mint-the-setup-token-keychain-limitation).
 If Grok remains blocked, its contained trust-canary inspection did not prove
 the required isolation; do not bypass that attestation.
