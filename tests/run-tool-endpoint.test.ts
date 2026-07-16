@@ -109,6 +109,37 @@ describe("run-scoped daemon tool endpoint", () => {
     }
   });
 
+  test("the disposable helper refuses an operation outside its credential before any transport", async () => {
+    const root = temporaryDirectory();
+    let handlerCalls = 0;
+    const manager = new RunToolEndpointManager({ socketDir: root, handle: (_scope, operation, params) => { handlerCalls += 1; return { operation, params }; } });
+    managers.push(manager);
+    const endpoint = await manager.issue(scope(Date.now() + 10_000), ["note"]);
+    const worker = createWorkerEnvironment({ baseDir: root });
+    const env = installRunToolClient(worker, {
+      socketPath: endpoint.socketPath,
+      token: endpoint.token,
+      expiresAt: endpoint.scope.expiresAt,
+      jobId: endpoint.scope.jobId,
+      sessionId: endpoint.scope.sessionId,
+      operations: ["note"],
+    });
+    try {
+      const helper = join(worker.runtime, "headless-run-tool");
+      // Defense in depth: an operation the credential does not carry fails at
+      // the client (exit 2) and never reaches the daemon endpoint.
+      const denied = Bun.spawn([helper, "task_status", JSON.stringify({})], { env, stdout: "pipe", stderr: "pipe" });
+      expect(await denied.exited).toBe(2);
+      expect(await new Response(denied.stderr).text()).toContain("not allowed by this credential");
+      // The allowed operation still succeeds through the same helper.
+      const allowed = Bun.spawn([helper, "note", JSON.stringify({ text: "ok" })], { env, stdout: "pipe", stderr: "pipe" });
+      expect(await allowed.exited).toBe(0);
+      expect(handlerCalls).toBe(1);
+    } finally {
+      worker.cleanup();
+    }
+  });
+
   test("automatically removes an expired listener without retaining the credential", async () => {
     const root = temporaryDirectory();
     const manager = new RunToolEndpointManager({ socketDir: root, handle: () => ({ unreachable: true }) });
