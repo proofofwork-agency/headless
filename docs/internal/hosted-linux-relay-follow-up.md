@@ -2,14 +2,18 @@
 
 Status: open. This is a private-beta CI/runtime investigation, not a containment waiver.
 
-GitHub-hosted Ubuntu 24.04 intermittently leaves a bubblewrap run-tool relay child alive until the complete helper or job deadline. The failure reproduces under the hosted runner's user-namespace and AppArmor environment even after `kernel.apparmor_restrict_unprivileged_userns=0`, but not on macOS, local Linux, or a two-core privileged Linux container. Increasing fixed timeouts from 15 to 30 to 60 seconds did not converge; observed failures reached 105 seconds.
+GitHub-hosted Ubuntu 24.04 leaves a bubblewrap run-tool relay child alive until the complete helper or job deadline. The failure reproduces under the hosted runner's user-namespace and AppArmor environment even after `kernel.apparmor_restrict_unprivileged_userns=0`, but not on macOS, local dev, or a local two-core privileged Linux Docker container. Increasing fixed timeouts from 15 to 30 to 60 seconds did not converge; observed failures reached 105 seconds.
 
-The ordinary hosted-Linux test process therefore skips exactly these environment-incompatible lifecycle cases:
+**A privileged-container CI step was tried and disproven.** Running the same files inside a `--privileged` `oven/bun:1.3.14` container *on the GitHub hosted runner* still failed the four `tests/daemon-run-tool.test.ts` cooperation cases (the `tests/containment-v2.test.ts` cases passed). The identical container passes locally. Therefore the incompatibility is GitHub's hosted-runner kernel/virtualization itself, **not the privilege level**, and no in-CI environment currently runs these four reliably.
 
-- all four cases in `tests/daemon-run-tool.test.ts`;
-- `denies a host Unix socket created after launch while broker and run tools remain reachable` in `tests/containment-v2.test.ts`.
+The hosted-Linux test process therefore skips the four `tests/daemon-run-tool.test.ts` cooperation cases on **all** GitHub Linux (`process.platform === "linux" && process.env.GITHUB_ACTIONS === "true"`), and the one unprivileged-only `tests/containment-v2.test.ts` late-socket case on unprivileged hosted Linux. There is no privileged-container CI step.
 
-The Linux CI job runs both complete test files in a privileged `oven/bun:1.3.14` container with bubblewrap and seccomp, preserving the nested-child, socket-masking, timeout, failure, revocation, and terminalization assertions. The guard is disabled only by `HEADLESS_PRIVILEGED_CONTAINMENT_CI=1` in that dedicated step.
+Coverage for the four cooperation cases: macOS CI, local dev, and a documented local command a maintainer can run against real bubblewrap:
+
+```
+docker run --rm --privileged --cpus=2 --memory=3g -v "$PWD:/repo:ro" oven/bun:1.3.14 \
+  bash -lc 'apt-get update -qq && apt-get install -y -qq bubblewrap && cp -r /repo /work && cd /work && bun install --frozen-lockfile --ignore-scripts && bun test tests/daemon-run-tool.test.ts'
+```
 
 Two issues need a hosted-environment reproducer before the guard can be removed:
 
