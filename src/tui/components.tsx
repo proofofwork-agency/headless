@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { healthSummary, truncateDisplay, type TuiControlRoomState } from "./model";
-import { headerBrand, headerTabsMode, type TabSegment } from "./layout";
+import { BRAND_TAB_GAP, headerBrand, headerTabsMode, TAB_GAP, type TabSegment } from "./layout";
 import { HEADLESS_VERSION } from "../version";
 import {
   ACCENT,
@@ -48,14 +48,14 @@ export function ChromeHeader({ state, width, segments, active }: {
       ? `${state.connection.toUpperCase()} · R${health.ready} B${health.blocked + health.loginRequired}`
       : state.connection.toUpperCase();
   return (
-    <Box paddingX={2} justifyContent="space-between">
+    <Box paddingX={2} paddingTop={1} justifyContent="space-between">
       <Text wrap="truncate">
         <Text color={ACCENT}>◆ </Text>
         <Text bold>HEADLESS</Text>
         {version ? <Text color={MUTED}> v{HEADLESS_VERSION}</Text> : null}
-        {inHeader ? <Text>  {segments.map((segment, index) => (
+        {inHeader ? <Text>{" ".repeat(BRAND_TAB_GAP)}{segments.map((segment, index) => (
           <React.Fragment key={segment.view}>
-            {index > 0 ? <Text> </Text> : null}
+            {index > 0 ? <Text>{" ".repeat(TAB_GAP)}</Text> : null}
             <TabLabel segment={segment} active={active === segment.view} />
           </React.Fragment>
         ))}</Text> : null}
@@ -74,7 +74,7 @@ export function CompactTabRow({ segments, active }: { segments: TabSegment[]; ac
       <Text wrap="truncate">
         {segments.map((segment, index) => (
           <React.Fragment key={segment.view}>
-            {index > 0 ? <Text> </Text> : null}
+            {index > 0 ? <Text>{" ".repeat(TAB_GAP)}</Text> : null}
             <TabLabel segment={segment} active={active === segment.view} />
           </React.Fragment>
         ))}

@@ -25,16 +25,21 @@ export const VIEW_LABELS: Record<TuiView, string> = {
   help: "Help",
 };
 
-/** Narrowest width at which the tabs live inside the header row (ContextRelay style). */
-export const HEADER_TABS_MIN_WIDTH = 96;
-/** 1-based terminal row of the header (which carries the tabs at normal widths). */
-export const TAB_ROW = 1;
-/** 1-based terminal row where view content starts (header + rule/compact-tabs). */
-export const CONTENT_TOP = 3;
+/**
+ * Narrowest width at which the tabs live inside the header row (ContextRelay
+ * style). Set so all seven airily-spaced tabs + brand + status fit on one line
+ * (the spaced tabs need ~113 cols); below this the tabs drop to a clean compact
+ * row beneath the header instead of colliding with the status.
+ */
+export const HEADER_TABS_MIN_WIDTH = 116;
+/** 1-based terminal row of the header (which carries the tabs at normal widths). Row 1 is the header's paddingTop breathing room. */
+export const TAB_ROW = 2;
+/** 1-based terminal row where view content starts (paddingTop + header + rule/compact-tabs). */
+export const CONTENT_TOP = 4;
 /** Rows of view chrome (section title + column header) above selectable list rows. */
 export const LIST_OFFSET = 2;
-/** Terminal rows consumed by fixed observer chrome outside the content area (header, rule-or-tabs, rule, status, footer). */
-export const FIXED_ROWS = 5;
+/** Terminal rows consumed by fixed observer chrome outside the content area (header ×2 incl. paddingTop, rule-or-tabs, rule, status, footer). */
+export const FIXED_ROWS = 6;
 
 /**
  * Stable identity colors for the four advertised backends, used wherever an
