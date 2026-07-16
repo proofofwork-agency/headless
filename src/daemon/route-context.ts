@@ -18,6 +18,8 @@ import type { JobStore } from "./job-store";
 import type { RunEventStore } from "./run-event-store";
 import type { TaskStore } from "./task-store";
 import type { LeadBindingStore } from "../runtime/lead-binding";
+import type { Receipt } from "../contracts/receipt";
+import type { ReceiptVerificationVerdict } from "../runtime/receipt-verify";
 
 type GoalRecord = NonNullable<ReturnType<GoalStore["get"]>>;
 
@@ -103,4 +105,7 @@ export type DaemonRouteContext = {
   cancelLoop: (loopId: string, credential: AuthenticatedCredential) => unknown;
   verifyLedger: (evidence: boolean) => unknown;
   repairLedgerTail: (principal: string) => unknown;
+  getReceipt: (runId: string) => Receipt | null;
+  listReceipts: (opts?: { limit?: number }) => Receipt[];
+  verifyReceipt: (runId: string) => ReceiptVerificationVerdict;
 };

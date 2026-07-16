@@ -81,6 +81,9 @@ export const DaemonMethodSchema = z.enum([
   "ledger.event",
   "ledger.verify",
   "ledger.repairTail",
+  "receipt.get",
+  "receipt.list",
+  "receipt.verify",
   "messages.push",
   "messages.pull",
   "messages.markPushed",
@@ -358,6 +361,10 @@ export const LedgerEventParamsSchema = z.object({
 
 export const LedgerVerifyParamsSchema = z.object({ evidence: z.boolean().default(false) }).strict();
 export const LedgerRepairTailParamsSchema = z.object({ confirm: z.literal(true) }).strict();
+export const ReceiptRunParamsSchema = z.object({ runId: IdentifierSchema }).strict();
+export const ReceiptListParamsSchema = z.object({
+  limit: z.number().int().positive().max(10_000).optional(),
+}).strict();
 
 export const MessagesPushParamsSchema = z.object({
   chatId: IdentifierSchema,
