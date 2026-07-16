@@ -97,6 +97,55 @@ describe("daemon fleet and collaboration routes", () => {
     });
   });
 
+  test("reports an expired Grok OIDC capsule as login required before provider access", async () => {
+    const fixture = createFixture();
+    mkdirSync(join(fixture.root, ".grok"), { recursive: true });
+    writeFileSync(join(fixture.root, ".grok", "auth.json"), JSON.stringify({
+      "https://auth.x.ai::account": {
+        key: "expired-access-token",
+        auth_mode: "oidc",
+        refresh_token: "rotating-refresh-token",
+        expires_at: "2020-01-01T00:00:00.000Z",
+      },
+    }), { mode: 0o600 });
+    const daemon = await start(fixture);
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: fixture.token });
+    await client.call("project.trust.grant", {
+      nativeLoginAllowed: true,
+      nativeDirectUnrestrictedAcknowledged: true,
+      bypassAllowed: false,
+    });
+    await client.call("fleet.profile.upsert", {
+      id: "fleet-expired-grok",
+      name: "Expired Grok",
+      authMode: "native-login",
+      approvalPolicy: "ask",
+      agents: [{
+        id: "grok",
+        backend: "grok-build",
+        name: "Grok",
+        authMode: "native-login",
+        approvalPolicy: "ask",
+      }],
+      activate: true,
+    });
+
+    const health = await client.call<{
+      leaderCandidates: Array<{
+        authenticated: boolean;
+        presentation: { code: string; reason: string; recovery: string };
+      }>;
+    }>("fleet.health");
+    expect(health.leaderCandidates[0]).toMatchObject({
+      authenticated: false,
+      presentation: {
+        code: "login_required",
+        reason: expect.stringContaining("expires before this bounded turn can finish"),
+        recovery: expect.stringContaining("grok login"),
+      },
+    });
+  });
+
   test("reports a missing broker key without claiming provider login state is absent", async () => {
     const fixture = createFixture();
     delete fixture.state.env.OPENAI_API_KEY;

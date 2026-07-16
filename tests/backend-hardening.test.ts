@@ -72,6 +72,7 @@ describe("hardened built-in command preparation", () => {
     const root = mkdtempSync(join(tmpdir(), "headless-codex-adapter-"));
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     mkdirSync(join(root, ".git"));
+    writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
     mkdirSync(join(root, ".agents", "skills", "malicious"), { recursive: true });
     mkdirSync(join(root, ".codex", "skills", "native-malicious"), { recursive: true });
     writeFileSync(join(root, ".agents", "skills", "malicious", "SKILL.md"), "malicious");
@@ -89,6 +90,7 @@ describe("hardened built-in command preparation", () => {
     expect(read).toContain("--ignore-rules");
     expect(read).toContain("--ephemeral");
     expect(readConfig).toContain('trust_level="untrusted"');
+    expect(readConfig).toContain("project_root_markers=[]");
     expect(readConfig).toContain("project_doc_max_bytes=0");
     expect(readConfig).toContain('web_search="disabled"');
     expect(readConfig).toContain("apps._default.enabled=false");
@@ -114,6 +116,7 @@ describe("hardened built-in command preparation", () => {
     const root = mkdtempSync(join(tmpdir(), "headless-codex-deep-skill-"));
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     mkdirSync(join(root, ".git"));
+    writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
     const deep = join(root, ".agents", "skills", ...Array.from({ length: 10 }, (_, index) => `level-${index}`));
     mkdirSync(deep, { recursive: true });
     writeFileSync(join(deep, "SKILL.md"), "malicious");
@@ -126,6 +129,7 @@ describe("hardened built-in command preparation", () => {
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     cleanups.push(() => rmSync(external, { recursive: true, force: true }));
     mkdirSync(join(root, ".git"));
+    writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
     mkdirSync(join(root, ".agents", "skills"), { recursive: true });
     writeFileSync(join(external, "SKILL.md"), "malicious");
     symlinkSync(external, join(root, ".agents", "skills", "escape"));
@@ -138,6 +142,7 @@ describe("hardened built-in command preparation", () => {
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     cleanups.push(() => rmSync(external, { recursive: true, force: true }));
     mkdirSync(join(root, ".git"));
+    writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
     mkdirSync(join(root, ".codex", "skills"), { recursive: true });
     writeFileSync(join(external, "SKILL.md"), "malicious");
     symlinkSync(external, join(root, ".codex", "skills", "escape"));
@@ -151,6 +156,7 @@ describe("hardened built-in command preparation", () => {
       cleanups.push(() => rmSync(root, { recursive: true, force: true }));
       cleanups.push(() => rmSync(external, { recursive: true, force: true }));
       mkdirSync(join(root, ".git"));
+      writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
       mkdirSync(join(external, "skills"));
       writeFileSync(join(external, "skills", "SKILL.md"), "malicious");
       symlinkSync(external, join(root, parent));
@@ -158,6 +164,21 @@ describe("hardened built-in command preparation", () => {
       expect(() => buildCodexCommand({ backend: "codex", prompt: "read" }, root))
         .toThrow("symlinked repository skill paths");
     }
+  });
+
+  test("Codex ignores invalid ancestor git markers and their user-level skills", () => {
+    const ancestor = mkdtempSync(join(tmpdir(), "headless-codex-invalid-ancestor-"));
+    const project = join(ancestor, "projects", "plain-directory");
+    cleanups.push(() => rmSync(ancestor, { recursive: true, force: true }));
+    mkdirSync(join(ancestor, ".git", "unrelated"), { recursive: true });
+    mkdirSync(join(ancestor, ".codex", "skills", "personal"), { recursive: true });
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(ancestor, ".codex", "skills", "personal", "SKILL.md"), "personal");
+
+    const command = buildCodexCommand({ backend: "codex", prompt: "read" }, project);
+    const config = command.filter((value, index) => command[index - 1] === "-c").join("\n");
+    expect(config).toContain("project_root_markers=[]");
+    expect(config).not.toContain("personal/SKILL.md");
   });
 
   test("installed Codex accepts the complete strict policy before provider access", () => {

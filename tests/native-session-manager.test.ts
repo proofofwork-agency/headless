@@ -39,6 +39,7 @@ describe("native session manager", () => {
       );
       expect(codex).toMatchObject({
         HOME: worker.home,
+        CODEX_HOME: join(worker.home, ".codex"),
         SSL_CERT_FILE: "/etc/ssl/cert.pem",
         SSL_CERT_DIR: "/etc/ssl/certs",
       });

@@ -45,7 +45,7 @@ Headless never mounts the real home directory. It creates an owner-only worker r
 | OpenCode | `~/.local/share/opencode/auth.json` | `$XDG_DATA_HOME/opencode/auth.json` |
 | Grok | `~/.grok/auth.json` | `$HOME/.grok/auth.json` |
 
-Grok reads credentials only from `$GROK_HOME/auth.json` (the open-sourced grok-build confirms no XDG fallback). Sign in with `grok login` (browser OAuth) or `grok login --device-auth` on a display-less host.
+Grok reads credentials only from `$GROK_HOME/auth.json` (the open-sourced grok-build confirms no XDG fallback). Sign in with `grok login` (browser OAuth) or `grok login --device-auth` on a display-less host. Because the contained credential copy is disposable, recognized OIDC state must remain valid for the complete bounded turn; an expired or near-expiry token is reported as `Login required` instead of being refreshed only inside a throwaway worker.
 
 An ordinary auth file is limited to 2 MiB and the complete file capsule to 4 MiB. The Claude setup-token has a separate 4 KiB limit and must be owner-only. Installed files use mode `0600`; worker directories use `0700`. Headless fingerprints the selected backend and exact selected credential contents for session-recovery checks. The worker does not receive sibling-provider files, ambient API-key or OAuth-token variables, Git credentials, SSH keys or agents, shell startup files, keychain exports, project `.env` files, or host sockets. The only OAuth-token environment value Headless creates is the explicitly allowlisted Claude setup-token described below.
 

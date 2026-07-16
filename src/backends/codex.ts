@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import type { ExecOptions } from "../index";
 import { safeOption } from "../runtime/validation";
@@ -113,6 +113,11 @@ export function codexRepositorySkillArguments(cwd: string) {
 export function codexProjectPolicyArguments(cwd: string) {
   return [
     "-c", `${tomlProjectKey(cwd)}.trust_level="untrusted"`,
+    // Codex treats any ancestor `.git` entry as a project marker, even when it
+    // is not a valid checkout. Pin discovery to the requested working root so
+    // an unrelated marker cannot make a contained worker inspect an ancestor
+    // `.codex/config.toml` outside its credential capsule.
+    "-c", "project_root_markers=[]",
     "-c", "project_doc_max_bytes=0",
     "-c", "project_doc_fallback_filenames=[]",
     "-c", 'web_search="disabled"',
@@ -180,10 +185,22 @@ function scanSkillRoot(path: string, found: Set<string>, depth: number, visited:
 function repositoryRoot(cwd: string) {
   let current = realpathOrInput(cwd);
   while (true) {
-    if (existsSync(join(current, ".git"))) return current;
+    if (isGitRepositoryMarker(join(current, ".git"))) return current;
     const parent = dirname(current);
     if (parent === current) return realpathOrInput(cwd);
     current = parent;
+  }
+}
+
+function isGitRepositoryMarker(path: string) {
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) return false;
+    if (stat.isDirectory()) return existsSync(join(path, "HEAD"));
+    if (!stat.isFile() || stat.size > 8_192) return false;
+    return /^gitdir:\s*\S+/m.test(readFileSync(path, "utf8"));
+  } catch {
+    return false;
   }
 }
 

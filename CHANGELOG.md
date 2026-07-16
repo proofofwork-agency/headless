@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Bound Codex's `CODEX_HOME` to the isolated worker capsule and pinned project discovery to the requested working root for one-shot and persistent native sessions, preventing unrelated ancestor markers from exposing the operator's real `~/.codex/config.toml` to the contained CLI.
+- Made Grok OIDC readiness expiry-aware for each bounded turn. Headless now requests a fresh login before a disposable capsule can rotate a refresh token that cannot be persisted, and classifies the CLI's `Not signed in` response as native authentication loss instead of a generic process failure.
+
 ## 0.2.0-beta.4 — 2026-07-16
 
 Package publication remains blocked. Both package manifests are private at `0.2.0-beta.4`; this release is limited to the protected repository PR and annotated source tag.

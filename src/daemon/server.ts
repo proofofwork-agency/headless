@@ -35,7 +35,7 @@ import { DirectedMailbox } from "../runtime/directed-mailbox";
 import type { GoalAgentAvailability, GoalSecurityControls } from "../runtime/goal-coordinator-service";
 import { GoalRuntimeService } from "./goal-runtime-service";
 import { createWorkerEnvironment } from "../runtime/worker-environment";
-import { installNativeAuthCapsule } from "../runtime/native-auth-capsule";
+import { installNativeAuthCapsule, nativeAuthMinimumValidityMs } from "../runtime/native-auth-capsule";
 import { getBackendDefinition, requiredContainmentSecurityGaps, resolveBackendId } from "../backends/registry";
 import { backendMetadata } from "../backends/metadata";
 import { BudgetSchema, type Job, type Task } from "../contracts/durable";
@@ -465,6 +465,7 @@ export class HeadlessDaemon {
               homeDir: this.stateOptions?.homeDir,
               requestedModel: agent.model,
               resolveOpenCodeModel: adapter?.nativeAuth?.resolveModel ?? false,
+              minimumValidityMs: nativeAuthMinimumValidityMs(adapter?.metadata.timeoutMs ?? 180_000),
             });
             authenticated = capsule.available;
             authDetail = capsule.reason;

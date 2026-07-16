@@ -116,6 +116,44 @@ describe("native authentication capsules", () => {
     }
   });
 
+  test("refuses a Grok OIDC capsule that cannot remain valid for the bounded turn", () => {
+    const home = fixtureRoot("headless-native-grok-expiry-home-");
+    const base = fixtureRoot("headless-native-grok-expiry-worker-");
+    mkdirSync(join(home, ".grok"), { recursive: true });
+    const nowMs = Date.parse("2026-07-16T22:00:00.000Z");
+    writeFileSync(join(home, ".grok", "auth.json"), JSON.stringify({
+      "https://auth.x.ai::account": {
+        key: "access-token",
+        auth_mode: "oidc",
+        refresh_token: "refresh-token",
+        expires_at: "2026-07-16T22:05:00.000Z",
+      },
+    }));
+
+    const acceptedWorker = createWorkerEnvironment({ baseDir: base });
+    const rejectedWorker = createWorkerEnvironment({ baseDir: base });
+    try {
+      expect(installNativeAuthCapsule(acceptedWorker, "grok-build", {
+        homeDir: home,
+        nowMs,
+        minimumValidityMs: 240_000,
+      })).toMatchObject({ available: true, reason: null });
+      expect(installNativeAuthCapsule(rejectedWorker, "grok-build", {
+        homeDir: home,
+        nowMs,
+        minimumValidityMs: 300_000,
+      })).toMatchObject({
+        available: false,
+        manifest: null,
+        reason: expect.stringContaining("expires before this bounded turn can finish"),
+      });
+      expect(existsSync(join(rejectedWorker.home, ".grok", "auth.json"))).toBe(false);
+    } finally {
+      acceptedWorker.cleanup();
+      rejectedWorker.cleanup();
+    }
+  });
+
   test("fails closed for Claude when no supported regular-file login state exists", () => {
     const home = fixtureRoot("headless-native-claude-keychain-only-");
     const base = fixtureRoot("headless-native-claude-worker-");

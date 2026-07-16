@@ -29,7 +29,7 @@ import {
 } from "../runtime/worktree";
 import { redactAndTruncate, StreamingRedactor } from "../runtime/redaction";
 import { createWorkerEnvironment, type WorkerEnvironment } from "../runtime/worker-environment";
-import { installNativeAuthCapsule, supportsNativeAuthCapsule } from "../runtime/native-auth-capsule";
+import { installNativeAuthCapsule, nativeAuthMinimumValidityMs, supportsNativeAuthCapsule } from "../runtime/native-auth-capsule";
 import { terminateProcessTree as terminateChildProcessTree } from "../runtime/process-tree";
 import { positiveTimeout } from "../runtime/validation";
 import { cleanupWithDiagnostic, recordRuntimeDiagnostic } from "../runtime/diagnostics";
@@ -184,6 +184,7 @@ async function executeSupervisedRun(
           homeDir: options.authHomeDir,
           requestedModel: options.model,
           resolveOpenCodeModel: adapter.nativeAuth?.resolveModel ?? false,
+          minimumValidityMs: nativeAuthMinimumValidityMs(options.timeoutMs ?? adapter.metadata.timeoutMs),
         });
       } catch (error) {
         if (isHeadlessError(error)) {
