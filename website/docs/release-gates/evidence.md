@@ -47,7 +47,7 @@ and intervention rather than reporting them as green.
 
 ## Why publication remains blocked
 
-The root and plugin packages are still private at `0.2.0-beta.1`. No gate is
+The root and plugin packages are still private at `0.2.0-beta.2`. No gate is
 released until its full current-tree checklist is re-run, no P0/P1 security or
 data-integrity issue remains, clean package artifacts install, and the authorized
 release resolves through the public registry. The canonical checklist is
