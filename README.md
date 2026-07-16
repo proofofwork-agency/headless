@@ -22,9 +22,16 @@ foreground Claude / Codex / OpenCode / Grok lead
                     └─ result → ledger → observer TUI
 ```
 
-The full documentation lives in the [Docusaurus site sources](./website/README.md):
+The full documentation is hosted at
+[proofofwork-agency.github.io/headless](https://proofofwork-agency.github.io/headless/).
+Its [Docusaurus site sources](./website/README.md) include the
 [quickstart](./website/docs/getting-started/quickstart.md),
+[architecture and data flow](./website/docs/concepts/architecture.md),
+[the four policy axes](./website/docs/concepts/modes.md),
+[operating-system containment](./website/docs/concepts/containment.md),
 [the safety model](./website/docs/concepts/safety-model.md),
+[persistent sessions](./website/docs/concepts/sessions.md),
+[portable skills](./website/docs/concepts/skills.md),
 [execution receipts](./website/docs/concepts/receipts.md),
 [leads and the fleet](./website/docs/concepts/leads-and-fleet.md),
 the per-coder guides for
@@ -170,13 +177,14 @@ sub-reservation; cross-provider children use one crash-atomic linked hold over
 the parent and target provider quotas. Target bearer material is minted once,
 never persisted, and ambiguity exhausts authority rather than returning it.
 
-### The fleet “login required” trap
+### Understand fleet “login required”
 
-An untrusted project and a broker-default fleet profile can both be humanized as
-`login_required`, even when the official CLIs are already logged in. For the
-subscription path, grant native trust and upsert a profile whose top level and
-every agent use `native-login`. The exact JSON and commands are in
-[Fleet says “login required”](./website/docs/troubleshooting/login-required.md).
+Broker and native-login agents may both use the structured `login_required`
+code, but health now reports the selected mode's true reason: broker names the
+missing daemon credential variable; native-login surfaces the capsule or
+setup-token remedy. Missing native project consent is separately
+`trust_required`. The exact JSON and repair commands are in
+[Understand “login required”](./website/docs/troubleshooting/login-required.md).
 
 ## Gated writes
 
@@ -234,7 +242,7 @@ These runs prove the exercised paths, not release publication. See the
 | C | Leased write candidates and authorized integration | Capstone and rotating-lead builds recorded | No |
 
 The [release plan](./docs/plan.md) is the canonical cumulative checklist.
-Packages remain private at `0.2.0-beta.2`; no npm availability is implied.
+Packages remain private at `0.2.0-beta.3`; no npm availability is implied.
 
 ## CLI stability boundary
 

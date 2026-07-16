@@ -1,7 +1,7 @@
 ---
 id: safety-model
 title: The Safety Model
-sidebar_position: 1
+sidebar_position: 4
 ---
 
 # The safety model
@@ -44,6 +44,28 @@ The two authentication modes trade different things away:
 | Network | Broker-only path | Unrestricted outbound provider IP access |
 | Request and cost enforcement | Broker request/token/cost caps | Project budgets plus backend-reported evidence |
 | Project consent | Normal authority policy | Trust plus explicit unrestricted-egress acknowledgement |
+
+### One credential source from health to egress
+
+Fleet health, admission, broker-lease issuance, and provider egress all read the same daemon environment source. This matters for embedded daemons that inject an explicit environment instead of using ambient `process.env`: Headless cannot report a key from one source and then execute the broker with another. Broker health names the missing credential variable; native-login health returns the capsule's real bounded reason or remedy.
+
+Changing provider credentials still requires a daemon restart. A running daemon does not hot-reload its startup environment.
+
+### Canonical broker route decisions
+
+The broker rejects percent-encoded path separators, backslashes, dots, and percent signs before endpoint classification. That blocks both single-encoded and double-encoded traversal such as an apparent embeddings path that an upstream could decode into chat completions. Literal URL dot segments are normalized by the URL parser and then re-validated, and allowed route prefixes require a real segment boundary (with the explicit Gemini `:generateContent` form supported).
+
+The path used for authorization, endpoint class, budget enforcement, and upstream forwarding therefore cannot quietly name different operations.
+
+## Idempotent run submission
+
+Authenticated `run.submit` callers may provide an envelope-only `idempotencyKey` of up to 200 characters. The key is durably bound to the authenticated principal and normalized run request:
+
+- replaying the same principal, key, and normalized request returns the original job in whatever state it currently has;
+- reusing the key for a different request returns `CONFLICT`;
+- omitting the key preserves ordinary behavior, where two identical requests create two jobs.
+
+The key is not a content digest and is not part of the persisted run request. Callers choose a fresh key for a genuinely new attempt. This closes retry ambiguity across daemon and client restarts without collapsing intentionally repeated work. The ordinary `headless exec` CLI does not currently expose an idempotency flag; it is part of the authenticated daemon submission envelope used by programmatic clients.
 
 ## Writes: leased worktree, candidate, gates, finality
 

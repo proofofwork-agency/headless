@@ -1,7 +1,7 @@
 ---
 id: leads-and-fleet
 title: Leads and the Fleet
-sidebar_position: 3
+sidebar_position: 8
 ---
 
 # Leads and the fleet
@@ -85,8 +85,8 @@ headless experimental fleet health --cwd "$PROJECT"
 
 Defaults are deliberately bounded: four active workers, 64 queued delegations per project, one active turn per native session, eight deliberation rounds, two attempts per delegation, and a 60-minute goal deadline. Queue overflow returns `QUEUE_CAPACITY_EXCEEDED` — jobs are never silently dropped.
 
-:::note The "login required" trap
-An untrusted project and a broker-default fleet profile can both be reported as `login_required`, even when the official CLIs are already logged in. For the subscription path, grant native trust (`headless project trust grant --allow-native-direct-unrestricted`) **and** upsert a profile whose top level and every agent use `native-login`.
+:::note Read the mode-specific health reason
+Broker and native-login agents may both use the structured `login_required` code, but Fleet health now explains the selected mode: broker names the missing daemon credential variable, while native-login surfaces the capsule or setup-token remedy. Missing native project consent is separately `trust_required`. For the subscription path, grant native trust (`headless project trust grant --allow-native-direct-unrestricted`) **and** upsert a profile whose top level and every agent use `native-login`.
 :::
 
 ## How goals and councils use the fleet

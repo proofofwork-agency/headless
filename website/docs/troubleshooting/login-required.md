@@ -1,19 +1,26 @@
 ---
-title: Fleet says “login required”
+title: Understand “login required”
 sidebar_position: 1
-description: Fix the misleading login-required symptom caused by missing project trust or a broker-default fleet profile.
+description: Read the mode-specific fleet-health reason and repair broker credentials, native login state, or project trust.
 ---
 
-# Fleet says “login required”
+# Understand “login required”
 
-A subscription CLI can work directly while fleet health still reports
-`login_required`. Two policy mistakes can produce that same humanized symptom:
+Fleet health keeps the structured code `login_required`, but its human reason
+now describes the selected authentication mode truthfully. Read that reason
+before changing credentials:
 
-1. the project has not been trusted for native login; or
-2. the fleet profile—or one of its agents—still defaults to `broker`, so the
-   daemon looks for a provider API key instead of the installed subscription.
+| Selected agent mode | Example reason | Correct direction |
+| --- | --- | --- |
+| `broker` | `No broker credential — OPENAI_API_KEY is unset...` | Put that provider key in the daemon environment and restart, or intentionally switch the agent to native-login |
+| `native-login` | `No native authentication state was found for codex` | Run the provider's host login flow, then refresh health |
+| `native-login` (Claude Keychain only) | Keychain state is unavailable under required containment | Mint the owner-only Headless setup-token capsule |
+| `native-login` without consent | Structured code `trust_required` | Grant the explicit native-login project acknowledgement; this is not a login failure |
 
-Do not add an API key if native subscription login is what you intended.
+Do not add an API key merely because an official CLI is logged in: a broker
+agent intentionally ignores subscription state. Conversely, do not switch a
+broker profile to native-login merely to hide a missing daemon credential; the
+two modes have different network and budget boundaries.
 
 ## 1. Grant the explicit native-login trust
 
@@ -67,3 +74,20 @@ If Claude alone remains unavailable, install its
 [setup-token capsule](../ai-coders/claude.md#macos-mint-the-setup-token-keychain-limitation).
 If Grok remains blocked, its contained trust-canary inspection did not prove
 the required isolation; do not bypass that attestation.
+
+For broker mode, add the named credential to the environment of the process
+that starts the daemon—not only to a later client shell—then restart it:
+
+```bash
+headless daemon stop --cwd "$PROJECT"
+# Export the exact credential named by Fleet health before restarting.
+export OPENAI_API_KEY="<provider-key>"
+headless daemon status --cwd "$PROJECT"
+headless experimental fleet health --cwd "$PROJECT"
+```
+
+Expected: health, admission, and broker egress all use that same daemon
+environment. The TUI and fleet-health RPC never return the credential value;
+they expose only the environment-variable name and a bounded remedy.
+
+See [Modes and policy axes](../concepts/modes.md) for the broker/native tradeoff.

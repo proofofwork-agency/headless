@@ -1,6 +1,6 @@
 {
   "name": "@proofofwork-agency/headless",
-  "version": "0.2.0-beta.2",
+  "version": "0.2.0-beta.3",
   "private": true,
   "description": "Universal headless runner and local control plane for AI coding CLIs with a native JSONL ledger and OpenCode plugin tools.",
   "packageManager": "bun@1.3.14",

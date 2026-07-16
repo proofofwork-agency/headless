@@ -1,7 +1,7 @@
 ---
 id: receipts
 title: Execution Receipts
-sidebar_position: 2
+sidebar_position: 7
 ---
 
 # Execution receipts
@@ -29,6 +29,22 @@ The integrity block then covers all of it: `sectionDigests` holds one SHA-256 pe
 When a run reaches terminal state, Headless appends an `execution_receipt` artifact to the project's tamper-evident ledger — the same append-only chain in which every record binds its sequence, previous hash, and SHA-256 or HMAC-SHA256 metadata. The anchor is a compact marker (bounded to 3,500 bytes) carrying the receipt ID, run ID, the receipt's self-digest, mode, status, and lite provenance; the full receipt lives in the durable receipt store. Anchoring every run — including read-only ones — stays cheap by design.
 
 `integrity.ledgerAnchor` in the receipt records the project ID, ledger sequence, and record hash it was anchored under, closing the loop: the receipt names its anchor, and the anchor names the receipt's digest.
+
+## Crash recovery: no silent post-terminal window
+
+Receipt evidence is assembled after the durable job reaches terminal state, because a receipt is evidence—not authority over whether the run completed. That ordering used to leave a narrow crash window: the terminal job could be durable while its receipt and ledger anchor were not.
+
+Headless now writes a per-job receipt-journal intent **before** the terminal job update. The owner-only, fsynced marker captures the authorization, broker lease, gates, budget, bounded capture failure, and exact at-run provenance needed to reproduce the receipt. On daemon boot, every pending marker is reconciled against the durable request and terminal result:
+
+1. If the receipt already exists, startup marks the journal complete without re-emitting it.
+2. If the receipt is missing, startup deterministically reassembles and anchors it. Receipt IDs and ledger event IDs are deterministic, so a crash after the anchor but before the receipt-store write reuses the same anchor rather than appending a duplicate.
+3. If safe reassembly is impossible—for example, the persisted inputs conflict with an existing anchor—Headless records an explicit `execution_receipt_gap` artifact with a bounded reason and marks the journal `gap`.
+
+The gap artifact is deliberately **not** an `execution_receipt` and carries no receipt-anchor marker, so verification cannot mistake it for proof. If the ledger cannot accept either recovery record (for example, a verifier-only HMAC keyring has no active writer key), the marker stays pending for a future authorized writer. One malformed marker is diagnosed and left for repair; it does not prevent unrelated daemon state from becoming ready.
+
+:::note
+Recovery preserves the evidence-is-not-authority invariant: receipt or journal failures never rewrite a successful run as failed. The durable terminal job remains the execution truth, while the journal makes missing evidence visible and repairable instead of silent.
+:::
 
 ## Verification levels — and what each honestly proves
 

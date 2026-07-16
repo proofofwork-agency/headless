@@ -12,7 +12,12 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Core concepts',
       items: [
+        'concepts/architecture',
+        'concepts/modes',
+        'concepts/containment',
         'concepts/safety-model',
+        'concepts/sessions',
+        'concepts/skills',
         'concepts/receipts',
         'concepts/leads-and-fleet',
       ],

@@ -387,10 +387,10 @@ headless experimental fleet health --profile-id native-subscriptions
 ```
 
 Expected: per-agent readiness JSON (ready, login required, blocked) with
-recovery guidance. Note the known trap: an untrusted project and a
-broker-default profile are both humanized as `login_required` even when the
-provider CLIs are logged in — grant native trust and use a native-login
-profile.
+mode-specific recovery guidance. Broker agents name the missing daemon-held
+credential variable; native-login agents surface the real capsule/login
+reason; missing native consent is `trust_required`. See
+[Understand “login required”](../troubleshooting/login-required.md).
 
 ```bash
 headless experimental fleet profile upsert --file fleet.json --activate
