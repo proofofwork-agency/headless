@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunSessionExecutor } from "../src/runtime/session-drivers";
 import { CLAUDE_SETUP_TOKEN_ENV } from "../src/runtime/native-auth-capsule";
+import { schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 
@@ -323,7 +324,7 @@ function fixture() {
 }
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 5_000) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + schedulingWindow(timeoutMs);
   while (!(await predicate())) {
     if (Date.now() >= deadline) throw new Error("Timed out waiting for session transport state.");
     await Bun.sleep(5);

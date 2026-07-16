@@ -8,6 +8,7 @@ import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { CLAUDE_SETUP_TOKEN_ENV } from "../src/runtime/native-auth-capsule";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { createWorkerEnvironment } from "../src/runtime/worker-environment";
+import { schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 const originalPath = process.env.PATH;
@@ -691,7 +692,7 @@ function readCalls(project: string) {
 }
 
 async function waitForWorkerFile(baseDir: string, name: string) {
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + schedulingWindow(10_000);
   while (!workerFileExists(baseDir, name)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${name} beneath ${baseDir}.`);
     await Bun.sleep(5);

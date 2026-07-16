@@ -24,16 +24,28 @@ import { backendDefinitions } from "../src/backends/registry";
 import { ProviderBroker } from "../src/broker/server";
 import { RunToolEndpointManager } from "../src/daemon/run-tool-endpoint";
 import { installRunToolClient } from "../src/runtime/run-tool-client";
+import { schedulingWindow } from "./support/timing";
 
 const cleanupRoots: string[] = [];
 const darwinTest = process.platform === "darwin" ? test : test.skip;
-// Real-sandbox tests spawn bwrap + relay + worker processes; on loaded 2-core
-// CI hosts that regularly exceeds bun's 5s default per-test timeout, so give
-// every such test the same explicit 30s window instead of per-test tuning.
-const SANDBOX_TEST_TIMEOUT_MS = 30_000;
+const HOSTED_LINUX_RELAY_INCOMPATIBLE = process.platform === "linux"
+  && process.env.GITHUB_ACTIONS === "true"
+  && process.env.HEADLESS_PRIVILEGED_CONTAINMENT_CI !== "1";
+if (HOSTED_LINUX_RELAY_INCOMPATIBLE) {
+  console.warn("Skipping the late-socket broker/run-tool relay lifecycle case in the unprivileged GitHub runner; CI runs it in the privileged Linux containment step.");
+}
+// Real-sandbox tests spawn bwrap + relay + worker processes. The exact
+// broker+run-tool capability test has reached the helper's 15s latency bound
+// on loaded two-core Linux runners even though the transport remains healthy.
+// Capability evidence is not a latency SLO, so give Linux a bounded 90s test
+// ceiling while keeping the worker helper itself capped at 60s.
+const SANDBOX_TEST_TIMEOUT_MS = process.platform === "linux" ? 90_000 : 30_000;
 const linuxBwrapTest: typeof test | typeof test.skip = process.platform === "linux" && hasBwrap()
   ? ((name: string, fn: () => unknown | Promise<unknown>) => test(name, fn, SANDBOX_TEST_TIMEOUT_MS)) as typeof test
   : test.skip;
+const linuxRelayLifecycleTest: typeof test | typeof test.skip = HOSTED_LINUX_RELAY_INCOMPATIBLE
+  ? test.skip
+  : linuxBwrapTest;
 const linuxX64BwrapTest: typeof test | typeof test.skip = process.platform === "linux" && process.arch === "x64" && hasBwrap()
   ? ((name: string, fn: () => unknown | Promise<unknown>) => test(name, fn, SANDBOX_TEST_TIMEOUT_MS)) as typeof test
   : test.skip;
@@ -418,7 +430,7 @@ describe("Linux bubblewrap profiles", () => {
     }
   });
 
-  linuxBwrapTest("denies a host Unix socket created after launch while broker and run tools remain reachable", async () => {
+  linuxRelayLifecycleTest("denies a host Unix socket created after launch while broker and run tools remain reachable", async () => {
     const project = temporaryDirectory("headless-linux-late-socket-project-");
     const runtime = temporaryDirectory("headless-linux-late-socket-runtime-");
     const brokerSocket = join(runtime, "broker.sock");
@@ -435,7 +447,7 @@ describe("Linux bubblewrap profiles", () => {
       provider: "openai",
       models: ["gpt-test"],
       endpointClasses: ["responses"],
-      expiresAt: Date.now() + 30_000,
+      expiresAt: Date.now() + 90_000,
       maxRequests: 1,
     });
     const runTools = new RunToolEndpointManager({
@@ -447,7 +459,7 @@ describe("Linux bubblewrap profiles", () => {
       jobId: "late-socket-job",
       sessionId: "late-socket-session",
       principal: "contained-worker",
-      expiresAt: Date.now() + 30_000,
+      expiresAt: Date.now() + 90_000,
     });
     const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") });
     const relayPort = reservation.port;
@@ -463,6 +475,7 @@ describe("Linux bubblewrap profiles", () => {
       jobId: endpoint.scope.jobId,
       sessionId: endpoint.scope.sessionId,
     }));
+    worker.env.HEADLESS_RUN_TOOL_TIMEOUT_MS = "60000";
     const script = [
       "const {existsSync,writeFileSync}=require('node:fs');",
       "const {createConnection}=require('node:net');",
@@ -497,7 +510,7 @@ describe("Linux bubblewrap profiles", () => {
     try {
       expect(wrapped.sandboxed, wrapped.reason).toBe(true);
       const child = Bun.spawn(wrapped.cmd, { cwd: project, env: worker.env, stdout: "pipe", stderr: "pipe" });
-      const readyDeadline = Date.now() + 5_000;
+      const readyDeadline = Date.now() + schedulingWindow(5_000);
       while (!existsSync(marker) && child.exitCode === null && Date.now() < readyDeadline) await Bun.sleep(10);
       expect(existsSync(marker)).toBe(true);
       await listenUnix(forbidden, lateSocket);

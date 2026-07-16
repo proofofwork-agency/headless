@@ -20,6 +20,7 @@ import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runt
 import { ProjectTrustStore } from "../src/runtime/project-trust-store";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
+import { schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 const adapters: string[] = [];
@@ -1060,7 +1061,7 @@ function restoreEnv(name: string, value: string | undefined) {
 }
 
 async function waitUntil(check: () => boolean, timeoutMs = 1_000) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + schedulingWindow(timeoutMs);
   while (!check()) {
     if (Date.now() >= deadline) throw new Error("Timed out waiting for fixture state.");
     await Bun.sleep(5);

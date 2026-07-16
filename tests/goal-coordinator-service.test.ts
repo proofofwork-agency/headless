@@ -9,6 +9,7 @@ import { GoalCoordinatorService } from "../src/runtime/goal-coordinator-service"
 import { GoalStore } from "../src/runtime/goal-store";
 import { HeadlessError } from "../src/runtime/headless-error";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
+import { schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 
@@ -1034,7 +1035,7 @@ function rateLimitedResult(retryAfterMs: number, evidence: string): RunResult {
 }
 
 async function settleUntil(predicate: () => boolean) {
-  const deadline = Date.now() + 2_000;
+  const deadline = Date.now() + schedulingWindow(2_000);
   while (Date.now() < deadline) {
     if (predicate()) return;
     await Bun.sleep(1);

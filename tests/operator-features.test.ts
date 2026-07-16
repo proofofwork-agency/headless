@@ -8,6 +8,7 @@ import { LoopStore } from "../src/runtime/loop-store";
 import { migrateSingleLeadState } from "../src/runtime/project-state-migration";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { SkillRegistry } from "../src/runtime/skill-registry";
+import { schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 const runtimeRoots: string[] = [];
@@ -150,4 +151,4 @@ function fixture() {
   return ensureProjectStateDirectories(getProjectStatePaths(project, { env: { HEADLESS_STATE_HOME: join(root, "state"), HEADLESS_RUNTIME_HOME: runtime }, platform: "linux" }));
 }
 function policy() { return { target: { kind: "goal" as const, objective: "finish once", mode: "read-only" as const }, maxIterations: 5, deadline: Date.now() + 60_000, perIteration: { maxCostUsd: 1, maxRequests: 1 }, aggregate: { maxCostUsd: 5, maxRequests: 5 }, backoff: { kind: "fixed" as const, initialMs: 0, maxMs: 0 }, success: "target-succeeded" as const, terminalFailures: ["blocked" as const], approvalPolicy: "ask" as const, integrationPolicy: "preserve" as const }; }
-async function waitUntil(predicate: () => boolean) { const deadline = Date.now() + 2_000; while (!predicate()) { if (Date.now() > deadline) throw new Error("timed out"); await Bun.sleep(10); } }
+async function waitUntil(predicate: () => boolean) { const deadline = Date.now() + schedulingWindow(2_000); while (!predicate()) { if (Date.now() > deadline) throw new Error("timed out"); await Bun.sleep(10); } }

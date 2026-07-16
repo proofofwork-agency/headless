@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadlessDaemonClient } from "../src/daemon/client";
+import { schedulingAttempts } from "./support/timing";
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const children = new Set<ReturnType<typeof Bun.spawn>>();
@@ -96,7 +97,7 @@ async function startDaemon(
   });
   children.add(child);
   const stderrPromise = Bun.readableStreamToText(child.stderr);
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  for (let attempt = 0; attempt < schedulingAttempts(120); attempt += 1) {
     if (child.exitCode !== null) {
       throw new Error(`daemon exited during startup (${child.exitCode}): ${await stderrPromise}`);
     }

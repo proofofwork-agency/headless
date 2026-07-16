@@ -8,6 +8,7 @@ import type { DurableSession, Job } from "../src/contracts/durable";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { BudgetStore } from "../src/runtime/budget-store";
+import { schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];
@@ -116,7 +117,7 @@ function run(backend: string, prompt: string, sessionId: string | undefined) {
 }
 
 async function waitForPath(path: string, describe: () => Promise<string>) {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + schedulingWindow(5_000);
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path} (${await describe()})`);
     await Bun.sleep(10);

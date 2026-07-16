@@ -13,6 +13,7 @@ import {
 } from "../src/runtime/daemon-extensions";
 import type { Job } from "../src/contracts/durable";
 import { getProjectStatePaths } from "../src/runtime/project-state";
+import { schedulingAttempts } from "./support/timing";
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const indexUrl = new URL("../src/index.ts", import.meta.url).href;
@@ -432,7 +433,7 @@ async function startDaemon(
   });
   children.add(child);
   const stderrPromise = Bun.readableStreamToText(child.stderr);
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  for (let attempt = 0; attempt < schedulingAttempts(120); attempt += 1) {
     if (child.exitCode !== null) throw new Error(`daemon exited during startup (${child.exitCode}): ${await stderrPromise}`);
     try {
       const client = new HeadlessDaemonClient({ projectRoot: project, state, timeoutMs: 250 });
@@ -447,7 +448,7 @@ async function startDaemon(
 }
 
 async function waitForProcessExit(pid: number) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < schedulingAttempts(100); attempt += 1) {
     if (!processIsRunning(pid)) return;
     await Bun.sleep(20);
   }

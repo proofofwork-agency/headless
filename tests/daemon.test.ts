@@ -26,6 +26,7 @@ import { registerBackendDefinition, unregisterBackendDefinition, type BackendDef
 import { parseGrokJsonl } from "../src/backends/grok";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
 import { exec as headlessExec } from "../src/index";
+import { schedulingAttempts, schedulingWindow } from "./support/timing";
 
 setDefaultTimeout(20_000);
 
@@ -1043,7 +1044,20 @@ console.log(JSON.stringify({type:"text",text}));`);
 
   test("an externally claimed queued task cannot prevent daemon execution or terminal resolution", async () => {
     const fixture = createFixture();
-    installBackend(fixture.bin, `await Bun.sleep(200); console.log(JSON.stringify({type:"text",text:"done"}));`);
+    const activeReady = join(fixture.root, "active-ready");
+    const releaseActive = join(fixture.root, "release-active");
+    installBackend(fixture.bin, [
+      `const {existsSync,writeFileSync}=require("node:fs");`,
+      `const ready=${JSON.stringify(activeReady)};`,
+      `const release=${JSON.stringify(releaseActive)};`,
+      `if(!existsSync(ready)){`,
+      `  writeFileSync(ready,"ready",{flag:"wx"});`,
+      `  const deadline=Date.now()+60000;`,
+      `  while(!existsSync(release)&&Date.now()<deadline)await Bun.sleep(10);`,
+      `  if(!existsSync(release)){console.error("fixture release timed out");process.exit(2);}`,
+      `}`,
+      `console.log(JSON.stringify({type:"text",text:"done"}));`,
+    ].join("\n"));
     const daemon = new HeadlessDaemon({
       projectRoot: fixture.project,
       state: fixture.state,
@@ -1055,13 +1069,15 @@ console.log(JSON.stringify({type:"text",text}));`);
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
 
-    const active = await client.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "hold slot", containment: "unsafe", timeoutMs: 5_000 });
-    const queued = await client.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "run after claim", containment: "unsafe", timeoutMs: 5_000 });
+    const active = await client.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "hold slot", containment: "unsafe", timeoutMs: 30_000 });
+    await waitForPath(activeReady, 5_000);
+    const queued = await client.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "run after claim", containment: "unsafe", timeoutMs: 30_000 });
     const task = (await client.call<Task[]>("task.list", { jobId: queued.id }))[0]!;
     expect(await client.call("task.claim", { taskId: task.id, leaseMs: 30_000 })).toMatchObject({ state: "claimed", claimedBy: "coordinator" });
+    writeFileSync(releaseActive, "release");
 
-    await client.call<Job>("run.wait", { jobId: active.id, timeoutMs: 10_000 });
-    const completed = await client.call<Job>("run.wait", { jobId: queued.id, timeoutMs: 10_000 });
+    await client.call<Job>("run.wait", { jobId: active.id, timeoutMs: 30_000 });
+    const completed = await client.call<Job>("run.wait", { jobId: queued.id, timeoutMs: 30_000 });
     expect(completed.state).toBe("succeeded");
     expect(await client.call<Task>("task.status", { taskId: task.id })).toMatchObject({ state: "completed", claimedBy: "coordinator" });
   });
@@ -1110,7 +1126,7 @@ console.log(JSON.stringify({type:"text",text}));`);
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
     const writer = await client.call<Job>("run.submit", { backend: FIXTURE_WRITE_BACKEND, prompt: "write slowly", mode: "write", containment: "required", approvalPolicy: "auto", timeoutMs: 10_000 });
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    for (let attempt = 0; attempt < schedulingAttempts(100); attempt += 1) {
       if (runGitStrict(["worktree", "list", "--porcelain"], fixture.project).stdout.includes("headless/write/")) break;
       await Bun.sleep(20);
     }
@@ -1483,7 +1499,7 @@ function createFixture() {
 }
 
 async function waitForPath(path: string, timeoutMs: number) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + schedulingWindow(timeoutMs);
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
     await Bun.sleep(10);

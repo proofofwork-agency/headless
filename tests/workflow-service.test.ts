@@ -8,6 +8,7 @@ import { WorkflowService, type WorkflowSubmitOptions } from "../src/daemon/workf
 import { FinalityStore } from "../src/runtime/finality-store";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import type { AuthenticatedCredential } from "../src/runtime/credential-store";
+import { schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 
@@ -239,7 +240,7 @@ function result(
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + schedulingWindow(timeoutMs);
   while (Date.now() < deadline) {
     if (predicate()) return;
     await Bun.sleep(1);

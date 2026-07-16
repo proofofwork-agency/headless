@@ -9,6 +9,7 @@ import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { WorkflowStore } from "../src/runtime/workflow-store";
+import { schedulingWindow } from "./support/timing";
 
 const BACKEND = "fixture-workflow";
 const originalPath = process.env.PATH;
@@ -163,7 +164,7 @@ function fixtureAdapter(): BackendDefinition {
 }
 
 async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5_000) {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + schedulingWindow(timeoutMs);
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await Bun.sleep(20);
