@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.2.0-beta.3 — 2026-07-16
+
+Publication remains blocked. Both package manifests are private at `0.2.0-beta.3`; npm publication, repository visibility, and documentation deployment remain separate human-authority decisions.
+
+### Fixed
+
+- Replaced expiring session and skill completion watchers with durable terminal-job reconciliation. Long-running turns no longer orphan sessions after three minutes; shutdown drains outstanding waiter timers; startup reconciles terminal sessions and skill invocations; session completion is idempotent by job ID.
+- Added crash recovery for the post-terminal receipt window. A write-ahead receipt journal persists assembly inputs before job completion, daemon startup deterministically repairs missing receipts or dangling anchors, and unrecoverable evidence becomes an explicit non-anchor `execution_receipt_gap` instead of silent loss.
+- Made fleet authentication health truthful per selected mode. Broker agents name the missing daemon credential variable; native-login agents surface the bounded capsule/setup-token reason; health, admission, lease issuance, and broker egress use the same injected daemon environment. Broker remains the execution-contract default.
+- Unified session and one-shot security arguments. Claude sessions now retain the shared denied-tool set, and every Codex transport delegates nested macOS sandboxing to Headless's outer Seatbelt profile without changing one-shot bypass semantics.
+- Added durable principal-scoped `run.submit` idempotency, fail-closed conflict detection, encoded and double-encoded broker path-traversal rejection, route-segment boundaries, and complete injected-environment parity across admission and execution.
+
+### Added
+
+- Added an independent always-run website CI job with a frozen, script-disabled Bun install and Docusaurus production build. Added direct tests for depth-bounded JSON parsing, atomic write/append durability, owner-only JSON permission repair, and every built-in session event decoder.
+- Added comprehensive concept documentation for daemon architecture and recovery, the four independent run-mode axes, macOS/Linux containment and relays, persistent sessions, and portable immutable skills. Updated receipts, safety, fleet-login troubleshooting, CLI/TUI guidance, and release-facing version references for the six stabilization lanes.
+
+### Verification
+
+- The six-lane stabilization merged through PR #27 after the website, Ubuntu, and macOS release-gate jobs passed. The final pre-merge local gate reported 761 passing tests, 11 documented platform skips, zero failures, green root/plugin/TUI builds, a green Docusaurus build, and a green package smoke.
+
 ## 0.2.0-beta.2 — 2026-07-16
 
 Publication remains blocked. Both package manifests are private at `0.2.0-beta.2`; the staged Gate A, B, and C evidence in `docs/plan.md` is an acceptance checklist, not a completion claim.

@@ -80,10 +80,11 @@ policy, auth mode, worker/queue limits, and the selected agent's readiness).
 Each of the four advertised backends renders in a stable identity color
 wherever it is named — Claude orange, Codex blue, OpenCode green, Grok violet
 — so the fleet reads at a glance. When an agent shows `Login required`, the
-detail pane displays the provider's own login command and the honest
-instruction: use the provider CLI externally, then refresh this observer. The
-TUI never runs a login. Multiple profiles are listed with a reminder that
-switching happens through the root CLI.
+detail pane preserves the daemon's mode-specific reason: broker mode names the
+missing daemon credential; native-login shows the supported provider login or
+setup-token remedy. The TUI never runs a login or reads a credential value.
+Multiple profiles are listed with a reminder that switching happens through
+the root CLI.
 
 ### 3 — Goals
 
@@ -146,6 +147,13 @@ Keyboard:
 - `Esc` returns to Overview (from Overview it quits).
 - Arrow keys or `j`/`k` move the row selection in Fleet, Goals, and
   Approvals, and scroll the Events feed; `PgUp`/`PgDn` page Events.
+- In Events, `e` toggles errors-only, `a` toggles activity-only, and `g`
+  toggles grouping. Change compact/verbose/strict rendering from a shell with
+  `headless experimental events --display-mode <mode>`; the TUI has no log-mode
+  mutation key.
+- In Goals, `h` cycles recent, all, and grouped history. Selection only
+  highlights a row; the live timeline follows the daemon's already-active
+  goal and `Enter` does not activate one.
 - `r` refreshes the observer snapshot.
 - `q` (on empty input) or `Ctrl-C` quits the client without stopping the
   daemon or any detached work.
@@ -193,3 +201,4 @@ and its receipt.
 - The TUI has no prompt, command palette, provider login, run dispatch,
   approval resolution, candidate integration, policy mutation, or provider
   cancellation — by design, not omission.
+- Help is view `7`; there is no separate `?` shortcut.

@@ -30,7 +30,7 @@ headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
 headless experimental fleet health --cwd "$PROJECT"
 ```
 
-Fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If it reports `login_required` even though `codex login` succeeded, the cause is usually missing trust or a broker-default fleet profile — see [Fleet says "login required"](../troubleshooting/login-required.md).
+Fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If it does not, read the mode-specific credential, capsule, or trust reason before changing authentication — see [Understand "login required"](../troubleshooting/login-required.md).
 
 ## How to run it
 

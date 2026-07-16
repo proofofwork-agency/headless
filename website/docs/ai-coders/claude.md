@@ -48,7 +48,7 @@ headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
 headless experimental fleet health --cwd "$PROJECT"
 ```
 
-Fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If Claude alone stays unavailable, the setup-token file is missing or invalid — see [Fleet says "login required"](../troubleshooting/login-required.md).
+Fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If Claude alone stays unavailable, its native-login reason explains whether the setup-token capsule is missing or invalid — see [Understand "login required"](../troubleshooting/login-required.md).
 
 ## How to run it
 

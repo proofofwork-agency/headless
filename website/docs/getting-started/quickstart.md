@@ -101,7 +101,7 @@ headless experimental receipt verify <runId> --cwd "$PROJECT"
 headless tui --cwd "$PROJECT"
 ```
 
-The TUI is a read-only observer over daemon snapshots and events: fleet, goals, approvals, events, and configuration. It may start the Headless daemon if absent, but it cannot dispatch runs, resolve approvals, or mutate anything — where an action is needed, it shows you the exact root-CLI command to run from your shell. Press `?` for guidance, `q` to exit.
+The TUI is a read-only observer over daemon snapshots and events: fleet, goals, approvals, events, and configuration. It may start the Headless daemon if absent, but it cannot dispatch runs, resolve approvals, or mutate anything — where an action is needed, it shows you the exact root-CLI command to run from your shell. Press `7` for Help and `q` to exit.
 
 ## Where next
 

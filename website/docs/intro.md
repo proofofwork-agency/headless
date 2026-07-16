@@ -14,7 +14,7 @@ And it does one thing no plain runner does: it turns every run into an **executi
 Literally: proof of work for AI agents.
 
 :::note Private beta
-Headless is an unpublished private beta (`0.2.0-beta.2`). Packages are not on npm; build from source, use disposable projects, and do not entrust it with sensitive source, valuable credentials, or unattended spend yet.
+Headless is an unpublished private beta (`0.2.0-beta.3`). Packages are not on npm; build from source, use disposable projects, and do not entrust it with sensitive source, valuable credentials, or unattended spend yet.
 :::
 
 ## The problem: you can't trust what you can't verify
@@ -76,6 +76,11 @@ Anyone holding an exported receipt can check it offline; anyone holding the ledg
 
 - [Installation](./getting-started/installation.md) — requirements and building from source.
 - [Quickstart](./getting-started/quickstart.md) — first contained run to first verified receipt in about ten minutes.
+- [Architecture and data flow](./concepts/architecture.md) — the one-owner daemon, authenticated clients, workers, broker, durable state, and recovery.
+- [Modes and policy axes](./concepts/modes.md) — read/write, broker/native, required/unsafe, and ask/auto/bypass without conflating them.
+- [Operating-system containment](./concepts/containment.md) — exact Seatbelt and bubblewrap/seccomp boundaries and probes.
 - [The safety model](./concepts/safety-model.md) — containment, credentials, budgets, gated writes, and the honest threat model.
+- [Persistent sessions](./concepts/sessions.md) — native multi-turn resume with bounded replay and durable recovery.
+- [Portable skills](./concepts/skills.md) — immutable reviewed instruction bundles and invocation evidence.
 - [Execution receipts](./concepts/receipts.md) — what a receipt proves, and how to verify one offline.
 - [Leads and the fleet](./concepts/leads-and-fleet.md) — the foreground lead, fleet profiles, goals, and councils.
