@@ -511,7 +511,10 @@ describe("native authentication capsules", () => {
 });
 
 function fixtureRoot(prefix: string) {
-  const path = mkdtempSync(join(tmpdir(), prefix));
+  // Canonicalize: macOS tmpdir may sit behind the /var -> /private/var symlink
+  // depending on TMPDIR, and the capsule's canonical-path check would then fire
+  // before the branch a sub-case intends to exercise (order-dependent flake).
+  const path = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   roots.push(path);
   return path;
 }

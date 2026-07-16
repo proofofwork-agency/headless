@@ -72,9 +72,18 @@ const relayHost = process.env.HEADLESS_RUN_TOOL_HOST;
 const relayPort = Number(process.env.HEADLESS_RUN_TOOL_PORT);
 const token = process.env.HEADLESS_RUN_TOOL_TOKEN;
 const operation = process.argv[2];
+const allowedOperations = (process.env.HEADLESS_RUN_TOOL_OPERATIONS || "").split(",").filter(Boolean);
 const hasRelay = relayHost === "127.0.0.1" && Number.isSafeInteger(relayPort) && relayPort > 0 && relayPort <= 65535;
 if ((!socketPath && !hasRelay) || !token || !operation) {
   console.error("usage: headless-run-tool <operation> '<json-params>'");
+  process.exit(2);
+}
+// Defense in depth: refuse an operation this credential does not carry BEFORE
+// any transport. The daemon endpoint remains the authority; this only fails a
+// disallowed call faster and more loudly. An empty allowlist means the caller
+// did not scope operations (test paths), so it is treated as unset.
+if (allowedOperations.length > 0 && !allowedOperations.includes(operation)) {
+  console.error(\`run tool operation is not allowed by this credential: \${operation}\`);
   process.exit(2);
 }
 let params = {};
@@ -90,6 +99,7 @@ const request = JSON.stringify({ version: 1, id, token, operation, params }) + "
 const socket = hasRelay ? createConnection({ host: relayHost, port: relayPort }) : createConnection(socketPath);
 socket.setEncoding("utf8");
 let buffer = "";
+let settled = false;
 const configuredTimeoutMs = Number(process.env.HEADLESS_RUN_TOOL_TIMEOUT_MS);
 const baseTimeoutMs = Number.isSafeInteger(configuredTimeoutMs)
   ? Math.max(${MIN_RUN_TOOL_TIMEOUT_MS}, Math.min(${MAX_RUN_TOOL_TIMEOUT_MS}, configuredTimeoutMs))
@@ -102,10 +112,12 @@ const timeoutMs = operation === "run.delegate"
 const timeout = setTimeout(() => socket.destroy(new Error("run tool timeout")), timeoutMs);
 socket.once("connect", () => socket.write(request));
 socket.on("data", (chunk) => {
+  if (settled) return;
   buffer += chunk;
   if (Buffer.byteLength(buffer) > 524288) socket.destroy(new Error("run tool response exceeded limit"));
   const newline = buffer.indexOf("\\n");
   if (newline < 0) return;
+  settled = true;
   clearTimeout(timeout);
   socket.end();
   try {
@@ -120,8 +132,20 @@ socket.on("data", (chunk) => {
   }
 });
 socket.once("error", (error) => {
+  if (settled) return;
+  settled = true;
   clearTimeout(timeout);
   console.error(\`run tool unavailable: \${error.message}\`);
+  process.exit(1);
+});
+socket.once("close", () => {
+  // Fail closed: a connection that closes without a complete response must
+  // never look like success. Immediate exit keeps completion independent of
+  // relay teardown (the exitCode-drain variant hung hosted bwrap relays).
+  if (settled) return;
+  settled = true;
+  clearTimeout(timeout);
+  console.error("run tool connection closed without a response");
   process.exit(1);
 });
 `;
