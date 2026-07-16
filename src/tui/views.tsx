@@ -5,7 +5,7 @@ import { backendMetadata } from "../backends/metadata";
 import { normalizeBackend } from "../backends/ids";
 import { strictLogIdentity, type LogDisplayMode } from "../runtime/log-presentation";
 import { BackendName, Dot, EmptyHint, GateChips, KeyValue, SectionTitle } from "./components";
-import { contentRows, listWindowStart } from "./layout";
+import { contentFrameRows, contentInsetRows, contentRows, listContentRows, listWindowStart } from "./layout";
 import {
   activeFleetProfile,
   activeGoal,
@@ -34,45 +34,62 @@ export type ListMeta = { rows: number; start: number; total: number; paneWidth: 
 
 export function OverviewView({ state, width, height }: { state: TuiControlRoomState; width: number; height: number }) {
   const rows = contentRows(height);
+  const frameRows = contentFrameRows(height);
+  const inset = contentInsetRows(height);
   const control = controlSummary(state);
   const health = healthSummary(state);
   const goal = goalSummary(state);
   const actions = nextActions(state);
-  const activityRows = Math.max(1, rows - 11 - actions.length - (goal ? 3 : 1));
+  const actionRows = Math.max(1, actions.length);
+  const taskRows = goal ? 4 : 2;
+  const fixedRows = 1 + 3 + 2 + taskRows + 1 + actionRows + 1;
+  const groupCount = 5;
+  const groupGap = rows >= fixedRows + 1 + groupCount - 1 ? 1 : 0;
+  const activityRows = Math.max(0, rows - fixedRows - groupGap * (groupCount - 1));
   const activity = activityEntries(state, activityRows);
   const contentWidth = Math.max(8, width - 4);
 
   return (
-    <Box flexDirection="column" paddingX={2} height={rows}>
+    <Box flexDirection="column" paddingX={2} paddingTop={inset} height={frameRows} overflow="hidden">
       <Text bold color={ACCENT} wrap="truncate">OBSERVER OVERVIEW · durable projected state</Text>
-      <SectionTitle title="Topology" tone={ACCENT} width={contentWidth} />
-      <Text color={MUTED} wrap="truncate">  {control.connection} · project {control.project} · orchestrator {control.orchestrator} · fleet {control.fleet} · lead {control.lead}</Text>
-      <Text color={CHROME} wrap="truncate">  external lead → authenticated daemon → contained workers · this TUI only observes</Text>
-      <SectionTitle title="Health" tone={health.blocked + health.loginRequired ? WARN : OK} width={contentWidth} />
-      <Text wrap="truncate">
-        <Text>  </Text>
-        <Dot tone={health.daemon === "Ready" ? OK : WARN} /><Text color={MUTED}>daemon {health.daemon}</Text>
-        <Text color={CHROME}> · </Text>
-        <Dot tone={health.trust ? OK : WARN} /><Text color={MUTED}>trust {health.trust ? "granted" : "required"}</Text>
-        <Text color={CHROME}> · </Text>
-        <Text color={OK}>{health.ready} ready</Text>
-        <Text color={CHROME}> · </Text>
-        <Text color={health.loginRequired ? WARN : MUTED}>{health.loginRequired} login</Text>
-        <Text color={CHROME}> · </Text>
-        <Text color={health.blocked ? ERR : MUTED}>{health.blocked} blocked</Text>
-        <Text color={CHROME}> · </Text>
-        <Text color={MUTED}>queue {health.queue} · approvals {health.approvals}</Text>
-      </Text>
-      <SectionTitle title="Current task" tone={BLUE} width={contentWidth} />
-      {goal ? <>
-        <Text color="white" wrap="truncate">  {goal.id} · {goal.status} · {goal.mode} · lead {goal.lead} · stage {goal.stage}</Text>
-        <Text color={MUTED} wrap="truncate">  {truncateDisplay(goal.objective, contentWidth - 4)}</Text>
-        <Text color={CHROME} wrap="truncate">  use the CLI or attached foreground lead to change this goal</Text>
-      </> : <EmptyHint text="No active goal. Start work with the CLI or attached foreground lead." />}
-      <SectionTitle title="Next actions" tone={actions.some((action) => action.risk === "confirm") ? WARN : OK} width={contentWidth} />
-      {actions.length === 0 ? <EmptyHint text="Nothing needs you right now." /> : actions.map((action) => <Text key={action.id} color={action.risk === "confirm" ? WARN : MUTED} wrap="truncate">  {action.label} · {action.command} · {action.reason}</Text>)}
-      <SectionTitle title="Recent activity" hint="meaningful · grouped" tone={VIOLET} width={contentWidth} />
-      {activity.length === 0 ? <EmptyHint text="Quiet. Raw provider output remains available in Events." /> : activity.map((entry) => <Text key={entry.id} color={MUTED} wrap="truncate">  <Text color={entry.tone}>{entry.glyph}</Text> {truncateDisplay(entry.text, contentWidth - 6)}</Text>)}
+      <Box flexDirection="column" marginBottom={groupGap}>
+        <SectionTitle title="Topology" tone={ACCENT} width={contentWidth} />
+        <Text color={MUTED} wrap="truncate">  {control.connection} · project {control.project} · orchestrator {control.orchestrator} · fleet {control.fleet} · lead {control.lead}</Text>
+        <Text color={CHROME} wrap="truncate">  external lead → authenticated daemon → contained workers · this TUI only observes</Text>
+      </Box>
+      <Box flexDirection="column" marginBottom={groupGap}>
+        <SectionTitle title="Health" tone={health.blocked + health.loginRequired || health.trust !== "native ready" ? WARN : OK} width={contentWidth} />
+        <Text wrap="truncate">
+          <Text>  </Text>
+          <Dot tone={health.daemon === "Ready" ? OK : WARN} /><Text color={MUTED}>daemon {health.daemon}</Text>
+          <Text color={CHROME}> · </Text>
+          <Dot tone={health.trust === "native ready" ? OK : WARN} /><Text color={MUTED}>trust {health.trust}</Text>
+          <Text color={CHROME}> · </Text>
+          <Text color={OK}>{health.ready} ready</Text>
+          <Text color={CHROME}> · </Text>
+          <Text color={health.loginRequired ? WARN : MUTED}>{health.loginRequired} login</Text>
+          <Text color={CHROME}> · </Text>
+          <Text color={health.blocked ? ERR : MUTED}>{health.blocked} blocked</Text>
+          <Text color={CHROME}> · </Text>
+          <Text color={MUTED}>queue {health.queue} · approvals {health.approvals}</Text>
+        </Text>
+      </Box>
+      <Box flexDirection="column" marginBottom={groupGap}>
+        <SectionTitle title="Current task" tone={BLUE} width={contentWidth} />
+        {goal ? <>
+          <Text color="white" wrap="truncate">  {goal.id} · {goal.status} · {goal.mode} · lead {goal.lead} · stage {goal.stage}</Text>
+          <Text color={MUTED} wrap="truncate">  {truncateDisplay(goal.objective, contentWidth - 4)}</Text>
+          <Text color={CHROME} wrap="truncate">  use the CLI or attached foreground lead to change this goal</Text>
+        </> : <EmptyHint text="No active goal. Start work with the CLI or attached foreground lead." />}
+      </Box>
+      <Box flexDirection="column" marginBottom={groupGap}>
+        <SectionTitle title="Next actions" tone={actions.some((action) => action.risk === "confirm") ? WARN : OK} width={contentWidth} />
+        {actions.length === 0 ? <EmptyHint text="Nothing needs you right now." /> : actions.map((action) => <Text key={action.id} color={action.risk === "confirm" ? WARN : MUTED} wrap="truncate">  {action.label} · {action.command} · {action.reason}</Text>)}
+      </Box>
+      <Box flexDirection="column">
+        <SectionTitle title="Recent activity" hint="meaningful · grouped" tone={VIOLET} width={contentWidth} />
+        {activityRows > 0 && (activity.length === 0 ? <EmptyHint text="Quiet. Raw provider output remains available in Events." /> : activity.map((entry) => <Text key={entry.id} color={MUTED} wrap="truncate">  <Text color={entry.tone}>{entry.glyph}</Text> {truncateDisplay(entry.text, contentWidth - 6)}</Text>))}
+      </Box>
     </Box>
   );
 }
@@ -229,7 +246,7 @@ function ActivityFeed({ state, width, height }: { state: TuiControlRoomState; wi
 
 export function fleetListMeta(state: TuiControlRoomState, width: number, height: number, selected: number): ListMeta {
   const total = fleetAgentRows(state).length;
-  const rows = Math.max(1, contentRows(height) - LIST_OFFSET);
+  const rows = listContentRows(height);
   return {
     rows: Math.min(rows, total),
     start: listWindowStart(selected, rows, total),
@@ -244,10 +261,12 @@ function leftPaneWidth(width: number): number {
 
 export function FleetView({ state, width, height, selected }: { state: TuiControlRoomState; width: number; height: number; selected: number }) {
   const rows = contentRows(height);
+  const frameRows = contentFrameRows(height);
+  const inset = contentInsetRows(height);
   const profile = activeFleetProfile(state);
   const agents = fleetAgentRows(state);
   const meta = fleetListMeta(state, width, height, selected);
-  const visible = agents.slice(meta.start, meta.start + Math.max(1, rows - LIST_OFFSET));
+  const visible = agents.slice(meta.start, meta.start + meta.rows);
   const leftWidth = leftPaneWidth(width);
   const rightWidth = Math.max(24, width - leftWidth - 6);
   const selectedAgent = agents[selected];
@@ -255,7 +274,7 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
   const nameWidth = Math.max(10, Math.floor(leftWidth * 0.4));
 
   return (
-    <Box paddingX={2} height={rows}>
+    <Box paddingX={2} paddingTop={inset} height={frameRows} overflow="hidden">
       <Box flexDirection="column" width={leftWidth}>
         <SectionTitle title="Agents" hint={profile ? profile.name : "no profile"} tone={ACCENT} width={leftWidth} />
         <Text color={CHROME} wrap="truncate">  {"agent".padEnd(nameWidth)} {"backend".padEnd(9)} auth</Text>
@@ -302,9 +321,13 @@ export function FleetView({ state, width, height, selected }: { state: TuiContro
             </KeyValue>
             <KeyValue label="backend"><BackendName backend={selectedAgent.backend} /><Text color={CHROME}> · load </Text><Text color={MUTED}>{selectedAgent.load}</Text></KeyValue>
             <KeyValue label="readiness"><Dot tone={readinessTone(selectedAgent.readiness)} /><Text color={readinessTone(selectedAgent.readiness)}>{selectedAgent.readiness}</Text></KeyValue>
-            {selectedAgent.recovery && rows >= 12 ? <>
+            {selectedAgent.recovery && selectedAgent.readiness !== "Trust required" && rows >= 12 ? <>
               <KeyValue label="why"><Text color={MUTED}>{truncateDisplay(selectedAgent.recovery.explanation, Math.max(8, rightWidth - 14))}</Text></KeyValue>
               <KeyValue label="next"><Text color={WARN}>{truncateDisplay(selectedAgent.recovery.nextAction, Math.max(8, rightWidth - 14))}</Text></KeyValue>
+            </> : null}
+            {selectedAgent.recovery && selectedAgent.readiness === "Trust required" && rows >= 12 ? <>
+              <KeyValue label="why"><Text color={MUTED}>{truncateDisplay(selectedAgent.recovery.explanation, Math.max(8, rightWidth - 14))}</Text></KeyValue>
+              <KeyValue label="grant" labelWidth={6}><Text color={ACCENT} wrap="truncate">{selectedAgent.recovery.nextAction}</Text></KeyValue>
             </> : null}
             {login && selectedAgent.readiness === "Login required" && rows >= 16 ? <>
               <KeyValue label="expects"><Text color={MUTED}>supported provider CLI login state</Text></KeyValue>
@@ -334,9 +357,9 @@ function loginMetadata(backend: string) {
 
 // ── Goals ───────────────────────────────────────────────────────────────────
 
-export function goalsListMeta(state: TuiControlRoomState, width: number, height: number, selected: number): ListMeta {
-  const total = goalRows(state).length;
-  const rows = Math.max(1, contentRows(height) - LIST_OFFSET);
+export function goalsListMeta(state: TuiControlRoomState, width: number, height: number, selected: number, historyMode: import("./model").GoalHistoryMode = "recent"): ListMeta {
+  const total = goalRows({ ...state, historyMode }).length;
+  const rows = listContentRows(height);
   return {
     rows: Math.min(rows, total),
     start: listWindowStart(selected, rows, total),
@@ -347,9 +370,11 @@ export function goalsListMeta(state: TuiControlRoomState, width: number, height:
 
 export function GoalsView({ state, width, height, selected, historyMode = "recent" }: { state: TuiControlRoomState; width: number; height: number; selected: number; historyMode?: import("./model").GoalHistoryMode }) {
   const rows = contentRows(height);
+  const frameRows = contentFrameRows(height);
+  const inset = contentInsetRows(height);
   const goals = goalRows({ ...state, historyMode });
-  const meta = goalsListMeta(state, width, height, selected);
-  const visible = goals.slice(meta.start, meta.start + Math.max(1, rows - LIST_OFFSET));
+  const meta = goalsListMeta(state, width, height, selected, historyMode);
+  const visible = goals.slice(meta.start, meta.start + meta.rows);
   const leftWidth = leftPaneWidth(width);
   const rightWidth = Math.max(24, width - leftWidth - 6);
   const selectedRow = goals[selected];
@@ -358,7 +383,7 @@ export function GoalsView({ state, width, height, selected, historyMode = "recen
   const timeline = detail && detail.id === state.activeGoalId ? activityEntries(state, timelineRows) : [];
 
   return (
-    <Box paddingX={2} height={rows}>
+    <Box paddingX={2} paddingTop={inset} height={frameRows} overflow="hidden">
       <Box flexDirection="column" width={leftWidth}>
         <SectionTitle title="Goals" hint={`${historyMode} · ${goals.length}`} tone={BLUE} width={leftWidth} />
         <Text color={CHROME} wrap="truncate">  state · goal · objective</Text>
@@ -419,7 +444,7 @@ const APPROVAL_DETAIL_ROWS = 5;
 
 export function approvalsListMeta(state: TuiControlRoomState, width: number, height: number, selected: number): ListMeta {
   const total = pendingApprovals(state).length;
-  const rows = Math.max(1, contentRows(height) - LIST_OFFSET - APPROVAL_DETAIL_ROWS);
+  const rows = listContentRows(height, LIST_OFFSET + APPROVAL_DETAIL_ROWS);
   return {
     rows: Math.min(rows, total),
     start: listWindowStart(selected, rows, total),
@@ -430,15 +455,17 @@ export function approvalsListMeta(state: TuiControlRoomState, width: number, hei
 
 export function ApprovalsView({ state, width, height, selected }: { state: TuiControlRoomState; width: number; height: number; selected: number }) {
   const rows = contentRows(height);
+  const frameRows = contentFrameRows(height);
+  const inset = contentInsetRows(height);
   const approvals = approvalRows(state);
   const meta = approvalsListMeta(state, width, height, selected);
-  const visible = approvals.slice(meta.start, meta.start + Math.max(1, rows - LIST_OFFSET - APPROVAL_DETAIL_ROWS));
+  const visible = approvals.slice(meta.start, meta.start + meta.rows);
   const contentWidth = width - 4;
   const detail = approvals[selected];
   const idWidth = Math.max(10, Math.min(24, Math.floor(contentWidth * 0.2)));
 
   return (
-    <Box flexDirection="column" paddingX={2} height={rows}>
+    <Box flexDirection="column" paddingX={2} paddingTop={inset} height={frameRows} overflow="hidden">
       <SectionTitle
         title="Approvals"
         hint={approvals.length > 0 ? `${approvals.length} pending · resolve with the CLI` : undefined}
@@ -483,7 +510,7 @@ export function ApprovalsView({ state, width, height, selected }: { state: TuiCo
 // ── Events ──────────────────────────────────────────────────────────────────
 
 export function eventRowCount(height: number): number {
-  return Math.max(1, contentRows(height) - LIST_OFFSET);
+  return listContentRows(height);
 }
 
 export function boundedEventWindow<T>(items: readonly T[], visibleRows: number, scrollBack: number) {
@@ -506,6 +533,8 @@ export function eventDisplayRows(state: TuiControlRoomState, filter: import("./m
 
 export function EventsView({ state, width, height, scrollBack, filter = "all", grouped = true, mode = "compact" }: { state: TuiControlRoomState; width: number; height: number; scrollBack: number; filter?: import("./model").EventFilter; grouped?: boolean; mode?: LogDisplayMode }) {
   const rows = contentRows(height);
+  const frameRows = contentFrameRows(height);
+  const inset = contentInsetRows(height);
   const visibleRows = eventRowCount(height);
   const contentWidth = width - 4;
   const rowsToShow = eventDisplayRows(state, filter, grouped, mode);
@@ -515,7 +544,7 @@ export function EventsView({ state, width, height, scrollBack, filter = "all", g
   const liveEvent = live ? visible.at(-1) : null;
 
   return (
-    <Box flexDirection="column" paddingX={2} height={rows}>
+    <Box flexDirection="column" paddingX={2} paddingTop={inset} height={frameRows} overflow="hidden">
       <SectionTitle
         title="Events"
         hint={live ? `live · ${mode} · ${filter} · ${rowsToShow.length}/${state.events.length}` : `scrollback ${scrollBack} · ${mode} · ${filter}`}
@@ -536,13 +565,15 @@ export function EventsView({ state, width, height, scrollBack, filter = "all", g
 
 export function ConfigView({ state, width, height }: { state: TuiControlRoomState; width: number; height: number }) {
   const rows = contentRows(height);
+  const frameRows = contentFrameRows(height);
+  const inset = contentInsetRows(height);
   const contentWidth = width - 4;
   const config = configViewModel(state);
   const split = width >= 92;
   const stateWidth = split ? Math.max(34, Math.floor(contentWidth * 0.42)) : contentWidth;
   const commandsWidth = split ? contentWidth - stateWidth - 2 : contentWidth;
   return (
-    <Box paddingX={2} height={rows} flexDirection={split ? "row" : "column"} overflow="hidden">
+    <Box paddingX={2} paddingTop={inset} height={frameRows} flexDirection={split ? "row" : "column"} overflow="hidden">
       <Box flexDirection="column" width={stateWidth}>
         <SectionTitle title="Config" hint="observer snapshot" tone={ACCENT} width={stateWidth} />
         <Text color={CHROME} wrap="truncate">  state only · this process cannot mutate project configuration</Text>
@@ -619,13 +650,15 @@ const HELP_KEYS: Array<[string, string]> = [
 
 export function HelpView({ width, height }: { width: number; height: number }) {
   const rows = contentRows(height);
+  const frameRows = contentFrameRows(height);
+  const inset = contentInsetRows(height);
   const contentWidth = width - 4;
   const split = width >= 96;
   const commandWidth = split ? Math.floor(contentWidth * 0.6) : contentWidth;
   const keysWidth = split ? contentWidth - commandWidth - 2 : contentWidth;
   const commandRows = split ? rows - 1 : Math.max(4, rows - HELP_KEYS.length - 3);
   return (
-    <Box paddingX={2} height={rows} flexDirection={split ? "row" : "column"}>
+    <Box paddingX={2} paddingTop={inset} height={frameRows} flexDirection={split ? "row" : "column"} overflow="hidden">
       <Box flexDirection="column" width={commandWidth}>
         <SectionTitle title="Read-only observer" tone={BLUE} width={commandWidth} />
         <Text color={CHROME} wrap="truncate">  The TUI reads observer.snapshot and observer.events only.</Text>

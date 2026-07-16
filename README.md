@@ -183,7 +183,9 @@ Broker and native-login agents may both use the structured `login_required`
 code, but health now reports the selected mode's true reason: broker names the
 missing daemon credential variable; native-login surfaces the capsule or
 setup-token remedy. Missing native project consent is separately
-`trust_required`. The exact JSON and repair commands are in
+`trust_required`; the Fleet TUI renders that state as `Trust required`, shows
+the daemon-provided acknowledgement command, and does not misdirect the
+operator to a provider login flow. The exact JSON and repair commands are in
 [Understand “login required”](./website/docs/troubleshooting/login-required.md).
 
 ## Gated writes
@@ -242,7 +244,7 @@ These runs prove the exercised paths, not release publication. See the
 | C | Leased write candidates and authorized integration | Capstone and rotating-lead builds recorded | No |
 
 The [release plan](./docs/plan.md) is the canonical cumulative checklist.
-Packages remain private at `0.2.0-beta.3`; no npm availability is implied.
+Packages remain private at `0.2.0-beta.4`; no npm availability is implied.
 
 ## CLI stability boundary
 

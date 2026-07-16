@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.2.0-beta.4 — 2026-07-16
+
+Package publication remains blocked. Both package manifests are private at `0.2.0-beta.4`; this release is limited to the protected repository PR and annotated source tag.
+
+### Fixed
+
+- Preserved the daemon's structured Fleet readiness presentation through the observer controller. Missing native egress acknowledgement now renders as `Trust required` with the daemon-provided acknowledgement command, while genuine native-login and broker credential failures remain `Login required`; trust-gated agents count as blocked rather than logged out.
+- Added a height-aware content inset across all seven TUI views from 24 terminal rows upward, retained the dense layout below that threshold, and aligned Fleet, Goals, and Approvals list windows and mouse hit zones in both wide and compact header modes. Overview adds section gaps only when every group and at least one Recent Activity row fit.
+- Corrected Overview health wording so project trust without complete native consent is reported as `native consent required` rather than fully ready.
+
+### Verification
+
+- Added focused model, controller, layout, mouse, and Ink rendering coverage for trust/login distinctions; heights 20, 23, 24, and 32; wide and compact tab rows; and a bounded 60×20 frame with visible status and footer.
+- The full release gate passed with 764 tests, 11 documented platform skips, and zero failures. The built-artifact CLI audit passed all 35 exhaustive registry, lifecycle, parser, fleet, and receipt cases; root/plugin/TUI builds, package smoke, and the frozen Docusaurus production build also passed.
+
 ## 0.2.0-beta.3 — 2026-07-16
 
 Package publication remains blocked. Both package manifests are private at `0.2.0-beta.3`; npm publication and repository visibility remain separate human-authority decisions. Documentation deployment is authorized separately through the public GitHub Pages workflow.
