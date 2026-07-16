@@ -26,6 +26,7 @@ export type ProjectStatePaths = {
   readModelPath: string;
   migrationManifestPath: string;
   jobsDir: string;
+  receiptsDir: string;
   tasksDir: string;
   runEventsPath: string;
   sessionsDir: string;
@@ -120,6 +121,7 @@ export function getProjectStatePaths(projectRoot: string, options: ProjectStateO
     readModelPath: join(projectDir, "read-model.json"),
     migrationManifestPath: join(projectDir, "migration-v1.json"),
     jobsDir: join(projectDir, "jobs"),
+    receiptsDir: join(projectDir, "receipts"),
     tasksDir: join(projectDir, "tasks"),
     runEventsPath: join(projectDir, "run-events.json"),
     sessionsDir: join(projectDir, "sessions"),
@@ -179,6 +181,7 @@ export function ensureProjectStateDirectories(paths: ProjectStatePaths) {
     paths.projectsDir,
     paths.projectDir,
     paths.jobsDir,
+    paths.receiptsDir,
     paths.tasksDir,
     paths.sessionsDir,
     paths.workflowsDir,

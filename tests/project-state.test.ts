@@ -91,6 +91,7 @@ describe("project state", () => {
     expect(paths.ledgerPath).toBe(join(root, "ledger.jsonl"));
     expect(paths.dbPath).toBe(join(root, "read-model.sqlite"));
     expect(paths.jobsDir).toBe(join(root, "jobs"));
+    expect(paths.receiptsDir).toBe(join(root, "receipts"));
     expect(paths.tasksDir).toBe(join(root, "tasks"));
     expect(paths.runEventsPath).toBe(join(root, "run-events.json"));
     expect(paths.sessionsDir).toBe(join(root, "sessions"));
@@ -126,6 +127,7 @@ describe("project state", () => {
       paths.projectsDir,
       paths.projectDir,
       paths.jobsDir,
+      paths.receiptsDir,
       paths.tasksDir,
       paths.sessionsDir,
       paths.workflowsDir,
