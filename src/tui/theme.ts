@@ -34,12 +34,8 @@ export const VIEW_LABELS: Record<TuiView, string> = {
 export const HEADER_TABS_MIN_WIDTH = 116;
 /** 1-based terminal row of the header (which carries the tabs at normal widths). Row 1 is the header's paddingTop breathing room. */
 export const TAB_ROW = 2;
-/** 1-based terminal row where view content starts (paddingTop + header + rule/compact-tabs). */
-export const CONTENT_TOP = 4;
 /** Rows of view chrome (section title + column header) above selectable list rows. */
 export const LIST_OFFSET = 2;
-/** Terminal rows consumed by fixed observer chrome outside the content area (header ×2 incl. paddingTop, rule-or-tabs, rule, status, footer). */
-export const FIXED_ROWS = 6;
 
 /**
  * Stable identity colors for the four advertised backends, used wherever an

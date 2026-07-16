@@ -20,7 +20,8 @@ of that stays in the root CLI and the attached foreground lead.
 
 Requirements: a terminal of at least 60×20. Below that the TUI shows
 `Terminal too small for the observer.` and waits — the daemon and any detached
-work keep running.
+work keep running. At 24 rows and above, every view adds one blank row between
+the shared chrome and its content; shorter terminals retain the dense layout.
 
 ## The chrome
 
@@ -54,7 +55,7 @@ observer keeps retrying and says so in the status strip.
 | # | View | What it shows |
 | --- | --- | --- |
 | 1 | Overview | The home summary: topology, health, current task, next actions, recent activity |
-| 2 | Fleet | Backend and agent readiness with identity colors and login guidance |
+| 2 | Fleet | Backend and agent readiness with identity colors, trust acknowledgement, and login guidance |
 | 3 | Goals | Goal lifecycle with state glyphs, detail, and the active goal's timeline |
 | 4 | Approvals | Pending human decisions, with the exact CLI command to resolve them |
 | 5 | Events | The live, redacted run-event stream with per-kind tones and filters |
@@ -70,7 +71,10 @@ depth, pending approvals), the current goal (id, status, mode, lead, stage),
 a "Next actions" list where each entry names the exact command to run and why,
 and a grouped recent-activity feed. It also states the operating model
 plainly: external lead, authenticated daemon, contained workers — this TUI
-only observes.
+only observes. Project trust without native-login permission and the explicit
+unrestricted-egress acknowledgement is shown as `native consent required`,
+not as fully ready. When the terminal can fit every Overview group plus one
+activity row, the major groups gain one blank row of separation.
 
 ### 2 — Fleet
 
@@ -82,7 +86,11 @@ wherever it is named — Claude orange, Codex blue, OpenCode green, Grok violet
 — so the fleet reads at a glance. When an agent shows `Login required`, the
 detail pane preserves the daemon's mode-specific reason: broker mode names the
 missing daemon credential; native-login shows the supported provider login or
-setup-token remedy. The TUI never runs a login or reads a credential value.
+setup-token remedy. Missing native egress acknowledgement instead appears as
+`Trust required`; the detail pane shows the exact trust command supplied by
+the daemon and suppresses provider-login instructions. Trust-gated agents
+count as blocked, not logged out. The TUI never runs a login or reads a
+credential value.
 Multiple profiles are listed with a reminder that switching happens through
 the root CLI.
 

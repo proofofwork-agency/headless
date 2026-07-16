@@ -1,11 +1,23 @@
 import { describe, expect, test } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
+import { renderToString } from "ink";
 import React from "react";
 import type { FleetProfile, Goal } from "../src/contracts/collaboration";
 import type { Budget } from "../src/contracts/durable";
 import type { RunEvent } from "../src/contracts/run";
 import {
+  ApprovalsView,
+  approvalsListMeta,
   ConfigView,
+  EventsView,
+  FleetView,
+  fleetListMeta,
+  GoalsView,
+  goalsListMeta,
+  HelpView,
+  OverviewView,
 } from "../src/tui/views";
+import { TuiFrame } from "../src/tui/App";
 import {
   TuiController,
   restoreControlRoom,
@@ -16,6 +28,7 @@ import {
   controlSummary,
   configViewModel,
   filterEvents,
+  fleetAgentRows,
   formatEventLine,
   groupRepeatedEvents,
   healthSummary,
@@ -29,10 +42,17 @@ import {
 import {
   buildHitZones,
   buildTabLayout,
+  contentFrameRows,
+  contentInsetRows,
+  contentRows,
+  contentStartRow,
+  headerTabsMode,
   hitTest,
+  listContentRows,
   listWindowStart,
   nextView,
   parseMouseEvents,
+  tabRowFor,
   viewForDigit,
 } from "../src/tui/layout";
 
@@ -51,7 +71,19 @@ describe("Headless read-only TUI", () => {
         projectTrust: { trusted: true, nativeLoginAllowed: true, nativeDirectUnrestrictedAcknowledged: true, bypassAllowed: false },
         fleetProfiles: [fleet],
         activeFleetProfileId: fleet.id,
-        fleetHealth: { leaderCandidates: [{ agent: { id: "worker", backend: "opencode" }, authenticated: true, health: "healthy", rateLimitedUntil: null, activeTurns: 1, detail: "ready" }] },
+        fleetHealth: { leaderCandidates: [{
+          agent: { id: "worker", backend: "opencode" },
+          authenticated: false,
+          health: "unhealthy",
+          rateLimitedUntil: null,
+          activeTurns: 1,
+          detail: "Project trust with native acknowledgement is not granted.",
+          presentation: {
+            code: "trust_required",
+            reason: "Project trust with native acknowledgement is not granted.",
+            recovery: 'headless project trust grant --allow-native-direct-unrestricted --cwd "/canonical/project"',
+          },
+        }] },
         goals: [goal],
         goalTurns: { [goal.id]: [] },
         goalMessages: { [goal.id]: [] },
@@ -79,7 +111,16 @@ describe("Headless read-only TUI", () => {
       orchestration: { enabled: true, activeJobs: 1, queuedJobs: 1, mode: "automatic" },
     });
     expect(restored.patch.events).toEqual([event]);
-    expect(restored.patch.fleetHealth).toMatchObject([{ id: "worker", backend: "opencode", healthy: true }]);
+    expect(restored.patch.fleetHealth).toMatchObject([{
+      id: "worker",
+      backend: "opencode",
+      healthy: false,
+      presentation: {
+        code: "trust_required",
+        reason: "Project trust with native acknowledgement is not granted.",
+        recovery: 'headless project trust grant --allow-native-direct-unrestricted --cwd "/canonical/project"',
+      },
+    }]);
   });
 
   test("renders config state and exact root-CLI commands from an observer snapshot", () => {
@@ -174,6 +215,160 @@ describe("Headless read-only TUI", () => {
     expect(nextActions(state).map((action) => action.command)).toEqual(expect.arrayContaining(["headless lead use <host>", "headless project trust status"]));
   });
 
+  test("keeps trust acknowledgement distinct from provider login failures", () => {
+    const command = 'headless project trust grant --allow-native-direct-unrestricted --cwd "/project"';
+    const profile = nativeFleetFixture();
+    const trustHealth = {
+      id: "native-worker",
+      backend: "codex",
+      authenticated: false,
+      healthy: false,
+      rateLimited: false,
+      load: 0,
+      detail: "Project trust with native acknowledgement is not granted.",
+      presentation: {
+        code: "trust_required",
+        reason: "Project trust with native acknowledgement is not granted.",
+        recovery: command,
+      },
+    };
+    const state: TuiControlRoomState = {
+      ...initialControlRoomState("/project"),
+      connection: "connected",
+      projectTrust: { trusted: true, nativeLoginAllowed: true, nativeDirectUnrestrictedAcknowledged: false, bypassAllowed: false },
+      fleetProfiles: [profile],
+      activeFleetProfileId: profile.id,
+      fleetHealth: [trustHealth],
+    };
+
+    expect(providerReadiness(trustHealth)).toBe("Trust required");
+    expect(healthSummary(state)).toMatchObject({ trust: "native consent required", ready: 0, loginRequired: 0, blocked: 1 });
+    expect(fleetAgentRows(state)[0]).toMatchObject({
+      readiness: "Trust required",
+      auth: "trust required",
+      recovery: {
+        explanation: "Project trust with native acknowledgement is not granted.",
+        nextAction: command,
+      },
+    });
+
+    const rendered = plainText(renderToString(React.createElement(FleetView, { state, width: 160, height: 32, selected: 0 }), { columns: 160 }));
+    expect(rendered).toContain("Trust required");
+    expect(rendered).toContain(command);
+    expect(rendered).not.toContain("codex login");
+
+    for (const backend of ["codex", "opencode"]) {
+      expect(providerReadiness({
+        ...trustHealth,
+        backend,
+        presentation: { code: "login_required", reason: "Credential missing.", recovery: "Authenticate externally." },
+      })).toBe("Login required");
+    }
+    const nativeLoginRows = fleetAgentRows({
+      fleetProfiles: [profile],
+      activeFleetProfileId: profile.id,
+      fleetHealth: [{
+        ...trustHealth,
+        presentation: { code: "login_required", reason: "Native login missing.", recovery: "Run the native login flow." },
+      }],
+    });
+    const brokerProfile = fleetFixture();
+    const brokerLoginRows = fleetAgentRows({
+      fleetProfiles: [brokerProfile],
+      activeFleetProfileId: brokerProfile.id,
+      fleetHealth: [{
+        ...trustHealth,
+        id: "worker",
+        backend: "opencode",
+        presentation: { code: "login_required", reason: "Broker credential missing.", recovery: "Seed the daemon credential." },
+      }],
+    });
+    expect(nativeLoginRows[0]).toMatchObject({ readiness: "Login required", recovery: { nextAction: "Run the native login flow." } });
+    expect(brokerLoginRows[0]).toMatchObject({ readiness: "Login required", recovery: { nextAction: "Seed the daemon credential." } });
+  });
+
+  test("uses one height-aware geometry for compact and wide headers", () => {
+    const sourceProfile = fleetFixture();
+    const profile = {
+      ...sourceProfile,
+      agents: Array.from({ length: 30 }, (_, index) => ({ ...sourceProfile.agents[0]!, id: `worker-${index}`, name: `Worker ${index}` })),
+    };
+    const state: TuiControlRoomState = {
+      ...initialControlRoomState("/project"),
+      fleetProfiles: [profile],
+      activeFleetProfileId: profile.id,
+      goals: Array.from({ length: 30 }, (_, index) => ({ ...goalFixture(), id: `goal-${index}`, createdAt: index + 1, updatedAt: index + 1 })),
+      approvals: Array.from({ length: 30 }, (_, index) => approvalFixture(index)),
+    };
+    const cases = [
+      { height: 20, frame: 14, inset: 0, content: 14, top: 4, list: 12, approvals: 7 },
+      { height: 23, frame: 17, inset: 0, content: 17, top: 4, list: 15, approvals: 10 },
+      { height: 24, frame: 18, inset: 1, content: 17, top: 5, list: 15, approvals: 10 },
+      { height: 32, frame: 26, inset: 1, content: 25, top: 5, list: 23, approvals: 18 },
+    ];
+    for (const item of cases) {
+      expect(contentFrameRows(item.height)).toBe(item.frame);
+      expect(contentInsetRows(item.height)).toBe(item.inset);
+      expect(contentRows(item.height)).toBe(item.content);
+      expect(contentStartRow(item.height)).toBe(item.top);
+      expect(listContentRows(item.height)).toBe(item.list);
+      expect(listContentRows(item.height, 7)).toBe(item.approvals);
+      expect(fleetListMeta(state, 120, item.height, 0).rows).toBe(item.list);
+      expect(goalsListMeta(state, 120, item.height, 0, "all").rows).toBe(item.list);
+      expect(approvalsListMeta(state, 120, item.height, 0).rows).toBe(item.approvals);
+    }
+
+    expect(headerTabsMode(120)).toBe(true);
+    expect(tabRowFor(120)).toBe(2);
+    expect(headerTabsMode(100)).toBe(false);
+    expect(tabRowFor(100)).toBe(3);
+    for (const width of [100, 120]) {
+      const compact = buildHitZones({ width, height: 23, view: "fleet", list: { rows: 50, start: 4, total: 100, paneWidth: 44 } });
+      const airy = buildHitZones({ width, height: 24, view: "fleet", list: { rows: 50, start: 4, total: 100, paneWidth: 44 } });
+      expect(compact.list).toMatchObject({ fromY: 6, toY: 20, fromX: 3, toX: 46 });
+      expect(airy.list).toMatchObject({ fromY: 7, toY: 21, fromX: 3, toX: 46 });
+      expect(hitTest(3, compact.list!.fromY, compact)).toEqual({ kind: "row", index: 4 });
+      expect(hitTest(3, airy.list!.fromY + 1, airy)).toEqual({ kind: "row", index: 5 });
+      expect(hitTest(2, airy.list!.fromY, airy)).toBeUndefined();
+    }
+  });
+
+  test("renders compact chrome within 60x20 and adds the roomy content inset", () => {
+    const state = { ...initialControlRoomState("/project"), connection: "connected" as const, status: "Observer snapshot refreshed." };
+    const compact = renderFrame(state, 60, 20);
+    expect(compact).toHaveLength(20);
+    expect(compact[3]).toContain("OBSERVER OVERVIEW");
+    expect(compact[7]).toContain("HEALTH");
+    expect(compact.at(-2)).toContain("ready");
+    expect(compact.at(-1)).toContain("views");
+
+    const preThreshold = renderFrame(state, 100, 23);
+    expect(preThreshold[3]).toContain("OBSERVER OVERVIEW");
+    expect(preThreshold[4]).toContain("TOPOLOGY");
+    expect(preThreshold[7]).toBe("");
+    expect(preThreshold[8]).toContain("HEALTH");
+
+    const threshold = renderFrame(state, 100, 24);
+    expect(threshold).toHaveLength(24);
+    expect(threshold[3]).toBe("");
+    expect(threshold[4]).toContain("OBSERVER OVERVIEW");
+    expect(threshold[8]).toBe("");
+    expect(threshold[11]).toBe("");
+
+    const views = [
+      React.createElement(OverviewView, { state, width: 120, height: 24 }),
+      React.createElement(FleetView, { state, width: 120, height: 24, selected: 0 }),
+      React.createElement(GoalsView, { state, width: 120, height: 24, selected: 0 }),
+      React.createElement(ApprovalsView, { state, width: 120, height: 24, selected: 0 }),
+      React.createElement(EventsView, { state, width: 120, height: 24, scrollBack: 0 }),
+      React.createElement(ConfigView, { state, width: 120, height: 24 }),
+      React.createElement(HelpView, { width: 120, height: 24 }),
+    ];
+    for (const component of views) {
+      expect(plainText(renderToString(component, { columns: 120 })).startsWith("\n")).toBe(true);
+    }
+  });
+
   test("retains compact keyboard and mouse navigation geometry", () => {
     const tabs = buildTabLayout(120);
     expect(tabs.length).toBeGreaterThan(3);
@@ -182,7 +377,7 @@ describe("Headless read-only TUI", () => {
     expect(viewForDigit("7")).toBe("help");
     const zones = buildHitZones({ width: 120, height: 32, view: "goals", list: { rows: 4, start: 2, total: 10 } });
     expect(hitTest(tabs[0]!.from, zones.tabY, zones)).toEqual({ kind: "view", view: tabs[0]!.view });
-    expect(hitTest(2, zones.list!.fromY, zones)).toEqual({ kind: "row", index: 2 });
+    expect(hitTest(3, zones.list!.fromY, zones)).toEqual({ kind: "row", index: 2 });
     expect(listWindowStart(9, 4, 10)).toBe(6);
     expect(parseMouseEvents("\u001b[<0;8;4M\u001b[<65;8;8M")).toEqual([
       { x: 8, y: 4, kind: "press" },
@@ -210,6 +405,16 @@ function fleetFixture(): FleetProfile {
   };
 }
 
+function nativeFleetFixture(): FleetProfile {
+  const profile = fleetFixture();
+  return {
+    ...profile,
+    id: "fleet-native",
+    authMode: "native-login",
+    agents: [{ ...profile.agents[0]!, id: "native-worker", backend: "codex", name: "Native worker", authMode: "native-login" }],
+  };
+}
+
 function goalFixture(): Goal {
   return {
     id: "goal-one", projectId: "project-id", principal: "lead", fleetProfileId: "fleet-main", objective: "Observe durable work.",
@@ -229,6 +434,26 @@ function budgetFixture(): Budget {
   };
 }
 
+function approvalFixture(index: number): TuiControlRoomState["approvals"][number] {
+  return {
+    id: `approval-${index}`,
+    collaborationId: "collaboration",
+    requestedBy: "worker",
+    assignedTo: "operator",
+    kind: "merge",
+    status: "pending",
+    summary: `Approve candidate ${index}.`,
+    details: {},
+    artifactIds: [],
+    resolvedBy: null,
+    resolution: null,
+    expiresAt: 100_000,
+    resolvedAt: null,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
+
 function eventFixture(id: string, timestamp: number, sequence: number): RunEvent {
   return { version: 2, eventId: id, jobId: "job-one", sessionId: null, sequence, timestamp, redacted: true, kind: "lifecycle", state: "running" };
 }
@@ -245,4 +470,18 @@ function renderedText(value: unknown): string {
   if (Array.isArray(value)) return value.map(renderedText).join("");
   if (!React.isValidElement<{ children?: React.ReactNode }>(value)) return "";
   return renderedText(React.Children.toArray(value.props.children));
+}
+
+function renderFrame(state: TuiControlRoomState, width: number, height: number) {
+  const view = "overview" as const;
+  const frame = React.createElement(
+    TuiFrame,
+    { state, width, height, view, tabs: buildTabLayout(width), working: false },
+    React.createElement(OverviewView, { state, width, height }),
+  );
+  return plainText(renderToString(frame, { columns: width })).split("\n");
+}
+
+function plainText(value: string) {
+  return stripVTControlCharacters(value);
 }

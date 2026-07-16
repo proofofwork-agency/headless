@@ -1,4 +1,4 @@
-import { CONTENT_TOP, FIXED_ROWS, HEADER_TABS_MIN_WIDTH, LIST_OFFSET, TAB_ROW, TUI_VIEWS, VIEW_LABELS, type TuiView } from "./theme";
+import { HEADER_TABS_MIN_WIDTH, LIST_OFFSET, TAB_ROW, TUI_VIEWS, VIEW_LABELS, type TuiView } from "./theme";
 import { HEADLESS_VERSION } from "../version";
 
 export type TabSegment = {
@@ -37,6 +37,9 @@ export type HitAction =
 
 /** First terminal column of content inside paddingX={2} chrome (1-based). */
 const CONTENT_START_X = 3;
+const CHROME_ROWS_BEFORE_CONTENT = 3;
+const CHROME_ROWS_AFTER_CONTENT = 3;
+export const CONTENT_INSET_MIN_HEIGHT = 24;
 /**
  * Spaces between the header brand and the first tab, and between tabs. Exported
  * so ChromeHeader renders the exact same spacers the hit-zone math assumes —
@@ -46,8 +49,29 @@ const CONTENT_START_X = 3;
 export const BRAND_TAB_GAP = 4;
 export const TAB_GAP = 2;
 
+/** Physical rows owned by the active view between the top and bottom chrome. */
+export function contentFrameRows(height: number): number {
+  return Math.max(4, height - CHROME_ROWS_BEFORE_CONTENT - CHROME_ROWS_AFTER_CONTENT);
+}
+
+/** Airy terminals spend their first view row on breathing room; compact terminals keep it for content. */
+export function contentInsetRows(height: number): 0 | 1 {
+  return height >= CONTENT_INSET_MIN_HEIGHT ? 1 : 0;
+}
+
+/** Rows available to view content after its responsive top inset. */
 export function contentRows(height: number): number {
-  return Math.max(4, height - FIXED_ROWS);
+  return Math.max(1, contentFrameRows(height) - contentInsetRows(height));
+}
+
+/** 1-based terminal row where visible view content begins. */
+export function contentStartRow(height: number): number {
+  return CHROME_ROWS_BEFORE_CONTENT + 1 + contentInsetRows(height);
+}
+
+/** Selectable rows remaining after titles, table headers, and optional detail chrome. */
+export function listContentRows(height: number, reservedRows = LIST_OFFSET): number {
+  return Math.max(1, contentRows(height) - reservedRows);
 }
 
 /** Whether the tabs render inside the header row (ContextRelay style) at this width. */
@@ -95,17 +119,17 @@ export function buildHitZones(options: {
 }): HitZones {
   const { width, height, view } = options;
   const list = options.list ?? null;
-  const listRows = list ? Math.max(0, Math.min(list.rows, contentRows(height) - LIST_OFFSET)) : 0;
+  const listRows = list ? Math.max(0, Math.min(list.rows, listContentRows(height))) : 0;
   return {
     tabY: tabRowFor(width),
     tabs: buildTabLayout(width, options.badges ?? {}),
     list: list && listRows > 0
       ? {
           view,
-          fromY: CONTENT_TOP + LIST_OFFSET,
-          toY: CONTENT_TOP + LIST_OFFSET + listRows - 1,
-          fromX: 1,
-          toX: Math.max(1, Math.min(width, list.paneWidth ?? width)),
+          fromY: contentStartRow(height) + LIST_OFFSET,
+          toY: contentStartRow(height) + LIST_OFFSET + listRows - 1,
+          fromX: CONTENT_START_X,
+          toX: Math.max(CONTENT_START_X, Math.min(width - 2, CONTENT_START_X + (list.paneWidth ?? width) - 1)),
           start: list.start,
           total: list.total,
         }

@@ -16,6 +16,11 @@ export type FleetHealthAgent = {
   rateLimited: boolean;
   load: number | null;
   detail: string | null;
+  presentation?: {
+    code: string;
+    reason: string;
+    recovery: string;
+  } | null;
 };
 
 export type CandidateView = {
@@ -89,12 +94,21 @@ export type TuiControlRoomState = {
 
 const TERMINAL_GOAL_STATES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
 
-export type OperatorStatus = "Ready" | "Login required" | "Blocked by containment" | "Provider unavailable" | "Rate limited" | "Disabled" | "Running" | "Waiting for approval" | "Succeeded" | "Failed";
+export type OperatorStatus = "Ready" | "Trust required" | "Login required" | "Blocked by containment" | "Provider unavailable" | "Rate limited" | "Disabled" | "Running" | "Waiting for approval" | "Succeeded" | "Failed";
 
 export type HumanFailure = { title: string; explanation: string; nextAction: string; diagnostic?: string };
 
 export function providerReadiness(agent: FleetHealthAgent, enabled = true): OperatorStatus {
   if (!enabled) return "Disabled";
+  switch (agent.presentation?.code) {
+    case "disabled": return "Disabled";
+    case "trust_required": return "Trust required";
+    case "login_required": return "Login required";
+    case "blocked_by_containment": return "Blocked by containment";
+    case "rate_limited": return "Rate limited";
+    case "provider_unavailable": return "Provider unavailable";
+    case "ready": return "Ready";
+  }
   if (agent.rateLimited) return "Rate limited";
   if (agent.authenticated === false) return "Login required";
   if (agent.healthy === true) return "Ready";
@@ -104,6 +118,12 @@ export function providerReadiness(agent: FleetHealthAgent, enabled = true): Oper
 
 export function humanizeFailure(value: string, backend?: string): HumanFailure {
   const diagnostic = safeInline(value);
+  if (/trust_required|project trust with native acknowledgement|native (?:project )?(?:consent|acknowledgement)/i.test(diagnostic)) return {
+    title: "Trust required",
+    explanation: "This project has not acknowledged unrestricted native provider egress.",
+    nextAction: "Grant the explicit native acknowledgement with the Headless project trust command.",
+    diagnostic,
+  };
   if (/keychain-only|regular-file.*login|native.?auth.*unavailable|not logged in|login required/i.test(diagnostic)) return {
     title: "Login required",
     explanation: backend === "claude-code" || /claude/i.test(diagnostic)
@@ -148,12 +168,15 @@ export function healthSummary(state: TuiControlRoomState) {
   const profile = activeFleetProfile(state);
   const enabled = new Map(profile?.agents.map((agent) => [agent.id, agent.enabled]) ?? []);
   const statuses = state.fleetHealth.map((agent) => providerReadiness(agent, enabled.get(agent.id) ?? true));
+  const nativeTrustReady = state.projectTrust.trusted
+    && state.projectTrust.nativeLoginAllowed
+    && state.projectTrust.nativeDirectUnrestrictedAcknowledged;
   return {
     daemon: state.connection === "connected" ? "Ready" as const : "Provider unavailable" as const,
-    trust: state.projectTrust.trusted,
+    trust: nativeTrustReady ? "native ready" as const : state.projectTrust.trusted ? "native consent required" as const : "required" as const,
     ready: statuses.filter((status) => status === "Ready").length,
     loginRequired: statuses.filter((status) => status === "Login required").length,
-    blocked: statuses.filter((status) => status === "Blocked by containment" || status === "Provider unavailable" || status === "Rate limited").length,
+    blocked: statuses.filter((status) => status === "Trust required" || status === "Blocked by containment" || status === "Provider unavailable" || status === "Rate limited").length,
     queue: state.orchestration.queuedJobs,
     approvals: pendingApprovals(state).length,
   };
@@ -510,19 +533,31 @@ export function fleetAgentRows(state: Pick<TuiControlRoomState, "fleetProfiles" 
   return profile.agents.map((agent) => {
     const health = healthById.get(agent.id);
     const readiness = health ? providerReadiness(health, agent.enabled) : agent.enabled ? "Provider unavailable" : "Disabled";
-    const tone = health?.rateLimited
-      ? WARN
-      : health?.healthy === false
-        ? ERR
-        : health?.healthy === true
-          ? OK
-          : MUTED;
-    const glyph = health?.rateLimited ? "◷" : health?.healthy === false ? "✗" : agent.enabled ? "●" : "○";
-    const auth = health?.authenticated === false
-      ? "login required"
+    const tone = readiness === "Ready" ? OK
+      : readiness === "Trust required" || readiness === "Login required" || readiness === "Rate limited" ? WARN
+        : readiness === "Disabled" ? MUTED : ERR;
+    const glyph = readiness === "Ready" ? "●"
+      : readiness === "Rate limited" ? "◷"
+        : readiness === "Trust required" || readiness === "Login required" ? "!"
+          : readiness === "Disabled" ? "○" : "✗";
+    const auth = readiness === "Trust required"
+      ? "trust required"
+      : readiness === "Login required"
+        ? "login required"
       : health?.healthy === false
         ? "blocked"
         : health?.authenticated === true ? "login ✓" : agent.authMode;
+    const presentation = health?.presentation;
+    const recovery = readiness === "Ready" || readiness === "Disabled"
+      ? null
+      : presentation
+        ? {
+            title: readiness,
+            explanation: safeInline(presentation.reason),
+            nextAction: presentation.recovery,
+            diagnostic: safeInline(presentation.reason),
+          }
+        : humanizeFailure(health?.detail ?? readiness, agent.backend);
     return {
       id: agent.id,
       name: agent.name,
@@ -530,14 +565,16 @@ export function fleetAgentRows(state: Pick<TuiControlRoomState, "fleetProfiles" 
       glyph,
       tone,
       auth,
-      authTone: health?.authenticated === false ? WARN : MUTED,
+      authTone: readiness === "Trust required" || readiness === "Login required" ? WARN : MUTED,
       load: health?.load === null || health?.load === undefined ? "–" : String(health.load),
-      detail: health?.authenticated === false
+      detail: presentation
+        ? safeInline(presentation.reason)
+        : health?.authenticated === false
         ? `Login required: use the ${agent.backend} CLI login, then run /fleet health. ${safeInline(health.detail ?? "")}`
         : safeInline(health?.detail ?? `priority ${agent.priority} · turns ≤${agent.maxConcurrentTurns}`),
       enabled: agent.enabled,
       readiness,
-      recovery: readiness === "Ready" || readiness === "Disabled" ? null : humanizeFailure(health?.detail ?? readiness, agent.backend),
+      recovery,
     };
   });
 }

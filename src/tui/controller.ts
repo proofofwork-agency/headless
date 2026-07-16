@@ -36,6 +36,11 @@ type ObserverSnapshot = {
       rateLimitedUntil: number | null;
       activeTurns: number;
       detail: string;
+      presentation?: {
+        code: string;
+        reason: string;
+        recovery: string;
+      };
     }>;
   } | null;
   goals: Goal[];
@@ -189,6 +194,13 @@ function normalizeFleetHealth(snapshot: ObserverSnapshot["fleetHealth"]): FleetH
     rateLimited: entry.rateLimitedUntil !== null && entry.rateLimitedUntil > Date.now(),
     load: entry.activeTurns,
     detail: entry.detail,
+    presentation: entry.presentation
+      ? {
+          code: entry.presentation.code,
+          reason: entry.presentation.reason,
+          recovery: entry.presentation.recovery,
+        }
+      : null,
   }));
 }
 

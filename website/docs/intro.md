@@ -14,7 +14,7 @@ And it does one thing no plain runner does: it turns every run into an **executi
 Literally: proof of work for AI agents.
 
 :::note Private beta
-Headless is an unpublished private beta (`0.2.0-beta.3`). Packages are not on npm; build from source, use disposable projects, and do not entrust it with sensitive source, valuable credentials, or unattended spend yet.
+Headless is an unpublished private beta (`0.2.0-beta.4`). Packages are not on npm; build from source, use disposable projects, and do not entrust it with sensitive source, valuable credentials, or unattended spend yet.
 :::
 
 ## The problem: you can't trust what you can't verify

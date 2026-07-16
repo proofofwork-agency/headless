@@ -106,7 +106,7 @@ export const App: React.FC<AppProps> = ({ projectRoot, connect = connectProjectD
   const list = view === "fleet"
     ? fleetListMeta(state, width, height, selected.fleet)
     : view === "goals"
-      ? goalsListMeta(state, width, height, selected.goals)
+      ? goalsListMeta(state, width, height, selected.goals, goalHistoryMode)
       : view === "approvals"
         ? approvalsListMeta(state, width, height, selected.approvals)
         : null;
@@ -161,15 +161,7 @@ export const App: React.FC<AppProps> = ({ projectRoot, connect = connectProjectD
   });
 
   if (width < MIN_WIDTH || height < MIN_HEIGHT) return <MinimumSizeView width={width} height={height} />;
-  const footer = view === "events"
-    ? { hints: [["↑↓", "scroll"], ["e", "errors"], ["a", "activity"], ["g", "group"], ["r", "refresh"], ["q", "quit"]] as Array<[string, string]> }
-    : { hints: [["⇥", "views"], ["1-7", "jump"], ["↑↓", "select"], ["r", "refresh"], ["q", "quit"]] as Array<[string, string]> };
-  const footerRight = width < 100 ? HEADLESS_COPYRIGHT : `v${HEADLESS_VERSION} · ${HEADLESS_COPYRIGHT}`;
-
-  return <Box flexDirection="column" width={width} height={height}>
-    <ChromeHeader state={state} width={width} segments={tabs} active={view} />
-    {headerTabsMode(width) ? <Rule width={width} /> : <CompactTabRow segments={tabs} active={view} />}
-    <Box flexDirection="column" flexGrow={1}>
+  return <TuiFrame state={state} width={width} height={height} view={view} tabs={tabs} working={state.connection !== "connected"}>
       {view === "overview" ? <OverviewView state={state} width={width} height={height} /> : null}
       {view === "fleet" ? <FleetView state={state} width={width} height={height} selected={selected.fleet} /> : null}
       {view === "goals" ? <GoalsView state={state} width={width} height={height} selected={selected.goals} historyMode={goalHistoryMode} /> : null}
@@ -177,12 +169,32 @@ export const App: React.FC<AppProps> = ({ projectRoot, connect = connectProjectD
       {view === "events" ? <EventsView state={state} width={width} height={height} scrollBack={eventScroll} filter={eventFilter} grouped={eventsGrouped} mode={state.logMode} /> : null}
       {view === "config" ? <ConfigView state={state} width={width} height={height} /> : null}
       {view === "help" ? <HelpView width={width} height={height} /> : null}
+  </TuiFrame>;
+};
+
+export function TuiFrame({ state, width, height, view, tabs, working, children }: React.PropsWithChildren<{
+  state: TuiControlRoomState;
+  width: number;
+  height: number;
+  view: TuiView;
+  tabs: ReturnType<typeof buildTabLayout>;
+  working: boolean;
+}>) {
+  const footer = view === "events"
+    ? { hints: [["↑↓", "scroll"], ["e", "errors"], ["a", "activity"], ["g", "group"], ["r", "refresh"], ["q", "quit"]] as Array<[string, string]> }
+    : { hints: [["⇥", "views"], ["1-7", "jump"], ["↑↓", "select"], ["r", "refresh"], ["q", "quit"]] as Array<[string, string]> };
+  const footerRight = width < 100 ? HEADLESS_COPYRIGHT : `v${HEADLESS_VERSION} · ${HEADLESS_COPYRIGHT}`;
+  return <Box flexDirection="column" width={width} height={height} overflow="hidden">
+    <ChromeHeader state={state} width={width} segments={tabs} active={view} />
+    {headerTabsMode(width) ? <Rule width={width} /> : <CompactTabRow segments={tabs} active={view} />}
+    <Box flexDirection="column" flexGrow={1} overflow="hidden">
+      {children}
     </Box>
     <Rule width={width} />
-    <StatusStrip state={state} working={state.connection !== "connected"} width={width} />
+    <StatusStrip state={state} working={working} width={width} />
     <Footer hints={footer.hints} right={footerRight} width={width} />
   </Box>;
-};
+}
 
 export function runTui(options: RunTuiOptions = {}) {
   const projectRoot = options.projectRoot ?? process.cwd();
