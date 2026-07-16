@@ -1,5 +1,6 @@
 import type { DaemonMethod } from "../../daemon/protocol";
 import type { HeadlessDaemonClient } from "../../daemon/client";
+import { getBackendDefinition } from "../../backends/registry";
 import {
   CliUsageError,
   daemonClient,
@@ -7,6 +8,8 @@ import {
   getApprovalPolicy,
   getArg,
   getAuthMode,
+  getRepeatedArgs,
+  parseBackend,
   requiredArg,
 } from "../shared";
 
@@ -27,13 +30,14 @@ export async function parseFleetCommand(
   if (namespace === "health" && (action === undefined || action.startsWith("-"))) {
     return { method: "fleet.health", params: optionalProfileId(flags) };
   }
-  if (namespace !== "profile" || !action || !["upsert", "get", "list", "remove"].includes(action)) {
-    throw new CliUsageError("Usage: headless fleet <health|profile upsert|get|list|remove> [options]");
+  if (namespace !== "profile" || !action || !["create", "upsert", "get", "list", "remove"].includes(action)) {
+    throw new CliUsageError("Usage: headless fleet <health|profile create|upsert|get|list|remove> [options]");
   }
   if (action === "list") return { method: "fleet.profile.list", params: {} };
   if (action === "get" || action === "remove") {
     return { method: `fleet.profile.${action}`, params: { profileId: requiredArg(flags, "--profile-id") } };
   }
+  if (action === "create") return createInlineProfile(flags);
 
   const file = getArg(flags, "--file");
   const profile = file
@@ -118,6 +122,60 @@ async function activeProfileForPartialUpdate(client: HeadlessDaemonClient, flags
 
 function isProfileUpsert(args: string[]) {
   return args[1] === "profile" && args[2] === "upsert";
+}
+
+function createInlineProfile(flags: string[]): FleetCommandCall {
+  if (getArg(flags, "--file")) {
+    throw new CliUsageError("Fleet profile create accepts inline --agent values, not --file. Use fleet profile upsert --file to load JSON.");
+  }
+  const id = requiredArg(flags, "--profile-id");
+  const agentBackends = getRepeatedArgs(flags, "--agent");
+  if (agentBackends.length === 0) {
+    throw new CliUsageError("Fleet profile create requires at least one --agent backend.");
+  }
+  const authMode = getAuthMode(flags) ?? "broker";
+  const approvalPolicy = getApprovalPolicy(flags) ?? "ask";
+  if (flags.includes("--activate") && flags.includes("--no-activate")) {
+    throw new CliUsageError("Choose either --activate or --no-activate, not both.");
+  }
+  const agents = agentBackends.map((input) => inlineAgent(input, authMode, approvalPolicy));
+  const duplicate = agents.find((agent, index) => agents.findIndex((candidate) => candidate.id === agent.id) !== index);
+  if (duplicate) throw new CliUsageError(`Fleet profile create received duplicate agent backend: ${duplicate.backend}.`);
+  return {
+    method: "fleet.profile.upsert",
+    params: {
+      id,
+      name: id,
+      authMode,
+      approvalPolicy,
+      agents,
+      activate: !flags.includes("--no-activate"),
+    },
+  };
+}
+
+function inlineAgent(
+  input: string,
+  authMode: "native-login" | "broker",
+  approvalPolicy: "ask" | "auto" | "bypass",
+) {
+  let backend: string;
+  try {
+    backend = parseBackend(input);
+  } catch (error) {
+    if (error instanceof CliUsageError) {
+      throw new CliUsageError(error.message.replace("--backend", "--agent"));
+    }
+    throw error;
+  }
+  const metadata = getBackendDefinition(backend)?.metadata;
+  return {
+    id: backend,
+    backend,
+    name: metadata?.login?.displayName ?? backend,
+    authMode,
+    approvalPolicy,
+  };
 }
 
 function applyFleetOverride(

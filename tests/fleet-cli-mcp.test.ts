@@ -64,6 +64,65 @@ describe("fleet CLI protocol parity", () => {
     });
   });
 
+  test("constructs an inline profile from repeated canonical and aliased agents", async () => {
+    const call = await parseFleetCommand([
+      "fleet", "profile", "create", "--profile-id", "opencode-assistants",
+      "--agent", "codex", "--agent", "grok",
+      "--auth-mode", "native-login", "--approval-policy", "ask", "--activate",
+    ]);
+    expect(call.method).toBe("fleet.profile.upsert");
+    expect(call.params).toEqual({
+      id: "opencode-assistants",
+      name: "opencode-assistants",
+      authMode: "native-login",
+      approvalPolicy: "ask",
+      agents: [
+        { id: "codex", backend: "codex", name: "Codex", authMode: "native-login", approvalPolicy: "ask" },
+        { id: "grok-build", backend: "grok-build", name: "Grok Build", authMode: "native-login", approvalPolicy: "ask" },
+      ],
+      activate: true,
+    });
+    expect(FleetProfileUpsertParamsSchema.parse(call.params)).toMatchObject({
+      id: "opencode-assistants",
+      maxActiveWorkers: 4,
+      agents: [
+        { id: "codex", authMode: "native-login", approvalPolicy: "ask" },
+        { id: "grok-build", authMode: "native-login", approvalPolicy: "ask" },
+      ],
+    });
+  });
+
+  test("applies inline defaults and validates required create inputs", async () => {
+    const call = await parseFleetCommand([
+      "fleet", "profile", "create", "--profile-id", "default-assistants", "--agent", "claude",
+      "--no-activate",
+    ]);
+    expect(call.params).toMatchObject({
+      authMode: "broker",
+      approvalPolicy: "ask",
+      activate: false,
+      agents: [{
+        id: "claude-code",
+        backend: "claude-code",
+        name: "Claude Code",
+        authMode: "broker",
+        approvalPolicy: "ask",
+      }],
+    });
+    await expect(parseFleetCommand([
+      "fleet", "profile", "create", "--agent", "codex",
+    ])).rejects.toThrow("--profile-id is required");
+    await expect(parseFleetCommand([
+      "fleet", "profile", "create", "--profile-id", "empty",
+    ])).rejects.toThrow("at least one --agent");
+    await expect(parseFleetCommand([
+      "fleet", "profile", "create", "--profile-id", "duplicate", "--agent", "grok", "--agent", "grok-build",
+    ])).rejects.toThrow("duplicate agent backend: grok-build");
+    await expect(parseFleetCommand([
+      "fleet", "profile", "create", "--profile-id", "conflicting", "--agent", "codex", "--activate", "--no-activate",
+    ])).rejects.toThrow("Choose either --activate or --no-activate");
+  });
+
   test("round-trips daemon profile output and supports standalone active-profile overrides", async () => {
     const persisted = {
       id: "native-fleet",
@@ -103,7 +162,7 @@ describe("fleet CLI protocol parity", () => {
     expect(() => FleetProfileUpsertParamsSchema.parse({ ...call.params, unexpected: true })).toThrow();
   });
 
-  test("requires a file or an explicit partial fleet-profile override", async () => {
+  test("preserves the file-or-partial-update contract for profile upsert", async () => {
     await expect(parseFleetCommand(["fleet", "profile", "upsert"])).rejects.toThrow("--file is required");
   });
 
