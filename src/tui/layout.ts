@@ -37,7 +37,14 @@ export type HitAction =
 
 /** First terminal column of content inside paddingX={2} chrome (1-based). */
 const CONTENT_START_X = 3;
-const TAB_GAP = 1;
+/**
+ * Spaces between the header brand and the first tab, and between tabs. Exported
+ * so ChromeHeader renders the exact same spacers the hit-zone math assumes —
+ * they must never drift or mouse clicks land on the wrong tab. Tuned for the
+ * airier ContextRelay-style header spacing around the menu items.
+ */
+export const BRAND_TAB_GAP = 4;
+export const TAB_GAP = 2;
 
 export function contentRows(height: number): number {
   return Math.max(4, height - FIXED_ROWS);
@@ -67,7 +74,7 @@ export function headerBrand(width: number): string {
 export function buildTabLayout(width: number, badges: Partial<Record<TuiView, number>> = {}): TabSegment[] {
   const segments: TabSegment[] = [];
   let cursor = headerTabsMode(width)
-    ? CONTENT_START_X + headerBrand(width).length + 2
+    ? CONTENT_START_X + headerBrand(width).length + BRAND_TAB_GAP
     : CONTENT_START_X;
   for (const [index, view] of TUI_VIEWS.entries()) {
     const badge = badges[view] ?? 0;
