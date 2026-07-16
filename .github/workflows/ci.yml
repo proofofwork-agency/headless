@@ -82,6 +82,31 @@ jobs:
       - name: Typecheck and test
         run: bun run check
 
+      # GitHub's unprivileged Ubuntu userns/AppArmor combination can leave the
+      # bwrap loopback-to-Unix relay's child alive after its tool response. The
+      # ordinary suite loudly skips exactly those lifecycle cases and this
+      # privileged container runs the same test files with real bubblewrap,
+      # seccomp, socket masking, nested delegation, and terminal revocation.
+      - name: Verify privileged Linux cooperation
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm --privileged --cpus=2 --memory=3g \
+            -e CI=true \
+            -e GITHUB_ACTIONS=true \
+            -e HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 \
+            -e HEADLESS_STATE_HOME=/tmp/headless-state \
+            -e HEADLESS_RUNTIME_HOME=/tmp/headless-runtime \
+            -e HEADLESS_RUN_TOOL_TIMEOUT_MS=60000 \
+            -v "$PWD:/repo:ro" \
+            oven/bun:1.3.14 bash -lc '
+              apt-get update -qq >/dev/null
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bubblewrap >/dev/null
+              cp -r /repo /work
+              cd /work
+              bun install --frozen-lockfile --ignore-scripts >/dev/null
+              bun test tests/daemon-run-tool.test.ts tests/containment-v2.test.ts
+            '
+
       - name: Build published artifacts
         run: bun run build
 

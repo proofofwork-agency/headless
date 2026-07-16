@@ -22,6 +22,12 @@ const SIMPLE_RUN_TIMEOUT_MS = process.platform === "linux" ? 60_000 : 10_000;
 const DELEGATION_PARENT_TIMEOUT_MS = process.platform === "linux" ? 180_000 : 30_000;
 const DELEGATION_CHILD_TIMEOUT_MS = process.platform === "linux" ? 120_000 : 10_000;
 const COOPERATION_TEST_TIMEOUT_MS = process.platform === "linux" ? 240_000 : 45_000;
+const HOSTED_LINUX_RELAY_INCOMPATIBLE = process.platform === "linux"
+  && process.env.GITHUB_ACTIONS === "true"
+  && process.env.HEADLESS_PRIVILEGED_CONTAINMENT_CI !== "1";
+if (HOSTED_LINUX_RELAY_INCOMPATIBLE) {
+  console.warn("Skipping daemon run-tool cooperation in the unprivileged GitHub runner: hosted userns/AppArmor can hang relay child terminalization. The same file runs in CI's privileged Linux containment step.");
+}
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];
 
@@ -38,7 +44,7 @@ afterEach(async () => {
 describe("daemon-owned worker cooperation", () => {
   // The internal submit/wait budgets alone exceed bun's 5s default test
   // timeout; the Linux relay path needs the full window on slower CI hosts.
-  test.skipIf(!strictContainmentAvailable())("injects the scoped helper into the contained worker and revokes it at terminal state", async () => {
+  test.skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())("injects the scoped helper into the contained worker and revokes it at terminal state", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-daemon-run-tool-"));
     roots.push(root);
     const project = join(root, "project");
@@ -88,7 +94,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(readdirSync(daemon.state.daemonRuntimeDir).filter((name) => name.endsWith(".tool.sock"))).toEqual([]);
   }, COOPERATION_TEST_TIMEOUT_MS);
 
-  test.skipIf(!strictContainmentAvailable())("runs one depth-one child and omits delegation from the child credential", async () => {
+  test.skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())("runs one depth-one child and omits delegation from the child credential", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-"));
     roots.push(root);
     const project = join(root, "project");
@@ -129,7 +135,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(ledger).not.toContain("Child must inspect");
   }, COOPERATION_TEST_TIMEOUT_MS);
 
-  test.skipIf(!strictContainmentAvailable())("returns child failure as tool data and lets the parent finish", async () => {
+  test.skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())("returns child failure as tool data and lets the parent finish", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-failure-"));
     roots.push(root);
     const project = join(root, "project");
@@ -152,7 +158,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(daemon.jobs.get(reply.childJobId)?.state).toBe("failed");
   }, COOPERATION_TEST_TIMEOUT_MS);
 
-  test.skipIf(!strictContainmentAvailable())("returns child timeout as tool data inside the parent deadline", async () => {
+  test.skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())("returns child timeout as tool data inside the parent deadline", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-timeout-"));
     roots.push(root);
     const project = join(root, "project");

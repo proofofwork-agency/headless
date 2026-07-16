@@ -28,6 +28,12 @@ import { schedulingWindow } from "./support/timing";
 
 const cleanupRoots: string[] = [];
 const darwinTest = process.platform === "darwin" ? test : test.skip;
+const HOSTED_LINUX_RELAY_INCOMPATIBLE = process.platform === "linux"
+  && process.env.GITHUB_ACTIONS === "true"
+  && process.env.HEADLESS_PRIVILEGED_CONTAINMENT_CI !== "1";
+if (HOSTED_LINUX_RELAY_INCOMPATIBLE) {
+  console.warn("Skipping the late-socket broker/run-tool relay lifecycle case in the unprivileged GitHub runner; CI runs it in the privileged Linux containment step.");
+}
 // Real-sandbox tests spawn bwrap + relay + worker processes. The exact
 // broker+run-tool capability test has reached the helper's 15s latency bound
 // on loaded two-core Linux runners even though the transport remains healthy.
@@ -37,6 +43,9 @@ const SANDBOX_TEST_TIMEOUT_MS = process.platform === "linux" ? 90_000 : 30_000;
 const linuxBwrapTest: typeof test | typeof test.skip = process.platform === "linux" && hasBwrap()
   ? ((name: string, fn: () => unknown | Promise<unknown>) => test(name, fn, SANDBOX_TEST_TIMEOUT_MS)) as typeof test
   : test.skip;
+const linuxRelayLifecycleTest: typeof test | typeof test.skip = HOSTED_LINUX_RELAY_INCOMPATIBLE
+  ? test.skip
+  : linuxBwrapTest;
 const linuxX64BwrapTest: typeof test | typeof test.skip = process.platform === "linux" && process.arch === "x64" && hasBwrap()
   ? ((name: string, fn: () => unknown | Promise<unknown>) => test(name, fn, SANDBOX_TEST_TIMEOUT_MS)) as typeof test
   : test.skip;
@@ -421,7 +430,7 @@ describe("Linux bubblewrap profiles", () => {
     }
   });
 
-  linuxBwrapTest("denies a host Unix socket created after launch while broker and run tools remain reachable", async () => {
+  linuxRelayLifecycleTest("denies a host Unix socket created after launch while broker and run tools remain reachable", async () => {
     const project = temporaryDirectory("headless-linux-late-socket-project-");
     const runtime = temporaryDirectory("headless-linux-late-socket-runtime-");
     const brokerSocket = join(runtime, "broker.sock");
