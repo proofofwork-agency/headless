@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { BrokerLeaseScope } from "../broker/server";
 import {
+  RECEIPT_BUDGET_REASON_MAX,
   RECEIPT_POLICY_TRAIL_MAX,
+  RECEIPT_POLICY_REASON_MAX,
+  RECEIPT_PREVIEW_MAX,
   ReceiptBodySchema,
   ReceiptSchema,
   type Receipt,
@@ -105,11 +108,18 @@ export function assembleAndAnchorReceipt(
     policyTrail: input.policyEvents
       .filter((event) => event.kind === "policy")
       .slice(-RECEIPT_POLICY_TRAIL_MAX)
-      .map((event) => ({ decision: event.decision, rule: event.rule, reason: event.reason })),
+      .map((event) => ({
+        decision: event.decision,
+        rule: event.rule,
+        reason: boundedRedactedText(event.reason, RECEIPT_POLICY_REASON_MAX),
+      })),
     authorization: input.authorization,
     brokerLease: input.brokerLease,
     gates: [...input.gates],
-    budget: input.budget,
+    budget: {
+      ...input.budget,
+      reasons: input.budget.reasons.map((reason) => boundedRedactedText(reason, RECEIPT_BUDGET_REASON_MAX)),
+    },
     provenance: {
       startedAt: new Date(input.startedAt).toISOString(),
       endedAt,
@@ -218,8 +228,23 @@ function receiptBlob(value: string) {
   return {
     digest: sha256Hex(value),
     bytes: Buffer.byteLength(value, "utf8"),
-    preview: redactAndTruncate(value, 4_096).text,
+    preview: boundedRedactedText(value, RECEIPT_PREVIEW_MAX),
   };
+}
+
+/**
+ * Redaction's public truncation marker is intentionally additive and its
+ * already-truncated input path is intentionally stable for existing callers.
+ * Receipt schemas require a hard final bound, so leave enough marker margin
+ * before redaction and enforce the schema limit again afterward.
+ */
+function boundedRedactedText(value: string, maxLength: number) {
+  const markerMargin = Math.min(96, Math.max(0, maxLength - 1));
+  const redacted = redactAndTruncate(value, maxLength - markerMargin).text;
+  if (redacted.length <= maxLength) return redacted;
+  const marker = "\n[TRUNCATED]";
+  if (marker.length >= maxLength) return marker.slice(0, maxLength);
+  return `${redacted.slice(0, maxLength - marker.length)}${marker}`;
 }
 
 function deterministicUuid(namespace: string, value: string) {

@@ -232,6 +232,10 @@ export class RunToolEndpointManager {
     socket.setEncoding("utf8");
     socket.setTimeout(runToolCallTimeoutMs(), () => socket.destroy());
     socket.once("close", () => record.sockets.delete(socket));
+    socket.once("error", () => {
+      record.sockets.delete(socket);
+      if (!socket.destroyed) socket.destroy();
+    });
     let buffer = "";
     let handled = false;
     socket.on("data", (chunk) => {
@@ -296,7 +300,7 @@ export class RunToolEndpointManager {
     if (Buffer.byteLength(encoded) > MAX_RUN_TOOL_RESPONSE_BYTES) {
       encoded = `${JSON.stringify(failure(response.id, "OUTPUT_OVERFLOW", "Run tool response exceeded the byte limit."))}\n`;
     }
-    socket.end(encoded);
+    if (!socket.destroyed && !socket.writableEnded) socket.end(encoded);
   }
 }
 

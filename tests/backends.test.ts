@@ -6,6 +6,7 @@ import { decodeGrokEvent } from "../src/runtime/session-drivers/event-decoder";
 import { GROK_HEADLESS_SYSTEM_PROMPT, GROK_READ_TOOLS, GROK_WRITE_TOOLS } from "../src/runtime/grok-isolation";
 import { parseClaudeStreamJson, parseCodexJson, parseGenericAgentJson, tokenCount } from "../src/backends/json";
 import { buildOpenCodeCommand, nextOpenCodeEnv, OPENCODE_CONFIG_CONTENT, parseOpenCodeJsonl } from "../src/backends/opencode";
+import { isSuccessfulRun } from "../src/runner/simple";
 
 describe("backend normalization", () => {
   test("accepts canonical ids and aliases", () => {
@@ -103,6 +104,34 @@ describe("grok and generic backend helpers", () => {
     expect(p.error).toContain("maximum turn limit");
   });
 
+  test("one-shot Grok refusals and cancellations fail closed at zero exit", () => {
+    for (const stopReason of ["Refusal", "Cancelled"]) {
+      const parsed = parseGrokJsonl([
+        JSON.stringify({ type: "text", data: `provider ${stopReason.toLowerCase()}` }),
+        JSON.stringify({ type: "end", stopReason }),
+      ].join("\n"));
+      expect(parsed.error).toContain(stopReason);
+      expect(isSuccessfulRun({
+        timedOut: false,
+        parseError: parsed.error,
+        noAssistantOutput: parsed.output.length === 0,
+        exitCode: 0,
+      })).toBe(false);
+    }
+
+    const completed = parseGrokJsonl([
+      JSON.stringify({ type: "text", data: "complete" }),
+      JSON.stringify({ type: "end", stopReason: "EndTurn" }),
+    ].join("\n"));
+    expect(completed.error).toBeNull();
+    expect(isSuccessfulRun({
+      timedOut: false,
+      parseError: completed.error,
+      noAssistantOutput: completed.output.length === 0,
+      exitCode: 0,
+    })).toBe(true);
+  });
+
   test("decodeGrokEvent maps the grok-build end event to usage + completion", () => {
     const events = decodeGrokEvent({
       type: "end",
@@ -119,12 +148,12 @@ describe("grok and generic backend helpers", () => {
     expect(completion?.sessionId).toBe("3e0f9df8-3c40-4b1e-8f0a-1c2d3e4f5a6b");
   });
 
-  test("decodeGrokEvent fails completions for refusal/content-filter/cancelled stop reasons", () => {
-    for (const stopReason of ["Refusal", "ContentFilter", "Cancelled", "ModelContextWindowExceeded"]) {
+  test("decodeGrokEvent fails completions for refusal/filter/cancel/max-token stop reasons", () => {
+    for (const stopReason of ["Refusal", "ContentFilter", "Cancelled", "ModelContextWindowExceeded", "MaxTokens", "max_tokens"]) {
       const completion = decodeGrokEvent({ type: "end", stopReason }).find((event) => event.kind === "completion");
       expect(completion?.failed).toBe(true);
     }
-    const clean = decodeGrokEvent({ type: "end", stopReason: "MaxTokens" }).find((event) => event.kind === "completion");
+    const clean = decodeGrokEvent({ type: "end", stopReason: "EndTurn" }).find((event) => event.kind === "completion");
     expect(clean?.failed).toBe(false);
   });
 
