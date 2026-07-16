@@ -465,7 +465,6 @@ describe("Linux bubblewrap profiles", () => {
       expiresAt: endpoint.scope.expiresAt,
       jobId: endpoint.scope.jobId,
       sessionId: endpoint.scope.sessionId,
-      operations: endpoint.operations,
     }));
     worker.env.HEADLESS_RUN_TOOL_TIMEOUT_MS = "60000";
     const script = [

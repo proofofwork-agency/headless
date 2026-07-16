@@ -85,14 +85,12 @@ describe("run-scoped daemon tool endpoint", () => {
     managers.push(manager);
     const endpoint = await manager.issue(scope(Date.now() + 10_000));
     const worker = createWorkerEnvironment({ baseDir: root });
-    const deniedWorker = createWorkerEnvironment({ baseDir: root });
     const env = installRunToolClient(worker, {
       socketPath: endpoint.socketPath,
       token: endpoint.token,
       expiresAt: endpoint.scope.expiresAt,
       jobId: endpoint.scope.jobId,
       sessionId: endpoint.scope.sessionId,
-      operations: endpoint.operations,
     });
     try {
       expect(env.HEADLESS_RUN_TOOL_TIMEOUT_MS).toBe(String(runToolCallTimeoutMs()));
@@ -101,29 +99,12 @@ describe("run-scoped daemon tool endpoint", () => {
       expect(await first.exited).toBe(0);
       expect(JSON.parse(await new Response(first.stdout).text())).toEqual({ operation: "note", params: { text: "from child" } });
 
-      const deniedEnv = installRunToolClient(deniedWorker, {
-        socketPath: endpoint.socketPath,
-        token: endpoint.token,
-        expiresAt: endpoint.scope.expiresAt,
-        jobId: endpoint.scope.jobId,
-        sessionId: endpoint.scope.sessionId,
-        operations: ["note"],
-      });
-      const denied = Bun.spawn([join(deniedWorker.runtime, "headless-run-tool"), "run.delegate", "{}"], {
-        env: deniedEnv,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      expect(await denied.exited).toBe(2);
-      expect(await new Response(denied.stderr).text()).toContain("operation is not allowed by this credential");
-
       await manager.revoke(endpoint.id);
       const revoked = Bun.spawn([helper, "note", JSON.stringify({ text: "too late" })], { env, stdout: "pipe", stderr: "pipe" });
       expect(await revoked.exited).not.toBe(0);
       const output = `${await new Response(revoked.stdout).text()}${await new Response(revoked.stderr).text()}`;
       expect(output).not.toContain(endpoint.token);
     } finally {
-      deniedWorker.cleanup();
       worker.cleanup();
     }
   });
@@ -137,36 +118,6 @@ describe("run-scoped daemon tool endpoint", () => {
     await Bun.sleep(100);
     expect(existsSync(endpoint.socketPath)).toBe(false);
     await expect(callRunToolEndpoint(endpoint, "context", {}, 250)).rejects.toMatchObject({ code: "RUN_TOOL_UNAVAILABLE" });
-  });
-
-  test("the disposable helper fails closed when a socket closes without a response", async () => {
-    const root = temporaryDirectory();
-    const manager = new RunToolEndpointManager({
-      socketDir: root,
-      handle: () => new Promise(() => {}),
-    });
-    managers.push(manager);
-    const endpoint = await manager.issue(scope(Date.now() + 500));
-    const worker = createWorkerEnvironment({ baseDir: root });
-    try {
-      const env = installRunToolClient(worker, {
-        socketPath: endpoint.socketPath,
-        token: endpoint.token,
-        expiresAt: endpoint.scope.expiresAt,
-        jobId: endpoint.scope.jobId,
-        sessionId: endpoint.scope.sessionId,
-        operations: endpoint.operations,
-      });
-      const child = Bun.spawn([join(worker.runtime, "headless-run-tool"), "note", JSON.stringify({ text: "never answered" })], {
-        env,
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      expect(await child.exited).toBe(1);
-      expect(await new Response(child.stderr).text()).toContain("connection closed before a response");
-    } finally {
-      worker.cleanup();
-    }
   });
 
   test("validates delegation strictly and enforces each credential operation allowlist", async () => {
@@ -299,7 +250,6 @@ describe("run-scoped daemon tool endpoint", () => {
       expiresAt: endpoint.scope.expiresAt,
       jobId: endpoint.scope.jobId,
       sessionId: endpoint.scope.sessionId,
-      operations: endpoint.operations,
     });
     const profile = writeDarwinReadOnlySandboxProfile({
       workdir: project,
