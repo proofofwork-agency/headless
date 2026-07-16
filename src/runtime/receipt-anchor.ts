@@ -72,13 +72,18 @@ export function findReceiptAnchor(
 ): { anchor: ReceiptAnchor; sequence: number } | null {
   let found: { anchor: ReceiptAnchor; sequence: number } | null = null;
   for (const record of records) {
-    const artifact = artifactValue(record);
-    if (!artifact || artifact.kind !== RECEIPT_ANCHOR_ARTIFACT_KIND) continue;
-    const anchor = parseReceiptAnchor(artifact.evidence);
+    const anchor = parseReceiptAnchorRecord(record);
     if (!anchor || anchor.receiptId !== receiptId) continue;
     if (!found || record.sequence > found.sequence) found = { anchor, sequence: record.sequence };
   }
   return found;
+}
+
+/** Parse a receipt anchor only from the expected artifact record shape. */
+export function parseReceiptAnchorRecord(record: LedgerRecordV2): ReceiptAnchor | null {
+  const artifact = artifactValue(record);
+  if (!artifact || artifact.kind !== RECEIPT_ANCHOR_ARTIFACT_KIND) return null;
+  return parseReceiptAnchor(artifact.evidence);
 }
 
 function artifactValue(record: LedgerRecordV2) {
