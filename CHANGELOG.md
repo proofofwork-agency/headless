@@ -4,7 +4,7 @@
 
 ## 0.2.0-beta.3 — 2026-07-16
 
-Publication remains blocked. Both package manifests are private at `0.2.0-beta.3`; npm publication, repository visibility, and documentation deployment remain separate human-authority decisions.
+Package publication remains blocked. Both package manifests are private at `0.2.0-beta.3`; npm publication and repository visibility remain separate human-authority decisions. Documentation deployment is authorized separately through the public GitHub Pages workflow.
 
 ### Fixed
 
