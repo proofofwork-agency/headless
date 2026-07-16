@@ -65,6 +65,8 @@ import {
 } from "./job-admission-service";
 import { TaskStore } from "./task-store";
 import { RunEventStore } from "./run-event-store";
+import { ReceiptStore } from "../runtime/receipt-store";
+import type { ReceiptProvenanceContext } from "../runtime/receipt-service";
 import { PersistentMessageQueue } from "../runtime/message-queue";
 import { CredentialStore, type AuthenticatedCredential } from "../runtime/credential-store";
 import { LeadBindingStore, leadCredentialName } from "../runtime/lead-binding";
@@ -85,6 +87,9 @@ import {
   resolveDaemonExtensionConfig,
   type LoadedDaemonExtensions,
 } from "../runtime/daemon-extensions";
+import { HEADLESS_VERSION } from "../version";
+
+const receiptBackendVersionCache = new Map<string, string | null>();
 
 export type HeadlessDaemonOptions = {
   projectRoot: string;
@@ -124,6 +129,7 @@ export class HeadlessDaemon {
   private goalRuntime!: GoalRuntimeService;
   private tasks!: TaskStore;
   private runEvents!: RunEventStore;
+  private receipts!: ReceiptStore;
   private authority!: AuthorityStore;
   private budgets!: BudgetStore;
   private finality!: FinalityStore;
@@ -767,6 +773,7 @@ export class HeadlessDaemon {
     this.jobs = new JobStore(this.state.jobsDir);
     this.tasks = new TaskStore(this.state.tasksDir, { recoverOnOpen: false });
     this.runEvents = new RunEventStore(this.state.runEventsPath, { compactOnOpen: false });
+    this.receipts = new ReceiptStore(this.state.receiptsDir);
     this.sessions = new PersistentSessionStore(this.state);
     this.nativeSessions = new NativeSessionManager(this.state.canonicalProjectRoot, this.sessions, {
       authHomeDir: this.stateOptions?.homeDir,
@@ -964,6 +971,11 @@ export class HeadlessDaemon {
       jobs: this.jobs,
       tasks: this.tasks,
       runEvents: this.runEvents,
+      receipts: this.receipts,
+      receiptProvenance: receiptProvenanceContext(
+        this.state.canonicalProjectRoot,
+        this.stateOptions?.env ?? process.env,
+      ),
       sessions: this.sessions,
       nativeSessions: this.nativeSessions,
       approvals: this.approvals,
@@ -1505,6 +1517,58 @@ function recoveredIntegrationResult(
     },
     truncation: { stdout: false, stderr: false, output: false, events: false, artifacts: false, diff: false },
   };
+}
+
+/** Resolve immutable process/toolchain provenance once while the daemon owns state. */
+function receiptProvenanceContext(projectRoot: string, env: NodeJS.ProcessEnv): ReceiptProvenanceContext {
+  const configuredCommit = env.HEADLESS_COMMIT?.trim();
+  const commit = configuredCommit && /^[a-f0-9]{40,64}$/.test(configuredCommit)
+    ? configuredCommit
+    : getHeadSha(projectRoot);
+  const backendVersions: Record<string, string | null> = {};
+  for (const adapter of listBackendDefinitions()) {
+    // A daemon process loads one definition per backend id. Keying by the
+    // declared command (not each project's PATH string) prevents repeated CLI
+    // probes across daemon instances while still separating replacements.
+    const key = JSON.stringify([adapter.id, adapter.probe.versionCommand]);
+    let version = receiptBackendVersionCache.get(key);
+    if (version === undefined && !receiptBackendVersionCache.has(key)) {
+      version = probeReceiptBackendVersion(adapter.probe.versionCommand, adapter.probe.timeoutMs, projectRoot, env);
+      receiptBackendVersionCache.set(key, version);
+    }
+    backendVersions[adapter.id] = version ?? null;
+  }
+  return {
+    headlessVersion: HEADLESS_VERSION,
+    platform: `${process.platform}-${process.arch}`,
+    commit: commit && /^[a-f0-9]{40,64}$/.test(commit) ? commit : null,
+    backendVersions,
+  };
+}
+
+function probeReceiptBackendVersion(
+  command: readonly string[],
+  timeoutMs: number,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+) {
+  try {
+    const result = Bun.spawnSync([...command], {
+      cwd,
+      env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: Math.min(timeoutMs, 5_000),
+    });
+    if (result.exitCode !== 0) return null;
+    const raw = result.stdout.toString("utf8").trim() || result.stderr.toString("utf8").trim();
+    if (!raw) return null;
+    return redactAndTruncate(raw.split(/\r?\n/, 1)[0] ?? raw, 256).text;
+  } catch (error) {
+    recordRuntimeDiagnostic("state", "receipt.backend-version", error, "warning");
+    return null;
+  }
 }
 
 function messageOf(error: unknown) {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getProvider } from "../broker/providers";
-import type { ProviderBroker } from "../broker/server";
+import { BrokerLeaseScopeSchema, type ProviderBroker } from "../broker/server";
 import { getBackendDefinition, resolveBackendId, type BackendDefinition } from "../backends/registry";
 import type { DurableSession, FinalityDecision, Job } from "../contracts/durable";
 import type { RunResult, SerializedRunRequest } from "../contracts/run";
@@ -21,6 +21,16 @@ import { calculateModelPricedCost } from "../runtime/pricing";
 import type { ProjectStateOptions, ProjectStatePaths } from "../runtime/project-state";
 import { redactAndTruncate } from "../runtime/redaction";
 import { runReleaseGate, type GateCheck } from "../runtime/release-gate";
+import {
+  assembleAndAnchorReceipt,
+  receiptBrokerLeaseSnapshot,
+  receiptGateManifest,
+  type ReceiptAuthorizationSnapshot,
+  type ReceiptBrokerLeaseSnapshot,
+  type ReceiptGateManifestEntry,
+  type ReceiptProvenanceContext,
+} from "../runtime/receipt-service";
+import type { ReceiptStore } from "../runtime/receipt-store";
 import { appendEvent, getOrCreateSession, type HeadlessSession } from "../runtime/session";
 import type { WorktreeLeaseStore } from "../runtime/worktree-leases";
 import type { WriteGateContext, WriteGateDecision } from "../runtime/write-integration";
@@ -54,6 +64,8 @@ export type RunExecutionServiceOptions = {
   runTools: RunToolEndpointManager;
   worktreeLeases: WorktreeLeaseStore;
   integrationJournal: IntegrationJournal;
+  receipts: ReceiptStore;
+  receiptProvenance: ReceiptProvenanceContext;
   writeGateChecks: readonly GateCheck[];
   completed: (job: Job) => void;
   supervisor?: Pick<ExecutionSupervisor, "execute">;
@@ -152,6 +164,12 @@ export class RunExecutionService {
     let writeOutcome: string | null = null;
     let durableWriteFinality: FinalityDecision | null = null;
     let writeAuthorization: ReturnType<AuthorityStore["authorize"]> | null = null;
+    let executionAuthorization: ReturnType<AuthorityStore["authorize"]> | null = null;
+    let receiptStartedAt: number | null = null;
+    let receiptAuthorization: ReceiptAuthorizationSnapshot | null = null;
+    let receiptBrokerLease: ReceiptBrokerLeaseSnapshot | null = null;
+    const receiptGates: ReceiptGateManifestEntry[] = [];
+    let receiptCaptureFailure: unknown = null;
     const writeAuditSession = request.mode === "write" ? getOrCreateSession({
       cwd: this.options.paths.canonicalProjectRoot,
       state: this.options.stateOptions,
@@ -168,8 +186,9 @@ export class RunExecutionService {
         leaseMs: Math.min(86_400_000, request.timeoutMs + 300_000),
       });
       this.options.jobs.transition(jobId, "running");
+      receiptStartedAt = Date.now();
       this.options.runEvents.append({ jobId, sessionId: request.sessionId }, { kind: "lifecycle", state: "running" });
-      const executionAuthorization = this.options.authority.authorize({
+      executionAuthorization = this.options.authority.authorize({
         projectId: this.options.paths.projectId,
         principal,
         operation: request.mode === "write" ? "write" : "run",
@@ -177,6 +196,14 @@ export class RunExecutionService {
         estimatedCostUsd,
         merge: false,
       });
+      if (executionAuthorization.allowed) {
+        try {
+          receiptAuthorization = authorizationReceiptSnapshot(executionAuthorization, this.options.authority);
+        } catch (error) {
+          receiptCaptureFailure ??= error;
+          recordRuntimeDiagnostic("state", "receipt.authorization-snapshot", error);
+        }
+      }
       if (request.mode === "write") writeAuthorization = executionAuthorization;
       if (!executionAuthorization.allowed) {
         result = blockedResult(request, jobId, "POLICY_DENIED", executionAuthorization.reason || "Run authorization expired before execution.");
@@ -187,11 +214,27 @@ export class RunExecutionService {
           deadlineExceeded = true;
           result = timedOutResult(request, jobId, Math.max(0, Date.now() - startingJob.createdAt), "Job exceeded its total lifecycle timeout during preparation.");
         } else {
+          const issuedBrokerLease = !controls.linkedBrokerLease && request.authMode === "broker"
+            ? this.issueBrokerLease(jobId, request, deadlineAt, executionAuthorization.maxCostUsd)
+            : null;
           brokerLease = controls.linkedBrokerLease
             ? { ...controls.linkedBrokerLease }
-            : request.authMode === "broker"
-              ? this.issueBrokerLease(jobId, request, deadlineAt, executionAuthorization.maxCostUsd)
-              : null;
+            : issuedBrokerLease?.lease ?? null;
+          if (brokerLease) {
+            try {
+              const linkedTarget = controls.linkedBrokerLease
+                ? this.options.broker.linkedOperationSnapshot(controls.linkedBrokerLease.linkId).target
+                : null;
+              const scope = controls.linkedBrokerLease
+                ? linkedTarget?.kind === "target" ? linkedTarget.targetQuotaScope : null
+                : issuedBrokerLease?.scope ?? null;
+              if (!scope) throw new Error(`Broker lease scope is unavailable for receipt ${jobId}.`);
+              receiptBrokerLease = receiptBrokerLeaseSnapshot(scope);
+            } catch (error) {
+              receiptCaptureFailure ??= error;
+              recordRuntimeDiagnostic("state", "receipt.broker-scope-snapshot", error);
+            }
+          }
           const useNativePersistentSession = !!durableSession
             && request.authMode === "native-login"
             && request.mode === "read-only"
@@ -326,6 +369,12 @@ export class RunExecutionService {
                       signal: controller.signal,
                       recordArtifact: false,
                     });
+                    try {
+                      receiptGates.push(...receiptGateManifest(context.phase, gate.checks));
+                    } catch (error) {
+                      receiptCaptureFailure ??= error;
+                      recordRuntimeDiagnostic("state", "receipt.gate-manifest", error);
+                    }
                     const review = reviewCandidateDiff(context.diff);
                     const decision: WriteGateDecision = {
                       policyPassed: true,
@@ -635,6 +684,42 @@ export class RunExecutionService {
       // deterministically repair missing lifecycle/completion projections.
       recordRuntimeDiagnostic("state", "terminal-run-event-reconciliation", error);
     }
+    if (process.env.HEADLESS_RECEIPTS !== "off" && executionAuthorization?.allowed === true) {
+      try {
+        if (receiptCaptureFailure) throw receiptCaptureFailure;
+        if (receiptStartedAt === null) throw new Error(`Receipt start checkpoint is unavailable for run ${jobId}.`);
+        if (receiptAuthorization === null) throw new Error(`Receipt authorization checkpoint is unavailable for run ${jobId}.`);
+        assembleAndAnchorReceipt({
+          paths: this.options.paths,
+          stateOptions: this.options.stateOptions,
+          receipts: this.options.receipts,
+          provenance: this.options.receiptProvenance,
+        }, {
+          jobId,
+          sessionId: request.sessionId ?? null,
+          principal,
+          request,
+          result: completed.result!,
+          policyEvents: this.options.runEvents.snapshot({ jobId, limit: 1_000 }).events,
+          authorization: { ...receiptAuthorization, finality },
+          brokerLease: receiptBrokerLease,
+          gates: receiptGates,
+          budget: {
+            passed: budgetPassed,
+            reasons: budgetReasons,
+            usage: budgetUsage ?? result.usage,
+            cost: budgetCost ?? result.cost,
+            reservationId: reservation.id,
+          },
+          startedAt: receiptStartedAt,
+          endedAt: completed.updatedAt,
+        });
+      } catch (error) {
+        // Receipts are evidence about a completed run, never part of its
+        // authority or terminal outcome. Evidence failure is diagnostic-only.
+        recordRuntimeDiagnostic("state", "receipt.assemble-and-anchor", error);
+      }
+    }
     if (result.commit?.merged && result.commit.result) {
       try {
         this.options.integrationJournal.markCompleted(jobId, result.commit.result);
@@ -716,7 +801,7 @@ export class RunExecutionService {
       ? minimumNullable(minimumNullable(limits.maxCostUsd, grantCostLimitUsd), DEFAULT_BROKER_MAX_COST_USD)
       : null;
     const leaseRemainingMs = Math.max(1, deadlineAt - Date.now());
-    return this.options.broker.issueLease({
+    const scope = BrokerLeaseScopeSchema.parse({
       runId: jobId,
       provider: providerId,
       models,
@@ -745,6 +830,7 @@ export class RunExecutionService {
         ...limits.budgetQuotas,
       ],
     });
+    return { lease: this.options.broker.issueLease(scope), scope };
   }
 }
 
@@ -760,6 +846,33 @@ export function resumableNativeSessionId(
 ) {
   if (request.mode !== "read-only" || !session || session.replay || !adapter?.buildResumeCommand) return undefined;
   return session.nativeSessionId ?? undefined;
+}
+
+function authorizationReceiptSnapshot(
+  decision: ReturnType<AuthorityStore["authorize"]>,
+  authority: AuthorityStore,
+): ReceiptAuthorizationSnapshot {
+  const source = decision.root ? "root" : decision.grantId === null ? "foreground_lead" : "grant";
+  const grant = decision.grantId === null
+    ? null
+    : authority.getState().grants.find((candidate) => candidate.id === decision.grantId) ?? null;
+  if (decision.grantId !== null && !grant) {
+    throw new Error(`Authorized grant ${decision.grantId} is unavailable at the receipt checkpoint.`);
+  }
+  return {
+    source,
+    mergeAllowed: decision.mergeAllowed,
+    maxCostUsd: decision.maxCostUsd,
+    grantId: decision.grantId,
+    grantTerms: grant ? {
+      operations: [...grant.operations],
+      backends: [...grant.backends],
+      expiresAt: grant.expiresAt,
+      maxCostUsd: grant.maxCostUsd,
+      maxIterations: grant.maxIterations,
+    } : null,
+    finality: null,
+  };
 }
 
 function appendPreMergeDecision(session: HeadlessSession, input: {
