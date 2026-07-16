@@ -1,6 +1,6 @@
 # Headless v0.2 release plan
 
-This is an acceptance checklist, not a completion claim. Publication happens per gate: Gate A publishes `0.2.0-beta.1` (kernel surface), Gate B publishes the orchestration beta, Gate C publishes writes GA. No gate publishes while a P0/P1 security or data-integrity defect remains, and no later-gate evidence requirement is deleted by this staging — it is sequenced.
+This is an acceptance checklist, not a completion claim. Publication happens per gate: Gate A publishes `0.2.0-beta.2` (kernel surface), Gate B publishes the orchestration beta, Gate C publishes writes GA. No gate publishes while a P0/P1 security or data-integrity defect remains, and no later-gate evidence requirement is deleted by this staging — it is sequenced.
 
 ## Product vision (context for every gate)
 
@@ -27,7 +27,7 @@ The orchestration surfaces are the product, not compatibility baggage; the conta
 - macOS and Linux are required; Windows returns `UNSUPPORTED_PLATFORM` before launch.
 - v1 repository state is verified before a crash-idempotent write-ahead import and remains unchanged.
 
-## Gate A — kernel beta (`0.2.0-beta.1`)
+## Gate A — kernel beta (`0.2.0-beta.2`)
 
 Scope: one bounded contained execution, the daemon control plane, project trust, lead binding, MCP lead attachment, and the read-only observer log/Config TUI. This is the "open one CLI coder, bind it as lead, and go" entry point.
 

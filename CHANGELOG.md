@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-Publication remains blocked. Both package manifests are private at `0.2.0-beta.1`; the staged Gate A, B, and C evidence in `docs/plan.md` is an acceptance checklist, not a completion claim.
+## 0.2.0-beta.2 — 2026-07-16
+
+Publication remains blocked. Both package manifests are private at `0.2.0-beta.2`; the staged Gate A, B, and C evidence in `docs/plan.md` is an acceptance checklist, not a completion claim.
 
 ### Changed
 
@@ -25,6 +27,7 @@ Publication remains blocked. Both package manifests are private at `0.2.0-beta.1
 
 ### Added
 
+- Added the verifiable execution receipt. Every authorized run — read-only included — now assembles a versioned, tamper-evident receipt binding the request digest, a source-discriminated authorization snapshot captured at the authorization checkpoint (`root`/`foreground_lead`/`grant` with echoed grant terms), a token-free broker-lease scope snapshot, a bounded gate manifest, budget outcome, containment evidence, and result digests with bounded redacted previews. The receipt is anchored into the hash/HMAC-chained ledger as a bounded `execution_receipt` artifact and persisted in an owner-only durable store that survives run-event compaction. Verification runs online against the full ledger chain or offline from an exported file, reporting an explicit assurance level (`full-chain`, `embedded-record`, `structural-only`) and localizing tamper to the first failing section. Surfaced as the experimental `headless receipt show|list|export|verify|diff` CLI over new `receipt.get|list|verify` daemon RPCs (`ledger:read`-scoped, ownership-gated). Receipt assembly is non-fatal by construction and can never alter a run's status; `HEADLESS_RECEIPTS=off` opts out and is documented as weakening the proof.
 - Added stable `headless verify [--evidence]` plus the experimental `ledger verify` namespace alias. The auditor command returns the first ledger-chain break, verifies mixed rotated HMAC key IDs without accepting an unsigned downgrade, and can compare release-evidence files with their latest authenticated ledger anchors. Opt-in smoke evidence now carries generation time, source commit, platform, Headless version, and backend versions before its exact bytes are SHA-256 anchored through the repository daemon.
 - Added an explicit Claude subscription setup-token capsule for required containment on macOS and Linux. A user-created owner-only `~/.claude/.headless-setup-token` must match the bounded `sk-ant-oat…` contract; it takes exclusive precedence over stale `.credentials.json`, contributes only a hash to the native-auth fingerprint, and is injected after environment scrubbing into the contained Claude native-login process without entering daemon state, logs, ledger records, or results. Invalid deliberate token files fail closed with a precise remedy.
 - Added experimental depth-one worker delegation through `run.delegate`: one parent-deadline-bounded, daemon-attributed read-only child per parent, active-lead exclusion, idempotent replay, non-queueing capacity admission, cancellation/restart recovery, and structured child outcomes that never terminate the parent. Same-provider children use an atomic parent sub-reservation; cross-provider children require different providers and backends plus a strict `broker-api-key` target and use a crash-atomic linked hold over parent and target provider quotas. The target bearer is minted once and never persisted. Both paths use a 25%-default/50%-maximum carve from the parent's remaining reservation, with unused return and crash-unknown exhaustion instead of new project spend authority.
@@ -36,6 +39,7 @@ Publication remains blocked. Both package manifests are private at `0.2.0-beta.1
 
 ### Documentation
 
+- Added a full Docusaurus site under `website/` — introduction, getting started, the safety model, execution receipts, leads and fleet concepts, per-AI-coder guides (Claude Code, Codex, OpenCode, Grok), CLI and TUI guides, and eight test scenarios. Built separately with `cd website && bun run build`; not yet deployed.
 - Consolidated lead onboarding, MCP host behavior, observer authority, budget examples, upgrade compatibility, run-tool timeout/probe behavior, native-login limits, and staged release language across the README, operator guides, security model, generated command reference, and changelog.
 - Marked `pair`, `ask`/`ask-for-work`/`ask-for-more-work`, and `coop-proof`/`autonomy-coop-proof` as internal audit fixtures; they remain intentionally hidden from operator help.
 
