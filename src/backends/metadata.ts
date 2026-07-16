@@ -62,7 +62,7 @@ export const backendMetadata: Record<Backend, BackendMetadata> = {
     canRead: true,
     canWrite: false,
     nativeResume: true,
-    login: { displayName: "Grok Build", instructions: "Use the Grok CLI's documented authentication flow, then refresh Fleet health.", interactive: false, brokerMode: true },
+    login: { displayName: "Grok Build", argv: ["grok", "login"], instructions: "Run `grok login` (browser OAuth) or `grok login --device-auth` on a display-less host, then refresh Fleet health.", interactive: true, brokerMode: true },
   },
 };
 

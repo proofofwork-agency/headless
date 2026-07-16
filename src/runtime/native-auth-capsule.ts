@@ -194,10 +194,10 @@ function capsuleFiles(backend: string, home: string): CapsuleFile[] {
     return [{ source: join(home, ".local", "share", "opencode", "auth.json"), destination: (worker) => join(worker.data, "opencode", "auth.json") }];
   }
   if (backend === "grok-build") {
-    return [
-      { source: join(home, ".grok", "auth.json"), destination: (worker) => join(worker.home, ".grok", "auth.json") },
-      { source: join(home, ".config", "grok", "auth.json"), destination: (worker) => join(worker.config, "grok", "auth.json") },
-    ];
+    // grok-build reads credentials only from `$GROK_HOME/auth.json` (default
+    // `~/.grok/auth.json`; auth/storage.rs) — it never consults XDG config, so
+    // the former `~/.config/grok/auth.json` candidate was dead weight.
+    return [{ source: join(home, ".grok", "auth.json"), destination: (worker) => join(worker.home, ".grok", "auth.json") }];
   }
   return [];
 }

@@ -213,6 +213,13 @@ export function installGrokIsolation(worker: WorkerEnvironment, options: { homeD
     GROK_DISABLE_AUTOUPDATER: "1",
     GROK_TELEMETRY_ENABLED: "0",
     GROK_FEEDBACK_ENABLED: "0",
+    // The capsule credential is a disposable copy. Grok proactively refreshes
+    // OAuth tokens ~5 minutes before expiry and rewrites auth.json in the
+    // background; inside a short-lived worker that rotation would silently
+    // diverge the capsule from the operator's real ~/.grok/auth.json. Zero
+    // disables proactive refresh; reactive 401 refresh-and-retry still covers
+    // bounded runs (grok-build auth docs / GROK_AUTH_EARLY_INVALIDATION_SECS).
+    GROK_AUTH_EARLY_INVALIDATION_SECS: "0",
   });
   const executable = installManagedGrokPath(worker, options.homeDir);
   return { grokHome, configPath, executable };
