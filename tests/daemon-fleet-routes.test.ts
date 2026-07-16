@@ -99,7 +99,8 @@ describe("daemon fleet and collaboration routes", () => {
 
   test("reports an expired Grok OIDC capsule as login required before provider access", async () => {
     const fixture = createFixture();
-    mkdirSync(join(fixture.root, ".grok"), { recursive: true });
+    mkdirSync(join(fixture.root, ".grok", "bin"), { recursive: true });
+    writeFileSync(join(fixture.root, ".grok", "bin", "grok"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     writeFileSync(join(fixture.root, ".grok", "auth.json"), JSON.stringify({
       "https://auth.x.ai::account": {
         key: "expired-access-token",
