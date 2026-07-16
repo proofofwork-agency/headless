@@ -3,6 +3,7 @@ import { cpSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync,
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { PortableSkillManifestSchema, PortableSkillRecordSchema, SkillAuditEntrySchema } from "../contracts/skill";
+import type { Job } from "../contracts/durable";
 import { HeadlessError } from "./headless-error";
 import { readOwnerOnlyJson, writeOwnerOnlyJson } from "./owner-json";
 import type { ProjectStatePaths } from "./project-state";
@@ -91,6 +92,44 @@ export class SkillRegistry {
     return audit;
   }
 
+  markInvocationPending(auditId: string, jobId: string) {
+    const audit = this.requireAudit(auditId);
+    audit.jobId = jobId;
+    audit.status = "running";
+    audit.result = "running";
+    this.write();
+    return audit;
+  }
+
+  completeJobInvocation(auditId: string, job: Job) {
+    const audit = this.requireAudit(auditId);
+    if (audit.jobId !== job.id || audit.status !== "running") return audit;
+    if (job.state === "queued" || job.state === "preparing" || job.state === "running" || job.state === "cancelling") {
+      throw new HeadlessError("CONFLICT", `Skill invocation job ${job.id} is not terminal.`);
+    }
+    audit.status = job.state;
+    audit.result = redactAndTruncate(JSON.stringify({ jobId: job.id, status: job.state, result: job.result }), 16_384).text;
+    this.write();
+    return audit;
+  }
+
+  failPendingInvocation(auditId: string, error: string) {
+    const audit = this.requireAudit(auditId);
+    if (audit.status !== "running") return audit;
+    audit.status = "failed";
+    audit.result = redactAndTruncate(JSON.stringify({ jobId: audit.jobId, status: "failed", error }), 16_384).text;
+    this.write();
+    return audit;
+  }
+
+  pendingInvocations() {
+    // Pre-upgrade audit entries intentionally default to admitted/null: older
+    // state did not persist a trustworthy job relationship to reconcile.
+    return this.state.audit
+      .filter((entry) => entry.status === "running" && entry.jobId !== null)
+      .map((entry) => ({ auditId: entry.id, jobId: entry.jobId!, principal: entry.authority }));
+  }
+
   private content(skill: z.infer<typeof PortableSkillRecordSchema>) {
     const root = this.bundleRoot(skill);
     const files = [skill.manifest.instructions, ...skill.manifest.references];
@@ -102,6 +141,12 @@ export class SkillRegistry {
     const skill = this.state.skills.find((item) => item.id === id && (!version || item.version === version));
     if (!skill) throw new HeadlessError("INVALID_REQUEST", `Unknown skill: ${idVersion}`);
     return skill;
+  }
+
+  private requireAudit(auditId: string) {
+    const audit = this.state.audit.find((entry) => entry.id === auditId);
+    if (!audit) throw new HeadlessError("INVALID_REQUEST", `Unknown skill audit entry: ${auditId}`);
+    return audit;
   }
 
   private bundleRoot(skill: z.infer<typeof PortableSkillRecordSchema>) {

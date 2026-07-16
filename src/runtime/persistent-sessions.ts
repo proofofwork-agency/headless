@@ -115,6 +115,8 @@ export class PersistentSessionStore {
   }
 
   complete(id: string, result: RunResult) {
+    const current = this.require(id).session;
+    if (current.result?.jobId === result.jobId && current.state !== "running" && current.state !== "cancelling") return current;
     const state: DurableSession["state"] = result.status === "succeeded" ? "completed" : result.status === "cancelled" ? "cancelled" : "failed";
     this.append(id, "assistant", result.output, result.jobId);
     return this.update(id, { state, result });

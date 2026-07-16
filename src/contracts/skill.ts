@@ -25,7 +25,14 @@ export const PortableSkillRecordSchema = z.object({
 
 export const SkillAuditEntrySchema = z.object({
   id: IdentifierSchema, projectId: ProjectIdSchema, skillId: IdentifierSchema, version: z.string().max(64), contentHash: z.string().regex(/^[a-f0-9]{64}$/),
-  arguments: z.string().max(64_000), authority: PrincipalIdSchema, receivers: z.array(z.string().max(128)).max(32), result: z.string().max(16_384), createdAt: TimestampSchema,
-}).strict();
+  arguments: z.string().max(64_000), authority: PrincipalIdSchema, receivers: z.array(z.string().max(128)).max(32),
+  jobId: IdentifierSchema.nullable().default(null),
+  status: z.enum(["admitted", "running", "succeeded", "failed", "timed_out", "cancelled", "blocked"]).default("admitted"),
+  result: z.string().max(16_384), createdAt: TimestampSchema,
+}).strict().superRefine((entry, context) => {
+  if (entry.status !== "admitted" && entry.jobId === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A running or terminal skill invocation requires its durable job id." });
+  }
+});
 
 export type PortableSkillRecord = z.infer<typeof PortableSkillRecordSchema>;

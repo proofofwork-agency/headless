@@ -93,6 +93,12 @@ describe("single-lead migration and retained automation foundations", () => {
     skills.completeInvocation(invocation.auditId, { status: "succeeded" });
     expect(skills.audit()).toHaveLength(1);
     expect(skills.audit()[0]?.result).toContain("succeeded");
+    const registryPath = join(paths.skillsDir, "registry.json");
+    const legacyRegistry = JSON.parse(readFileSync(registryPath, "utf8"));
+    delete legacyRegistry.audit[0].jobId;
+    delete legacyRegistry.audit[0].status;
+    writeFileSync(registryPath, JSON.stringify(legacyRegistry), { mode: 0o600 });
+    expect(new SkillRegistry(paths).audit()[0]).toMatchObject({ jobId: null, status: "admitted" });
 
     const linked = join(roots[roots.length - 1]!, "linked-skill");
     mkdirSync(linked); writeFileSync(join(linked, "manifest.json"), "{}"); symlinkSync(join(source, "instructions.md"), join(linked, "instructions.md"));

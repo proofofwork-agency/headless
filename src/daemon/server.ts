@@ -91,6 +91,14 @@ import {
 import { HEADLESS_VERSION } from "../version";
 
 const receiptBackendVersionCache = new Map<string, string | null>();
+const JOB_COMPLETION_GRACE_MS = 10_000;
+const TERMINAL_JOB_STATES = new Set<Job["state"]>(["succeeded", "failed", "timed_out", "cancelled", "blocked"]);
+
+type JobWaiter = {
+  callback: (job: Job) => void;
+  reject: (error: unknown) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
 
 export type HeadlessDaemonOptions = {
   projectRoot: string;
@@ -117,7 +125,7 @@ export class HeadlessDaemon {
   private token = "";
   private readonly configuredToken?: string;
   private readonly stateOptions?: ProjectStateOptions;
-  private readonly waiters = new Map<string, Array<(job: Job) => void>>();
+  private readonly waiters = new Map<string, JobWaiter[]>();
   private broker!: ProviderBroker;
   private sessions!: PersistentSessionStore;
   private nativeSessions!: NativeSessionManager;
@@ -222,6 +230,7 @@ export class HeadlessDaemon {
       this.reconcileTerminalRunEvents();
       this.jobAdmission.recoverBudgetReservations();
       this.reconcilePersistentSessions();
+      this.reconcileSkillInvocations();
       this.reconcileTasks();
       this.ready = true;
       this.server = server;
@@ -255,6 +264,7 @@ export class HeadlessDaemon {
     this.stopping = true;
     this.jobAdmission?.dispose();
     this.runExecution?.cancelAll("daemon stopping");
+    this.drainWaiters(new HeadlessError("DAEMON_UNAVAILABLE", "Daemon is stopping before the job wait completed.", { retryable: true }));
     if (this.executions.size) {
       const drained = await waitForExecutions(this.executions, 30_000);
       if (!drained) {
@@ -476,23 +486,127 @@ export class HeadlessDaemon {
 
   private wait(jobId: string, timeoutMs = 180_000): Promise<Job> {
     const job = this.requireJob(jobId);
-    if (["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(job.state)) return Promise.resolve(job);
+    if (TERMINAL_JOB_STATES.has(job.state)) return Promise.resolve(job);
     return new Promise<Job>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const active = this.waiters.get(jobId) ?? [];
-        const index = active.indexOf(callback);
-        if (index >= 0) active.splice(index, 1);
-        if (active.length === 0) this.waiters.delete(jobId);
-        reject(new HeadlessError("TIMED_OUT", "Timed out waiting for the daemon job."));
-      }, timeoutMs);
-      const callback = (completed: Job) => {
-        clearTimeout(timer);
-        resolve(completed);
+      let settled = false;
+      const settle = (completed?: Job, error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(waiter.timer);
+        this.removeWaiter(jobId, waiter);
+        if (completed) resolve(completed);
+        else reject(error);
+      };
+      const waiter: JobWaiter = {
+        callback: (completed) => settle(completed),
+        reject: (error) => settle(undefined, error),
+        timer: setTimeout(() => {
+          const current = this.jobs.get(jobId);
+          if (current && TERMINAL_JOB_STATES.has(current.state)) {
+            this.reconcileSessionCompletion(current);
+            this.reconcileSkillCompletion(current);
+            settle(current);
+            return;
+          }
+          settle(undefined, new HeadlessError("TIMED_OUT", "Timed out waiting for the daemon job."));
+        }, timeoutMs),
       };
       const waiting = this.waiters.get(jobId) ?? [];
-      waiting.push(callback);
+      waiting.push(waiter);
       this.waiters.set(jobId, waiting);
     });
+  }
+
+  private removeWaiter(jobId: string, waiter: JobWaiter) {
+    const active = this.waiters.get(jobId);
+    if (!active) return;
+    const index = active.indexOf(waiter);
+    if (index >= 0) active.splice(index, 1);
+    if (active.length === 0) this.waiters.delete(jobId);
+  }
+
+  private drainWaiters(error: unknown) {
+    for (const waiting of [...this.waiters.values()]) {
+      for (const waiter of [...waiting]) waiter.reject(error);
+    }
+    this.waiters.clear();
+  }
+
+  private completionWatchTimeout(jobId: string) {
+    return (this.jobs.request(jobId)?.timeoutMs ?? 180_000) + JOB_COMPLETION_GRACE_MS;
+  }
+
+  private watchSessionCompletion(sessionId: string, jobId: string) {
+    const current = this.jobs.get(jobId);
+    if (current && TERMINAL_JOB_STATES.has(current.state)) this.reconcileSessionCompletion(current);
+    void this.wait(jobId, this.completionWatchTimeout(jobId)).catch((error) => {
+      const latest = this.jobs.get(jobId);
+      if (latest && TERMINAL_JOB_STATES.has(latest.state)) {
+        this.reconcileSessionCompletion(latest);
+        return;
+      }
+      if (!this.stopping && latest) this.jobAdmission.cancel(jobId);
+      if (this.stopping) return;
+      const detail = redactAndTruncate(`Persistent session completion guard expired: ${messageOf(error)}`, 2_048).text;
+      try {
+        this.runEvents.append({ jobId, sessionId }, {
+          kind: "policy",
+          decision: "deferred",
+          rule: "session-completion-recovery",
+          reason: detail,
+        });
+      } catch (diagnosticError) {
+        console.error(redactAndTruncate(`Unable to persist session recovery diagnostic: ${messageOf(diagnosticError)}`, 2_048).text);
+      }
+    });
+  }
+
+  private watchSkillCompletion(auditId: string, jobId: string, principal: string) {
+    this.skills.markInvocationPending(auditId, jobId);
+    const current = this.jobs.get(jobId);
+    if (current && TERMINAL_JOB_STATES.has(current.state)) this.reconcileSkillCompletion(current);
+    void this.wait(jobId, this.completionWatchTimeout(jobId)).catch((error) => {
+      const latest = this.jobs.get(jobId);
+      if (latest && TERMINAL_JOB_STATES.has(latest.state)) {
+        this.reconcileSkillCompletion(latest);
+        return;
+      }
+      if (!this.stopping && latest) this.jobAdmission.cancel(jobId);
+      if (!this.stopping) {
+        this.recordSkillAudit("portable_skill_completion_deferred", principal, {
+          auditId,
+          jobId,
+          reason: messageOf(error),
+        });
+      }
+    });
+  }
+
+  private reconcileSessionCompletion(job: Job) {
+    if (!job.result || !job.sessionId || !TERMINAL_JOB_STATES.has(job.state)) return;
+    const session = this.sessions.get(job.sessionId);
+    if (!session || session.lastJobId !== job.id || (session.state !== "running" && session.state !== "cancelling")) return;
+    this.sessions.complete(session.id, job.result);
+  }
+
+  private reconcileSkillCompletion(job: Job) {
+    if (!job.result || !TERMINAL_JOB_STATES.has(job.state)) return;
+    for (const pending of this.skills.pendingInvocations().filter((entry) => entry.jobId === job.id)) {
+      this.skills.completeJobInvocation(pending.auditId, job);
+      this.recordSkillAudit("portable_skill_completed", pending.principal, { auditId: pending.auditId, jobId: job.id, status: job.state });
+    }
+  }
+
+  private reconcileSkillInvocations() {
+    for (const pending of this.skills.pendingInvocations()) {
+      const job = this.jobs.get(pending.jobId);
+      if (!job) {
+        this.skills.failPendingInvocation(pending.auditId, "Skill invocation job is missing during daemon recovery.");
+        this.recordSkillAudit("portable_skill_completed", pending.principal, { auditId: pending.auditId, jobId: pending.jobId, status: "failed" });
+        continue;
+      }
+      if (TERMINAL_JOB_STATES.has(job.state)) this.reconcileSkillCompletion(job);
+    }
   }
 
   private requireJob(id: string) {
@@ -596,21 +710,7 @@ export class HeadlessDaemon {
       approvalPolicy: session.approvalPolicy,
     }, session.principal);
     this.sessions.start(session.id, job.id);
-    void this.wait(job.id).then((completed) => {
-      if (completed?.result) this.sessions.complete(session.id, completed.result);
-    }).catch((error) => {
-      const detail = redactAndTruncate(`Persistent session completion failed: ${messageOf(error)}`, 2_048).text;
-      try {
-        this.runEvents.append({ jobId: job.id, sessionId: session.id }, {
-          kind: "policy",
-          decision: "deferred",
-          rule: "session-completion-recovery",
-          reason: detail,
-        });
-      } catch (diagnosticError) {
-        console.error(redactAndTruncate(`Unable to persist session recovery diagnostic: ${messageOf(diagnosticError)}`, 2_048).text);
-      }
-    });
+    this.watchSessionCompletion(session.id, job.id);
     return { session: this.requireSession(session.id), job, replay: { truncated: replay.truncated, bytes: replay.bytes } };
   }
 
@@ -651,13 +751,7 @@ export class HeadlessDaemon {
   }
 
   private recordSkillCompletion(auditId: string, jobId: string, principal: string) {
-    void this.wait(jobId).then((job) => {
-      this.skills.completeInvocation(auditId, { jobId, status: job.state, result: job.result });
-      this.recordSkillAudit("portable_skill_completed", principal, { auditId, jobId, status: job.state });
-    }).catch((error) => {
-      this.skills.completeInvocation(auditId, { jobId, status: "failed", error: messageOf(error) });
-      this.recordSkillAudit("portable_skill_completed", principal, { auditId, jobId, status: "failed" });
-    });
+    this.watchSkillCompletion(auditId, jobId, principal);
   }
 
   private recordSkillAudit(type: string, principal: string, payload: Record<string, unknown>) {
@@ -677,8 +771,9 @@ export class HeadlessDaemon {
   }
 
   private resolveWaiters(job: Job) {
-    for (const resolve of this.waiters.get(job.id) ?? []) resolve(job);
-    this.waiters.delete(job.id);
+    this.reconcileSessionCompletion(job);
+    this.reconcileSkillCompletion(job);
+    for (const waiter of [...(this.waiters.get(job.id) ?? [])]) waiter.callback(job);
   }
 
   private reconcileIntegrationJournal() {
@@ -723,14 +818,13 @@ export class HeadlessDaemon {
     for (const session of this.sessions.list()) {
       if (session.state !== "running" && session.state !== "cancelling") continue;
       const job = session.lastJobId ? this.jobs.get(session.lastJobId) : null;
-      if (!job?.result || !["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(job.state)) continue;
-      this.sessions.complete(session.id, job.result);
+      if (job) this.reconcileSessionCompletion(job);
     }
   }
 
   private reconcileTerminalRunEvents() {
     for (const job of this.jobs.list()) {
-      if (!job.result || !["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(job.state)) continue;
+      if (!job.result || !TERMINAL_JOB_STATES.has(job.state)) continue;
       try {
         this.runEvents.reconcileTerminal(
           { jobId: job.id, sessionId: job.sessionId },
@@ -752,7 +846,7 @@ export class HeadlessDaemon {
         this.tasks.cancel({ taskId: task.id, principal: this.principal });
         continue;
       }
-      if (!job.result || !["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(job.state)) continue;
+      if (!job.result || !TERMINAL_JOB_STATES.has(job.state)) continue;
       let current = this.tasks.get(task.id)!;
       if (current.state === "pending") {
         current = this.tasks.claim({ taskId: current.id, principal: job.principal, leaseMs: 1_000 });
