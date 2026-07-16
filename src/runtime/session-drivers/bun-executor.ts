@@ -498,8 +498,7 @@ function authFile(backend: SessionAuthProbeRequest["backend"], env: NodeJS.Proce
   if (backend === "codex" && home) return join(home, ".codex", "auth.json");
   if (backend === "claude-code" && home) return join(home, ".claude", ".credentials.json");
   if (backend === "opencode" && data) return join(data, "opencode", "auth.json");
-  if (backend === "grok-build" && home && existsSync(join(home, ".grok", "auth.json"))) return join(home, ".grok", "auth.json");
-  if (backend === "grok-build" && config) return join(config, "grok", "auth.json");
+  if (backend === "grok-build" && home) return join(home, ".grok", "auth.json");
   return null;
 }
 

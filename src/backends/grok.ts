@@ -112,6 +112,9 @@ export function parseGrokJsonl(stdout: string): GrokJsonParseResult {
     if (event.type === "text") {
       const delta = stringValue(event.data);
       if (delta) appendText(text, delta);
+    } else if (event.type === "max_turns_reached") {
+      // grok-build emits this then bails with exit 1 (headless.rs:1313-1318).
+      errors.push("Grok reached its maximum turn limit before completing the turn.");
     } else if (event.type !== "error" && event.type !== "thought") {
       collectText(event, text);
     }

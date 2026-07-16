@@ -264,6 +264,18 @@ export function decodeGrokEvent(value: Record<string, unknown>): DecodedSessionE
       providerSequence: sequence,
     })];
   }
+  // grok-build emits {"type":"max_turns_reached"} then bails; without this the
+  // event carried no error field and was silently ignored (headless.rs:1313).
+  if (type === "max_turns_reached") {
+    return [decoded("error", {
+      stableId: providerEventId(value),
+      sessionId,
+      turnId,
+      text: "Grok reached its maximum turn limit before completing the turn.",
+      failed: true,
+      providerSequence: sequence,
+    })];
+  }
   if (type === "result" || type === "completed" || type === "turn.completed" || type === "end") {
     const events: DecodedSessionEvent[] = [];
     const text = firstString(value.output, value.result, value.text);
@@ -286,11 +298,16 @@ export function decodeGrokEvent(value: Record<string, unknown>): DecodedSessionE
       providerSequence: sequence,
     }));
     const stopReason = firstString(value.stop_reason, value.stopReason)?.toLowerCase() ?? "";
+    // grok-build Debug-formats acp::StopReason into stopReason; these variants
+    // mean the turn did not complete usefully (Refusal, ContentFilter,
+    // Cancelled, ModelContextWindowExceeded) even though no error event fires.
+    const stopFailed = ["refusal", "contentfilter", "content_filter", "cancelled", "canceled", "modelcontextwindowexceeded"]
+      .some((marker) => stopReason.includes(marker));
     events.push(decoded("completion", {
       stableId: turnId ? `turn:${turnId}:completed` : providerEventId(value),
       sessionId,
       turnId,
-      failed: value.ok === false || value.success === false || stopReason.includes("error") || stopReason.includes("fail"),
+      failed: value.ok === false || value.success === false || stopReason.includes("error") || stopReason.includes("fail") || stopFailed,
       providerSequence: sequence,
     }));
     return events;
@@ -358,7 +375,7 @@ function tokenUsage(value: Record<string, unknown>): Partial<SessionTokenUsage> 
     input: firstNumber(value.input, value.input_tokens, value.inputTokens),
     output: firstNumber(value.output, value.output_tokens, value.outputTokens),
     reasoning: firstNumber(value.reasoning, value.reasoning_tokens, value.reasoning_output_tokens, value.reasoningOutputTokens),
-    cached: firstNumber(value.cached, value.cached_tokens, value.cached_input_tokens, value.cachedInputTokens),
+    cached: firstNumber(value.cached, value.cached_tokens, value.cached_input_tokens, value.cachedInputTokens, value.cache_read_input_tokens),
     total: firstNumber(value.total, value.total_tokens, value.totalTokens),
   };
 }

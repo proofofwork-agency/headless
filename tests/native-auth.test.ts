@@ -75,9 +75,11 @@ describe("native authentication capsules", () => {
       codex: ["home/.codex/auth.json"],
       "claude-code": ["home/.claude/.credentials.json"],
       opencode: ["data/opencode/auth.json"],
-      "grok-build": ["config/grok/auth.json", "home/.grok/auth.json"],
+      // grok-build reads only $GROK_HOME/auth.json; the legacy XDG path below
+      // stays in allDestinations so the loop proves it is never installed.
+      "grok-build": ["home/.grok/auth.json"],
     } as const;
-    const allDestinations = [...new Set(Object.values(expected).flat())];
+    const allDestinations = [...new Set([...Object.values(expected).flat(), "config/grok/auth.json"])];
 
     for (const [backend, destinations] of Object.entries(expected)) {
       const worker = createWorkerEnvironment({
