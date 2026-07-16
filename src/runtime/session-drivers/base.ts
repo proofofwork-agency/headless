@@ -26,6 +26,7 @@ export type SessionDriverRuntime = {
   handle: SessionHandle;
   cwd: string;
   mode: "read-only" | "write";
+  containment: "required" | "unsafe";
   model: string | null;
   agent: string | null;
   env: NodeJS.ProcessEnv;
@@ -57,6 +58,7 @@ export type OpenSessionResult = {
 export type BaseSessionDriverOptions = {
   createId?: () => string;
   now?: () => number;
+  platform?: string;
 };
 
 export abstract class BaseSessionDriver implements SessionDriver {
@@ -66,10 +68,12 @@ export abstract class BaseSessionDriver implements SessionDriver {
   private readonly sessions = new Map<string, SessionDriverRuntime>();
   protected readonly createId: () => string;
   protected readonly now: () => number;
+  protected readonly platform: string;
 
   constructor(options: BaseSessionDriverOptions = {}) {
     this.createId = options.createId ?? randomUUID;
     this.now = options.now ?? Date.now;
+    this.platform = options.platform ?? process.platform;
   }
 
   abstract probe(input?: SessionProbeInput): Promise<SessionDriverProbe>;
@@ -215,6 +219,7 @@ export abstract class BaseSessionDriver implements SessionDriver {
       handle: { id, backend: this.backend, driverKind: this.kind },
       cwd: input.cwd,
       mode: input.mode ?? "read-only",
+      containment: input.containment === "unsafe" ? "unsafe" : "required",
       model: safeSessionOption(input.model, "model") ?? null,
       agent: input.agent ? safeAgentName(input.agent, this.backend) : null,
       env: { ...(input.env ?? {}) },

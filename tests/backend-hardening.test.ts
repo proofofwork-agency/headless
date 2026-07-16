@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildClaudeCommand, CLAUDE_EMPTY_MCP_CONFIG } from "../src/backends/claude";
-import { buildCodexCommand, codexProjectPolicyArguments } from "../src/backends/codex";
+import { buildCodexCommand, codexProjectPolicyArguments, codexSandbox } from "../src/backends/codex";
 import { buildGrokCommand } from "../src/backends/grok";
 import { buildAdapterEnv } from "../src/backends/env";
 import { probeBackendDefinition, type ProbeExecutor } from "../src/backends/probe";
@@ -98,6 +98,16 @@ describe("hardened built-in command preparation", () => {
     expect(readConfig).toContain("malicious/SKILL.md");
     expect(readConfig).toContain("native-malicious/SKILL.md");
     expect(read).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
+  test("Codex sandbox selection delegates only required Darwin containment", () => {
+    expect(codexSandbox({ platform: "darwin", mode: "read-only", containment: "required" })).toBe("danger-full-access");
+    expect(codexSandbox({ platform: "darwin", mode: "write" })).toBe("danger-full-access");
+    expect(codexSandbox({ platform: "darwin", mode: "write", containment: "future-policy" })).toBe("danger-full-access");
+    expect(codexSandbox({ platform: "darwin", mode: "read-only", containment: "unsafe" })).toBe("read-only");
+    expect(codexSandbox({ platform: "darwin", mode: "write", containment: "unsafe" })).toBe("workspace-write");
+    expect(codexSandbox({ platform: "linux", mode: "read-only", containment: "required" })).toBe("read-only");
+    expect(codexSandbox({ platform: "linux", mode: "write", containment: "unsafe" })).toBe("workspace-write");
   });
 
   test("Codex fails closed when repository skills exceed the bounded inspection depth", () => {

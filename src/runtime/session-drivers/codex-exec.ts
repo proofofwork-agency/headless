@@ -1,11 +1,12 @@
 import { CommandSessionDriver, type CommandSessionDriverOptions } from "./command-driver";
-import { codexProjectPolicyArguments } from "../../backends/codex";
+import { codexProjectPolicyArguments, codexSandbox } from "../../backends/codex";
 import { decodeCodexEvent } from "./event-decoder";
 import type { SessionDriverRuntime } from "./base";
 import { safeSessionOption } from "./options";
 
 export class CodexExecSessionDriver extends CommandSessionDriver {
   constructor(options: CommandSessionDriverOptions) {
+    const platform = options.platform ?? process.platform;
     super({
       backend: "codex",
       kind: "codex-exec-resume",
@@ -21,19 +22,19 @@ export class CodexExecSessionDriver extends CommandSessionDriver {
       helpArgs: ["exec", "resume", "--help"],
       requiredHelpFragments: ["--json"],
       decoder: decodeCodexEvent,
-      buildInitial: (runtime, prompt) => codexInitialCommand(runtime, prompt),
+      buildInitial: (runtime, prompt) => codexInitialCommand(runtime, prompt, platform),
       buildResume: (runtime, prompt, nativeSessionId) => codexResumeCommand(runtime, prompt, nativeSessionId),
     }, options.executor, options);
   }
 }
 
-function codexInitialCommand(runtime: SessionDriverRuntime, prompt: string) {
+function codexInitialCommand(runtime: SessionDriverRuntime, prompt: string, platform: string) {
   const argv = [
     "codex",
     "exec",
     "--json",
     "--sandbox",
-    runtime.mode === "write" ? "workspace-write" : "read-only",
+    codexSandbox({ platform, mode: runtime.mode, containment: runtime.containment }),
     "--cd",
     runtime.cwd,
     "--skip-git-repo-check",

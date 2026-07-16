@@ -31,20 +31,12 @@ const DISABLED_CODEX_FEATURES = [
  * in depth beneath Headless' outer containment.
  */
 export function buildCodexCommand(opts: ExecOptions, cwd: string) {
-  // Headless's outer OS sandbox is the filesystem/network authority. Nested
-  // macOS Seatbelt profiles cannot be applied from inside that sandbox, so a
-  // required-contained Codex process delegates to the outer profile on Darwin.
-  // Linux and explicit unsafe runs retain Codex's mode-specific sandbox.
-  const nativeSandbox = opts.mode === "write" ? "workspace-write" : "read-only";
-  const sandbox = opts.containment !== "unsafe" && process.platform === "darwin"
-    ? "danger-full-access"
-    : nativeSandbox;
   const cmd = [
     "codex",
     "exec",
     "--json",
     "--sandbox",
-    sandbox,
+    codexSandbox({ platform: process.platform, mode: opts.mode ?? "read-only", containment: opts.containment }),
     "--cd",
     cwd,
     "--skip-git-repo-check",
@@ -62,6 +54,23 @@ export function buildCodexCommand(opts: ExecOptions, cwd: string) {
   if (opts.model) cmd.push("--model", safeOption(opts.model, "model", { namespace: "Codex" }));
   cmd.push("-");
   return cmd;
+}
+
+/**
+ * Headless's outer OS sandbox is the filesystem/network authority. Nested
+ * macOS Seatbelt profiles cannot be applied from inside that sandbox, so a
+ * required-contained Codex process delegates to the outer profile on Darwin.
+ * Only an explicit unsafe request relaxes that delegation.
+ */
+export function codexSandbox(input: {
+  platform: string;
+  mode: "read-only" | "write";
+  containment?: string;
+}) {
+  const nativeSandbox = input.mode === "write" ? "workspace-write" : "read-only";
+  return input.platform === "darwin" && input.containment !== "unsafe"
+    ? "danger-full-access"
+    : nativeSandbox;
 }
 
 /** Bounded, deterministic discovery matching Codex' repository skill roots. */

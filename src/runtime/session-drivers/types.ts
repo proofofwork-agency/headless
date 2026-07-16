@@ -145,6 +145,7 @@ export type SessionProbeInput = {
 export type CreateSessionInput = {
   cwd: string;
   mode?: "read-only" | "write";
+  containment?: "required" | "unsafe";
   model?: string;
   agent?: string;
   env?: NodeJS.ProcessEnv;
