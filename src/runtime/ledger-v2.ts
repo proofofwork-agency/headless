@@ -119,6 +119,19 @@ export type LedgerVerificationVerdict = {
   evidence?: ReleaseEvidenceVerification;
 };
 
+type LedgerVerificationKeys = Pick<
+  LedgerV2Options,
+  "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId"
+>;
+
+export type LedgerVerificationOptions = LedgerVerificationKeys & {
+  projectId: string;
+  evidenceRoot?: string;
+} & (
+  | { ledgerPath: string; records?: never }
+  | { records: readonly LedgerRecordV2[]; ledgerPath?: never }
+);
+
 export function ledgerIntegrityOptionsFromEnv(env: NodeJS.ProcessEnv = process.env) {
   let hmacKeyring: Record<string, string> | undefined;
   if (env.HEADLESS_LEDGER_KEYS) {
@@ -575,9 +588,7 @@ export function repairLedgerPartialTail(options: LedgerV2Options & { backupPath?
  * unreadable ledger for a broken or empty one.
  */
 export function verifyLedgerChain(
-  options: Pick<LedgerV2Options, "ledgerPath" | "projectId" | "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId"> & {
-    evidenceRoot?: string;
-  },
+  options: LedgerVerificationOptions,
 ): LedgerVerificationVerdict {
   let keys: LedgerIntegrityKeys;
   try {
@@ -585,11 +596,16 @@ export function verifyLedgerChain(
   } catch (error) {
     return brokenLedgerVerdict([], 1, messageOf(error));
   }
-  if (!existsSync(options.ledgerPath)) return intactLedgerVerdict([], options.evidenceRoot);
+  const sourceRecords = options.records;
+  const ledgerPath = options.ledgerPath;
+  if (sourceRecords === undefined && ledgerPath !== undefined && !existsSync(ledgerPath)) {
+    return intactLedgerVerdict([], options.evidenceRoot);
+  }
 
-  const text = readFileSync(options.ledgerPath, "utf8");
-  const lines = text.split("\n");
-  const partial = lines.pop() ?? "";
+  const lines = sourceRecords !== undefined
+    ? sourceRecords.map((record) => JSON.stringify(record))
+    : readFileSync(ledgerPath!, "utf8").split("\n");
+  const partial = sourceRecords !== undefined ? "" : lines.pop() ?? "";
   const records: LedgerRecordV2[] = [];
   try {
     scanVerifiedLedgerLines(lines, options.projectId, keys, (record) => records.push(record));
@@ -603,6 +619,20 @@ export function verifyLedgerChain(
     return brokenLedgerVerdict(records, records.length + 1, "Ledger ends with an incomplete JSON line.");
   }
   return intactLedgerVerdict(records, options.evidenceRoot);
+}
+
+/**
+ * Re-hash one unkeyed ledger record for an offline export. This deliberately
+ * refuses HMAC records: without the operator's key an offline verifier can
+ * validate their structure and anchor fields, but cannot claim authenticity.
+ */
+export function verifyUnkeyedLedgerRecordHash(value: unknown): boolean {
+  const parsed = LedgerRecordV2Schema.safeParse(value);
+  if (!parsed.success) return false;
+  const record = parsed.data;
+  if (record.integrity.algorithm !== "sha256" || record.integrity.keyId !== null) return false;
+  const { hash, ...withoutHash } = record;
+  return hash === hashRecord(withoutHash);
 }
 
 function intactLedgerVerdict(records: LedgerRecordV2[], evidenceRoot?: string): LedgerVerificationVerdict {
