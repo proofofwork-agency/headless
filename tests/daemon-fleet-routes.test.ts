@@ -4,14 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DirectedMessage, Goal } from "../src/contracts/collaboration";
 import { HeadlessDaemonClient } from "../src/daemon/client";
-import { HeadlessDaemon } from "../src/daemon/server";
+import { fleetPresentation, HeadlessDaemon } from "../src/daemon/server";
 import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
+import { backendMetadata } from "../src/backends/metadata";
+import type { ProviderBroker } from "../src/broker/server";
 import { GoalStore } from "../src/runtime/goal-store";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { runGitStrict } from "../src/runtime/git";
 import { WorktreeLeaseStore } from "../src/runtime/worktree-leases";
 import { CandidateDecisionStore } from "../src/runtime/candidate-decision-store";
 import { schedulingAttempts } from "./support/timing";
+import { CLAUDE_SETUP_TOKEN_REMEDY } from "../src/runtime/native-auth-capsule";
 
 setDefaultTimeout(20_000);
 
@@ -58,8 +61,112 @@ describe("daemon fleet and collaboration routes", () => {
       nativeDirectUnrestrictedAcknowledged: true,
       bypassAllowed: false,
     });
-    const trustedWithoutLogin = await client.call<{ leaderCandidates: Array<{ presentation: { code: string } }> }>("fleet.health");
-    expect(trustedWithoutLogin.leaderCandidates[0]?.presentation.code).toBe("login_required");
+    const trustedWithoutLogin = await client.call<{ leaderCandidates: Array<{ presentation: { code: string; reason: string } }> }>("fleet.health");
+    expect(trustedWithoutLogin.leaderCandidates[0]?.presentation).toMatchObject({
+      code: "login_required",
+      reason: `No native authentication state was found for ${GOAL_BACKEND}.`,
+    });
+  });
+
+  test("surfaces the contained Claude setup-token remedy for native-login health", () => {
+    const presentation = fleetPresentation({
+      id: "claude-native",
+      backend: "claude-code",
+      name: "Claude native",
+      authMode: "native-login",
+      approvalPolicy: "auto",
+      enabled: true,
+      priority: 0,
+      capabilities: [],
+      maxConcurrentTurns: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    }, {
+      authenticated: false,
+      authDetail: `Claude native login is unavailable. ${CLAUDE_SETUP_TOKEN_REMEDY}`,
+      health: "unhealthy",
+      rateLimitedUntil: null,
+      activeTurns: 0,
+      recentFailures: 0,
+    }, [], [], [], "/project", backendMetadata["claude-code"].login);
+
+    expect(presentation).toMatchObject({
+      code: "login_required",
+      reason: expect.stringContaining("claude setup-token"),
+      credentialForm: "supported provider CLI regular-file login state",
+    });
+  });
+
+  test("reports a missing broker key without claiming provider login state is absent", async () => {
+    const fixture = createFixture();
+    delete fixture.state.env.OPENAI_API_KEY;
+    registerBackendDefinition(brokerGoalAdapter("/usr/bin/true"));
+    await start(fixture);
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: fixture.token });
+    await client.call("fleet.profile.upsert", {
+      id: "fleet-broker-missing",
+      name: "Missing broker credential",
+      authMode: "broker",
+      approvalPolicy: "auto",
+      agents: [{ id: "broker-worker", backend: GOAL_BACKEND, name: "Broker worker", authMode: "broker", approvalPolicy: "auto" }],
+      activate: true,
+    });
+
+    const health = await client.call<{ leaderCandidates: Array<{ authenticated: boolean; presentation: { code: string; reason: string; recovery: string; credentialForm: string } }> }>("fleet.health");
+    expect(health.leaderCandidates[0]).toMatchObject({
+      authenticated: false,
+      presentation: {
+        code: "login_required",
+        reason: expect.stringContaining("OPENAI_API_KEY is unset"),
+        recovery: expect.stringContaining("daemon environment"),
+        credentialForm: "daemon-held provider API credential",
+      },
+    });
+  });
+
+  test("uses the same injected broker credential for health and provider egress", async () => {
+    const fixture = createFixture();
+    fixture.state.env.OPENAI_API_KEY = "injected-broker-key";
+    registerBackendDefinition(brokerGoalAdapter("/usr/bin/true"));
+    const daemon = await start(fixture);
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: fixture.token });
+    await client.call("fleet.profile.upsert", {
+      id: "fleet-broker-injected",
+      name: "Injected broker credential",
+      authMode: "broker",
+      approvalPolicy: "auto",
+      agents: [{ id: "broker-worker", backend: GOAL_BACKEND, name: "Broker worker", authMode: "broker", approvalPolicy: "auto", model: "gpt-test" }],
+      activate: true,
+    });
+    const health = await client.call<{ leaderCandidates: Array<{ authenticated: boolean; health: string; presentation: { reason: string } }> }>("fleet.health");
+    expect(health.leaderCandidates[0]).toMatchObject({
+      authenticated: true,
+      health: "healthy",
+      presentation: { reason: expect.stringContaining("Daemon broker credentials are available") },
+    });
+
+    const broker = (daemon as unknown as { broker: ProviderBroker }).broker as ProviderBroker & { fetcher: typeof fetch };
+    let upstreamAuthorization: string | null = null;
+    broker.fetcher = (async (input, init) => {
+      upstreamAuthorization = new Request(input, init).headers.get("authorization");
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+    const lease = broker.issueLease({
+      runId: "injected-broker-egress",
+      provider: "openai",
+      models: ["gpt-test"],
+      endpointClasses: ["responses"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 1,
+    });
+    const response = await fetch(`${lease.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${lease.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", input: "hello" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstreamAuthorization).toBe("Bearer injected-broker-key");
   });
 
   test("persists trusted fleet profiles and an addressed goal without client identity fields", async () => {
@@ -666,6 +773,22 @@ function goalAdapter(script: string, write = false): BackendDefinition {
       usage: { input: 1, output: 1, reasoning: null, cached: null, providerTotal: 2 },
       diagnostics: { format: "fixture", malformedEvents: 0, ignoredEvents: 0, messages: [] },
     }),
+  };
+}
+
+function brokerGoalAdapter(script: string): BackendDefinition {
+  return {
+    ...goalAdapter(script),
+    security: {
+      outerContainmentRequired: true,
+      strictAuth: "broker-api-key",
+      disablesProjectConfig: true,
+      disablesHooks: true,
+      disablesMcp: true,
+      disablesSkills: true,
+    },
+    credentialPrefixes: ["OPENAI_API_KEY"],
+    provider: "openai",
   };
 }
 

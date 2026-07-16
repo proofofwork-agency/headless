@@ -448,6 +448,7 @@ export class HeadlessDaemon {
       executable = false;
     }
     let authenticated = false;
+    let authDetail: string | null = null;
     let trustRequired = false;
     if (executable) {
       if (security.authMode === "native-login") {
@@ -459,18 +460,32 @@ export class HeadlessDaemon {
         if (!trustRequired) {
           const worker = createWorkerEnvironment();
           try {
-            authenticated = installNativeAuthCapsule(worker, resolveBackendId(agent.backend)).available;
+            const adapter = getBackendDefinition(resolveBackendId(agent.backend));
+            const capsule = installNativeAuthCapsule(worker, resolveBackendId(agent.backend), {
+              homeDir: this.stateOptions?.homeDir,
+              requestedModel: agent.model,
+              resolveOpenCodeModel: adapter?.nativeAuth?.resolveModel ?? false,
+            });
+            authenticated = capsule.available;
+            authDetail = capsule.reason;
           } catch (error) {
+            authDetail = "Native authentication state could not be prepared safely.";
             console.error(redactAndTruncate(`Native fleet auth probe failed for ${agent.id}: ${messageOf(error)}`, 2_048).text);
           } finally {
             worker.cleanup();
           }
         }
       } else {
+        const adapter = getBackendDefinition(resolveBackendId(agent.backend));
         const provider = providerForBackend(agent.backend, agent.model);
         const definition = provider ? getProvider(provider) : null;
-        authenticated = getBackendDefinition(resolveBackendId(agent.backend))?.security.strictAuth === "credential-free"
-          || (!!definition && !!process.env[definition.credentialEnv]);
+        authenticated = adapter?.security.strictAuth === "credential-free"
+          || (!!definition && !!(this.stateOptions?.env ?? process.env)[definition.credentialEnv]);
+        if (!authenticated) {
+          authDetail = definition
+            ? `No broker credential — ${definition.credentialEnv} is unset; seed broker keys or set this agent to native-login.`
+            : "No broker provider could be resolved; configure a provider-qualified model or set this agent to native-login.";
+        }
       }
     }
     const sessions = this.sessions.list().filter((session) => session.backend === resolveBackendId(agent.backend));
@@ -488,7 +503,7 @@ export class HeadlessDaemon {
     const health: GoalAgentAvailability["health"] = !executable
       ? "offline"
       : !authenticated || !containmentReady ? "unhealthy" : rateLimitedUntil !== null && rateLimitedUntil > Date.now() ? "degraded" : "healthy";
-    return { authenticated, trustRequired, health, rateLimitedUntil, activeTurns, recentFailures };
+    return { authenticated, authDetail, trustRequired, health, rateLimitedUntil, activeTurns, recentFailures };
   }
 
   private wait(jobId: string, timeoutMs = 180_000): Promise<Job> {
@@ -974,6 +989,7 @@ export class HeadlessDaemon {
     migrateSingleLeadState(this.state);
     const brokerQuotas = new DurableBrokerQuotaStore(this.state);
     this.broker = new ProviderBroker({
+      credentials: this.stateOptions?.env ?? process.env,
       unixSocketPath: join(this.state.daemonRuntimeDir, `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`),
       initialBudgetQuotas: brokerQuotas.snapshot(),
       persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
@@ -1597,7 +1613,7 @@ function internalCredential(principal: string): AuthenticatedCredential {
   };
 }
 
-function fleetPresentation(
+export function fleetPresentation(
   agent: AgentProfile,
   availability: GoalAgentAvailability,
   containmentGaps: string[],
@@ -1606,7 +1622,14 @@ function fleetPresentation(
   projectRoot: string,
   login?: { argv?: [string, ...string[]]; instructions: string; brokerMode: boolean },
 ) {
-  const common = { alternatives, brokerAvailable: login?.brokerMode ?? false, credentialForm: "supported provider CLI regular-file login state", loginCommand: login?.argv ?? null, loginInstructions: login?.instructions ?? null };
+  const nativeLogin = agent.authMode === "native-login";
+  const common = {
+    alternatives,
+    brokerAvailable: login?.brokerMode ?? false,
+    credentialForm: nativeLogin ? "supported provider CLI regular-file login state" : "daemon-held provider API credential",
+    loginCommand: nativeLogin ? login?.argv ?? null : null,
+    loginInstructions: nativeLogin ? login?.instructions ?? null : null,
+  };
   if (!agent.enabled) return { code: "disabled", reason: "Agent is disabled in the active fleet profile.", recovery: "Enable the agent or activate another fleet profile.", ...common };
   if (containmentGaps.length) return { code: "blocked_by_containment", reason: `Required project-safety controls are unsupported: ${containmentGaps.join(", ")}.`, recovery: "Exclude this provider from required runs or select a compatible alternative; containment cannot be unblocked from the TUI.", ...common };
   if (availability.rateLimitedUntil && availability.rateLimitedUntil > Date.now()) return { code: "rate_limited", reason: `Provider retry is unavailable until ${new Date(availability.rateLimitedUntil).toISOString()}.`, recovery: "Wait until the retry time or reassign work to an available alternative.", retryAt: availability.rateLimitedUntil, ...common };
@@ -1619,11 +1642,23 @@ function fleetPresentation(
       ...common,
     };
   }
-  if (!availability.authenticated) return { code: "login_required", reason: "Supported provider login state was not found.", recovery: login?.instructions ?? "Run the provider's declared login flow, then refresh Fleet health.", ...common };
+  if (!availability.authenticated) return nativeLogin
+    ? {
+        code: "login_required",
+        reason: availability.authDetail ?? "Supported provider login state was not found.",
+        recovery: login?.instructions ?? availability.authDetail ?? "Run the provider's declared login flow, then refresh Fleet health.",
+        ...common,
+      }
+    : {
+        code: "login_required",
+        reason: availability.authDetail ?? "The daemon broker credential is unavailable.",
+        recovery: "Configure the provider API credential in the daemon environment, restart the daemon, then refresh Fleet health.",
+        ...common,
+      };
   if (availability.health === "offline") return { code: "provider_unavailable", reason: "Provider executable is unavailable on PATH.", recovery: "Install or restore the declared provider CLI, inspect Events, then refresh health.", ...common };
   if (availability.health !== "healthy") return { code: "provider_unavailable", reason: "Provider health checks did not report ready.", recovery: "Retry health, inspect Events, or reassign to an available alternative.", ...common };
   if (writeContainmentGaps.length) return { code: "ready", reason: "Ready for read-only planning, worker, and review roles. Direct candidate writes use another compatible provider.", recovery: "Assign read-only fleet work; keep writable leadership and candidate turns on a compatible provider.", writeCapable: false, ...common };
-  return { code: "ready", reason: "Provider is authenticated and satisfies required project-safety controls.", recovery: "Start a session, make it the future lead, or assign work.", ...common };
+  return { code: "ready", reason: nativeLogin ? "Provider login state is available and satisfies required project-safety controls." : "Daemon broker credentials are available and satisfy required project-safety controls.", recovery: "Start a session, make it the future lead, or assign work.", ...common };
 }
 
 function loadOrCreateToken(path: string) {

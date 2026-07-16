@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
+// Interactive tools prefer existing provider login state; this intentionally
+// differs from the broker-isolated execution contract default.
 export const DEFAULT_TOOL_AUTH_MODE = "native-login" as const;
 export const DEFAULT_TOOL_APPROVAL_POLICY = "ask" as const;
 export const DEFAULT_DELIBERATION_BACKENDS = ["opencode", "codex"] as const;
