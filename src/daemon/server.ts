@@ -66,7 +66,12 @@ import {
 import { TaskStore } from "./task-store";
 import { RunEventStore } from "./run-event-store";
 import { ReceiptStore } from "../runtime/receipt-store";
-import type { ReceiptProvenanceContext } from "../runtime/receipt-service";
+import {
+  assembleAndAnchorReceipt,
+  recordReceiptGap,
+  type ReceiptProvenanceContext,
+} from "../runtime/receipt-service";
+import { ReceiptJournal, type ReceiptJournalRecord } from "../runtime/receipt-journal";
 import { ExportedReceiptSchema, verifyReceipt as verifyStoredReceipt } from "../runtime/receipt-verify";
 import { PersistentMessageQueue } from "../runtime/message-queue";
 import { CredentialStore, type AuthenticatedCredential } from "../runtime/credential-store";
@@ -91,6 +96,14 @@ import {
 import { HEADLESS_VERSION } from "../version";
 
 const receiptBackendVersionCache = new Map<string, string | null>();
+const JOB_COMPLETION_GRACE_MS = 10_000;
+const TERMINAL_JOB_STATES = new Set<Job["state"]>(["succeeded", "failed", "timed_out", "cancelled", "blocked"]);
+
+type JobWaiter = {
+  callback: (job: Job) => void;
+  reject: (error: unknown) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
 
 export type HeadlessDaemonOptions = {
   projectRoot: string;
@@ -117,7 +130,7 @@ export class HeadlessDaemon {
   private token = "";
   private readonly configuredToken?: string;
   private readonly stateOptions?: ProjectStateOptions;
-  private readonly waiters = new Map<string, Array<(job: Job) => void>>();
+  private readonly waiters = new Map<string, JobWaiter[]>();
   private broker!: ProviderBroker;
   private sessions!: PersistentSessionStore;
   private nativeSessions!: NativeSessionManager;
@@ -146,6 +159,7 @@ export class HeadlessDaemon {
   private leads!: LeadBindingStore;
   private worktreeLeases!: WorktreeLeaseStore;
   private integrationJournal!: IntegrationJournal;
+  private receiptJournal!: ReceiptJournal;
   private workflowService!: WorkflowService;
   private workflowDrafts!: WorkflowDraftStore;
   private jobAdmission!: JobAdmissionService;
@@ -220,8 +234,10 @@ export class HeadlessDaemon {
       this.reconcileIntegrationJournal();
       this.jobs.recoverInterruptedJobs(true);
       this.reconcileTerminalRunEvents();
+      this.reconcileReceipts();
       this.jobAdmission.recoverBudgetReservations();
       this.reconcilePersistentSessions();
+      this.reconcileSkillInvocations();
       this.reconcileTasks();
       this.ready = true;
       this.server = server;
@@ -255,6 +271,7 @@ export class HeadlessDaemon {
     this.stopping = true;
     this.jobAdmission?.dispose();
     this.runExecution?.cancelAll("daemon stopping");
+    this.drainWaiters(new HeadlessError("DAEMON_UNAVAILABLE", "Daemon is stopping before the job wait completed.", { retryable: true }));
     if (this.executions.size) {
       const drained = await waitForExecutions(this.executions, 30_000);
       if (!drained) {
@@ -431,6 +448,7 @@ export class HeadlessDaemon {
       executable = false;
     }
     let authenticated = false;
+    let authDetail: string | null = null;
     let trustRequired = false;
     if (executable) {
       if (security.authMode === "native-login") {
@@ -442,18 +460,32 @@ export class HeadlessDaemon {
         if (!trustRequired) {
           const worker = createWorkerEnvironment();
           try {
-            authenticated = installNativeAuthCapsule(worker, resolveBackendId(agent.backend)).available;
+            const adapter = getBackendDefinition(resolveBackendId(agent.backend));
+            const capsule = installNativeAuthCapsule(worker, resolveBackendId(agent.backend), {
+              homeDir: this.stateOptions?.homeDir,
+              requestedModel: agent.model,
+              resolveOpenCodeModel: adapter?.nativeAuth?.resolveModel ?? false,
+            });
+            authenticated = capsule.available;
+            authDetail = capsule.reason;
           } catch (error) {
+            authDetail = "Native authentication state could not be prepared safely.";
             console.error(redactAndTruncate(`Native fleet auth probe failed for ${agent.id}: ${messageOf(error)}`, 2_048).text);
           } finally {
             worker.cleanup();
           }
         }
       } else {
+        const adapter = getBackendDefinition(resolveBackendId(agent.backend));
         const provider = providerForBackend(agent.backend, agent.model);
         const definition = provider ? getProvider(provider) : null;
-        authenticated = getBackendDefinition(resolveBackendId(agent.backend))?.security.strictAuth === "credential-free"
-          || (!!definition && !!process.env[definition.credentialEnv]);
+        authenticated = adapter?.security.strictAuth === "credential-free"
+          || (!!definition && !!(this.stateOptions?.env ?? process.env)[definition.credentialEnv]);
+        if (!authenticated) {
+          authDetail = definition
+            ? `No broker credential — ${definition.credentialEnv} is unset; seed broker keys or set this agent to native-login.`
+            : "No broker provider could be resolved; configure a provider-qualified model or set this agent to native-login.";
+        }
       }
     }
     const sessions = this.sessions.list().filter((session) => session.backend === resolveBackendId(agent.backend));
@@ -471,28 +503,132 @@ export class HeadlessDaemon {
     const health: GoalAgentAvailability["health"] = !executable
       ? "offline"
       : !authenticated || !containmentReady ? "unhealthy" : rateLimitedUntil !== null && rateLimitedUntil > Date.now() ? "degraded" : "healthy";
-    return { authenticated, trustRequired, health, rateLimitedUntil, activeTurns, recentFailures };
+    return { authenticated, authDetail, trustRequired, health, rateLimitedUntil, activeTurns, recentFailures };
   }
 
   private wait(jobId: string, timeoutMs = 180_000): Promise<Job> {
     const job = this.requireJob(jobId);
-    if (["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(job.state)) return Promise.resolve(job);
+    if (TERMINAL_JOB_STATES.has(job.state)) return Promise.resolve(job);
     return new Promise<Job>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const active = this.waiters.get(jobId) ?? [];
-        const index = active.indexOf(callback);
-        if (index >= 0) active.splice(index, 1);
-        if (active.length === 0) this.waiters.delete(jobId);
-        reject(new HeadlessError("TIMED_OUT", "Timed out waiting for the daemon job."));
-      }, timeoutMs);
-      const callback = (completed: Job) => {
-        clearTimeout(timer);
-        resolve(completed);
+      let settled = false;
+      const settle = (completed?: Job, error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(waiter.timer);
+        this.removeWaiter(jobId, waiter);
+        if (completed) resolve(completed);
+        else reject(error);
+      };
+      const waiter: JobWaiter = {
+        callback: (completed) => settle(completed),
+        reject: (error) => settle(undefined, error),
+        timer: setTimeout(() => {
+          const current = this.jobs.get(jobId);
+          if (current && TERMINAL_JOB_STATES.has(current.state)) {
+            this.reconcileSessionCompletion(current);
+            this.reconcileSkillCompletion(current);
+            settle(current);
+            return;
+          }
+          settle(undefined, new HeadlessError("TIMED_OUT", "Timed out waiting for the daemon job."));
+        }, timeoutMs),
       };
       const waiting = this.waiters.get(jobId) ?? [];
-      waiting.push(callback);
+      waiting.push(waiter);
       this.waiters.set(jobId, waiting);
     });
+  }
+
+  private removeWaiter(jobId: string, waiter: JobWaiter) {
+    const active = this.waiters.get(jobId);
+    if (!active) return;
+    const index = active.indexOf(waiter);
+    if (index >= 0) active.splice(index, 1);
+    if (active.length === 0) this.waiters.delete(jobId);
+  }
+
+  private drainWaiters(error: unknown) {
+    for (const waiting of [...this.waiters.values()]) {
+      for (const waiter of [...waiting]) waiter.reject(error);
+    }
+    this.waiters.clear();
+  }
+
+  private completionWatchTimeout(jobId: string) {
+    return (this.jobs.request(jobId)?.timeoutMs ?? 180_000) + JOB_COMPLETION_GRACE_MS;
+  }
+
+  private watchSessionCompletion(sessionId: string, jobId: string) {
+    const current = this.jobs.get(jobId);
+    if (current && TERMINAL_JOB_STATES.has(current.state)) this.reconcileSessionCompletion(current);
+    void this.wait(jobId, this.completionWatchTimeout(jobId)).catch((error) => {
+      const latest = this.jobs.get(jobId);
+      if (latest && TERMINAL_JOB_STATES.has(latest.state)) {
+        this.reconcileSessionCompletion(latest);
+        return;
+      }
+      if (!this.stopping && latest) this.jobAdmission.cancel(jobId);
+      if (this.stopping) return;
+      const detail = redactAndTruncate(`Persistent session completion guard expired: ${messageOf(error)}`, 2_048).text;
+      try {
+        this.runEvents.append({ jobId, sessionId }, {
+          kind: "policy",
+          decision: "deferred",
+          rule: "session-completion-recovery",
+          reason: detail,
+        });
+      } catch (diagnosticError) {
+        console.error(redactAndTruncate(`Unable to persist session recovery diagnostic: ${messageOf(diagnosticError)}`, 2_048).text);
+      }
+    });
+  }
+
+  private watchSkillCompletion(auditId: string, jobId: string, principal: string) {
+    this.skills.markInvocationPending(auditId, jobId);
+    const current = this.jobs.get(jobId);
+    if (current && TERMINAL_JOB_STATES.has(current.state)) this.reconcileSkillCompletion(current);
+    void this.wait(jobId, this.completionWatchTimeout(jobId)).catch((error) => {
+      const latest = this.jobs.get(jobId);
+      if (latest && TERMINAL_JOB_STATES.has(latest.state)) {
+        this.reconcileSkillCompletion(latest);
+        return;
+      }
+      if (!this.stopping && latest) this.jobAdmission.cancel(jobId);
+      if (!this.stopping) {
+        this.recordSkillAudit("portable_skill_completion_deferred", principal, {
+          auditId,
+          jobId,
+          reason: messageOf(error),
+        });
+      }
+    });
+  }
+
+  private reconcileSessionCompletion(job: Job) {
+    if (!job.result || !job.sessionId || !TERMINAL_JOB_STATES.has(job.state)) return;
+    const session = this.sessions.get(job.sessionId);
+    if (!session || session.lastJobId !== job.id || (session.state !== "running" && session.state !== "cancelling")) return;
+    this.sessions.complete(session.id, job.result);
+  }
+
+  private reconcileSkillCompletion(job: Job) {
+    if (!job.result || !TERMINAL_JOB_STATES.has(job.state)) return;
+    for (const pending of this.skills.pendingInvocations().filter((entry) => entry.jobId === job.id)) {
+      this.skills.completeJobInvocation(pending.auditId, job);
+      this.recordSkillAudit("portable_skill_completed", pending.principal, { auditId: pending.auditId, jobId: job.id, status: job.state });
+    }
+  }
+
+  private reconcileSkillInvocations() {
+    for (const pending of this.skills.pendingInvocations()) {
+      const job = this.jobs.get(pending.jobId);
+      if (!job) {
+        this.skills.failPendingInvocation(pending.auditId, "Skill invocation job is missing during daemon recovery.");
+        this.recordSkillAudit("portable_skill_completed", pending.principal, { auditId: pending.auditId, jobId: pending.jobId, status: "failed" });
+        continue;
+      }
+      if (TERMINAL_JOB_STATES.has(job.state)) this.reconcileSkillCompletion(job);
+    }
   }
 
   private requireJob(id: string) {
@@ -596,21 +732,7 @@ export class HeadlessDaemon {
       approvalPolicy: session.approvalPolicy,
     }, session.principal);
     this.sessions.start(session.id, job.id);
-    void this.wait(job.id).then((completed) => {
-      if (completed?.result) this.sessions.complete(session.id, completed.result);
-    }).catch((error) => {
-      const detail = redactAndTruncate(`Persistent session completion failed: ${messageOf(error)}`, 2_048).text;
-      try {
-        this.runEvents.append({ jobId: job.id, sessionId: session.id }, {
-          kind: "policy",
-          decision: "deferred",
-          rule: "session-completion-recovery",
-          reason: detail,
-        });
-      } catch (diagnosticError) {
-        console.error(redactAndTruncate(`Unable to persist session recovery diagnostic: ${messageOf(diagnosticError)}`, 2_048).text);
-      }
-    });
+    this.watchSessionCompletion(session.id, job.id);
     return { session: this.requireSession(session.id), job, replay: { truncated: replay.truncated, bytes: replay.bytes } };
   }
 
@@ -651,13 +773,7 @@ export class HeadlessDaemon {
   }
 
   private recordSkillCompletion(auditId: string, jobId: string, principal: string) {
-    void this.wait(jobId).then((job) => {
-      this.skills.completeInvocation(auditId, { jobId, status: job.state, result: job.result });
-      this.recordSkillAudit("portable_skill_completed", principal, { auditId, jobId, status: job.state });
-    }).catch((error) => {
-      this.skills.completeInvocation(auditId, { jobId, status: "failed", error: messageOf(error) });
-      this.recordSkillAudit("portable_skill_completed", principal, { auditId, jobId, status: "failed" });
-    });
+    this.watchSkillCompletion(auditId, jobId, principal);
   }
 
   private recordSkillAudit(type: string, principal: string, payload: Record<string, unknown>) {
@@ -677,8 +793,9 @@ export class HeadlessDaemon {
   }
 
   private resolveWaiters(job: Job) {
-    for (const resolve of this.waiters.get(job.id) ?? []) resolve(job);
-    this.waiters.delete(job.id);
+    this.reconcileSessionCompletion(job);
+    this.reconcileSkillCompletion(job);
+    for (const waiter of [...(this.waiters.get(job.id) ?? [])]) waiter.callback(job);
   }
 
   private reconcileIntegrationJournal() {
@@ -723,14 +840,13 @@ export class HeadlessDaemon {
     for (const session of this.sessions.list()) {
       if (session.state !== "running" && session.state !== "cancelling") continue;
       const job = session.lastJobId ? this.jobs.get(session.lastJobId) : null;
-      if (!job?.result || !["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(job.state)) continue;
-      this.sessions.complete(session.id, job.result);
+      if (job) this.reconcileSessionCompletion(job);
     }
   }
 
   private reconcileTerminalRunEvents() {
     for (const job of this.jobs.list()) {
-      if (!job.result || !["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(job.state)) continue;
+      if (!job.result || !TERMINAL_JOB_STATES.has(job.state)) continue;
       try {
         this.runEvents.reconcileTerminal(
           { jobId: job.id, sessionId: job.sessionId },
@@ -743,6 +859,108 @@ export class HeadlessDaemon {
     }
   }
 
+  private reconcileReceipts() {
+    if ((this.stateOptions?.env ?? process.env).HEADLESS_RECEIPTS === "off") return;
+    let open: ReceiptJournalRecord[];
+    try {
+      open = this.receiptJournal.listOpen((_path, error) => {
+        // One malformed marker remains on disk for operator repair and cannot
+        // prevent unrelated durable work from becoming available.
+        recordRuntimeDiagnostic("state", "daemon.start.receipt-journal-record", error);
+      });
+    } catch (error) {
+      recordRuntimeDiagnostic("state", "daemon.start.receipt-journal", error);
+      return;
+    }
+    for (const record of open) {
+      try {
+        this.reconcileReceipt(record);
+      } catch (error) {
+        // Store/request corruption and every other unexpected per-record fault
+        // stay diagnostic-only so one receipt can never make the daemon fail.
+        recordRuntimeDiagnostic("state", `daemon.start.receipt-record:${record.jobId}`, error);
+      }
+    }
+  }
+
+  private reconcileReceipt(record: ReceiptJournalRecord) {
+    const job = this.jobs.get(record.jobId);
+    if (!job?.result || !TERMINAL_JOB_STATES.has(job.state)) return;
+    const request = this.jobs.request(record.jobId);
+    if (!request) return;
+    const existing = this.receipts.get(record.jobId);
+    if (existing) {
+      try {
+        this.receiptJournal.markCompleted(record.jobId);
+      } catch (error) {
+        recordRuntimeDiagnostic("state", `daemon.start.receipt-marker:${record.jobId}`, error);
+      }
+      return;
+    }
+
+    let assemblyError: unknown = null;
+    try {
+      if (record.principal !== job.principal || record.sessionId !== job.sessionId) {
+        throw new Error(`Receipt journal identity mismatch for run ${record.jobId}.`);
+      }
+      if (record.captureFailure) throw new Error(record.captureFailure);
+      if (record.startedAt === null) throw new Error(`Receipt start checkpoint is unavailable for run ${record.jobId}.`);
+      if (record.authorization === null) throw new Error(`Receipt authorization checkpoint is unavailable for run ${record.jobId}.`);
+      assembleAndAnchorReceipt({
+        paths: this.state,
+        stateOptions: this.stateOptions,
+        receipts: this.receipts,
+        provenance: {
+          headlessVersion: record.provenance.headlessVersion,
+          platform: record.provenance.platform,
+          commit: record.provenance.commit,
+          backendVersions: { [request.backend]: record.provenance.backendVersion },
+        },
+      }, {
+        jobId: record.jobId,
+        sessionId: record.sessionId,
+        principal: record.principal,
+        request,
+        result: job.result,
+        policyEvents: this.runEvents.snapshot({ jobId: record.jobId, limit: 1_000 }).events,
+        authorization: record.authorization,
+        brokerLease: record.brokerLease,
+        gates: record.gates,
+        budget: record.budget,
+        startedAt: record.startedAt,
+        endedAt: job.updatedAt,
+      });
+    } catch (error) {
+      assemblyError = error;
+      recordRuntimeDiagnostic("state", `daemon.start.receipt:${record.jobId}`, error);
+    }
+    if (assemblyError === null) {
+      try {
+        this.receiptJournal.markCompleted(record.jobId);
+      } catch (error) {
+        // A later boot will observe the already-durable receipt and finish
+        // this marker without emitting a false evidence gap.
+        recordRuntimeDiagnostic("state", `daemon.start.receipt-marker:${record.jobId}`, error);
+      }
+      return;
+    }
+    try {
+      const reason = redactAndTruncate(messageOf(assemblyError), 2_048).text.slice(0, 2_048)
+        || "Receipt evidence recovery failed.";
+      recordReceiptGap({ paths: this.state, stateOptions: this.stateOptions }, {
+        jobId: record.jobId,
+        sessionId: job.sessionId,
+        principal: job.principal,
+        reason,
+      });
+      this.receiptJournal.markGap(record.jobId, reason);
+    } catch (error) {
+      // Most importantly, a verifier-only HMAC keyring cannot append either
+      // artifact. Keep the marker pending for a future authorized writer.
+      recordRuntimeDiagnostic("state", `daemon.start.receipt-gap:${record.jobId}`, error);
+    }
+  }
+
   private reconcileTasks() {
     this.tasks.recoverStaleLeases();
     for (const task of this.tasks.list()) {
@@ -752,7 +970,7 @@ export class HeadlessDaemon {
         this.tasks.cancel({ taskId: task.id, principal: this.principal });
         continue;
       }
-      if (!job.result || !["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(job.state)) continue;
+      if (!job.result || !TERMINAL_JOB_STATES.has(job.state)) continue;
       let current = this.tasks.get(task.id)!;
       if (current.state === "pending") {
         current = this.tasks.claim({ taskId: current.id, principal: job.principal, leaseMs: 1_000 });
@@ -771,6 +989,7 @@ export class HeadlessDaemon {
     migrateSingleLeadState(this.state);
     const brokerQuotas = new DurableBrokerQuotaStore(this.state);
     this.broker = new ProviderBroker({
+      credentials: this.stateOptions?.env ?? process.env,
       unixSocketPath: join(this.state.daemonRuntimeDir, `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`),
       initialBudgetQuotas: brokerQuotas.snapshot(),
       persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
@@ -845,6 +1064,7 @@ export class HeadlessDaemon {
       authority: this.authority,
       budgets: this.budgets,
       broker: this.broker,
+      env: this.stateOptions?.env ?? process.env,
       activeLeadBackend: () => this.leads.status()?.backendId ?? null,
       isStopping: () => this.stopping,
       execute: (jobId, request, controls) => this.runExecution.execute(jobId, request, controls),
@@ -906,6 +1126,7 @@ export class HeadlessDaemon {
       checkoutBase: join(this.state.daemonRuntimeDir, "worktrees", this.state.projectId),
     });
     this.integrationJournal = new IntegrationJournal(this.state);
+    this.receiptJournal = new ReceiptJournal(this.state);
     this.candidateIntegrations = createCandidateIntegrationService({
       paths: this.state,
       jobs: this.jobs,
@@ -1005,6 +1226,7 @@ export class HeadlessDaemon {
       runTools: this.runTools,
       worktreeLeases: this.worktreeLeases,
       integrationJournal: this.integrationJournal,
+      receiptJournal: this.receiptJournal,
       writeGateChecks: this.writeGateChecks,
       completed: (job) => this.resolveWaiters(job),
     });
@@ -1392,7 +1614,7 @@ function internalCredential(principal: string): AuthenticatedCredential {
   };
 }
 
-function fleetPresentation(
+export function fleetPresentation(
   agent: AgentProfile,
   availability: GoalAgentAvailability,
   containmentGaps: string[],
@@ -1401,7 +1623,14 @@ function fleetPresentation(
   projectRoot: string,
   login?: { argv?: [string, ...string[]]; instructions: string; brokerMode: boolean },
 ) {
-  const common = { alternatives, brokerAvailable: login?.brokerMode ?? false, credentialForm: "supported provider CLI regular-file login state", loginCommand: login?.argv ?? null, loginInstructions: login?.instructions ?? null };
+  const nativeLogin = agent.authMode === "native-login";
+  const common = {
+    alternatives,
+    brokerAvailable: login?.brokerMode ?? false,
+    credentialForm: nativeLogin ? "supported provider CLI regular-file login state" : "daemon-held provider API credential",
+    loginCommand: nativeLogin ? login?.argv ?? null : null,
+    loginInstructions: nativeLogin ? login?.instructions ?? null : null,
+  };
   if (!agent.enabled) return { code: "disabled", reason: "Agent is disabled in the active fleet profile.", recovery: "Enable the agent or activate another fleet profile.", ...common };
   if (containmentGaps.length) return { code: "blocked_by_containment", reason: `Required project-safety controls are unsupported: ${containmentGaps.join(", ")}.`, recovery: "Exclude this provider from required runs or select a compatible alternative; containment cannot be unblocked from the TUI.", ...common };
   if (availability.rateLimitedUntil && availability.rateLimitedUntil > Date.now()) return { code: "rate_limited", reason: `Provider retry is unavailable until ${new Date(availability.rateLimitedUntil).toISOString()}.`, recovery: "Wait until the retry time or reassign work to an available alternative.", retryAt: availability.rateLimitedUntil, ...common };
@@ -1414,11 +1643,23 @@ function fleetPresentation(
       ...common,
     };
   }
-  if (!availability.authenticated) return { code: "login_required", reason: "Supported provider login state was not found.", recovery: login?.instructions ?? "Run the provider's declared login flow, then refresh Fleet health.", ...common };
+  if (!availability.authenticated) return nativeLogin
+    ? {
+        code: "login_required",
+        reason: availability.authDetail ?? "Supported provider login state was not found.",
+        recovery: login?.instructions ?? availability.authDetail ?? "Run the provider's declared login flow, then refresh Fleet health.",
+        ...common,
+      }
+    : {
+        code: "login_required",
+        reason: availability.authDetail ?? "The daemon broker credential is unavailable.",
+        recovery: "Configure the provider API credential in the daemon environment, restart the daemon, then refresh Fleet health.",
+        ...common,
+      };
   if (availability.health === "offline") return { code: "provider_unavailable", reason: "Provider executable is unavailable on PATH.", recovery: "Install or restore the declared provider CLI, inspect Events, then refresh health.", ...common };
   if (availability.health !== "healthy") return { code: "provider_unavailable", reason: "Provider health checks did not report ready.", recovery: "Retry health, inspect Events, or reassign to an available alternative.", ...common };
   if (writeContainmentGaps.length) return { code: "ready", reason: "Ready for read-only planning, worker, and review roles. Direct candidate writes use another compatible provider.", recovery: "Assign read-only fleet work; keep writable leadership and candidate turns on a compatible provider.", writeCapable: false, ...common };
-  return { code: "ready", reason: "Provider is authenticated and satisfies required project-safety controls.", recovery: "Start a session, make it the future lead, or assign work.", ...common };
+  return { code: "ready", reason: nativeLogin ? "Provider login state is available and satisfies required project-safety controls." : "Daemon broker credentials are available and satisfy required project-safety controls.", recovery: "Start a session, make it the future lead, or assign work.", ...common };
 }
 
 function loadOrCreateToken(path: string) {

@@ -22,6 +22,8 @@ const DEFAULT_EXTENSION_TURN_TIMEOUT_MS = 180_000;
 
 export type GoalAgentAvailability = {
   authenticated: boolean;
+  /** Safe, mode-specific explanation when authentication is unavailable. */
+  authDetail?: string | null;
   /** Native-login was not probed because project trust is the only blocking gate. */
   trustRequired?: boolean;
   health: "healthy" | "degraded" | "unhealthy" | "offline";

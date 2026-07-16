@@ -5,7 +5,7 @@ import { SessionDriverError } from "./errors";
 import type { SessionExecutor, SessionTransport } from "./executor";
 import { commandEnvironment, parseCliVersion, sessionTimeout } from "./options";
 import { cleanupWithDiagnostic } from "../diagnostics";
-import { codexProjectPolicyArguments } from "../../backends/codex";
+import { codexProjectPolicyArguments, codexSandbox } from "../../backends/codex";
 import type { SessionDriverProbe, SessionProbeInput } from "./types";
 
 const capabilities = {
@@ -105,7 +105,9 @@ export class CodexAppServerSessionDriver extends BaseSessionDriver {
         params: {
           cwd: runtime.cwd,
           model: runtime.model,
-          sandbox: runtime.approvalPolicy === "bypass" ? "danger-full-access" : runtime.mode === "write" ? "workspace-write" : "read-only",
+          sandbox: runtime.approvalPolicy === "bypass"
+            ? "danger-full-access"
+            : codexSandbox({ platform: this.platform, mode: runtime.mode, containment: runtime.containment }),
           approvalPolicy: runtime.approvalPolicy === "ask" ? "on-request" : "never",
         },
         waitFor: ["thread/started"],

@@ -38,6 +38,87 @@ describe("job admission service", () => {
     expect(delegatedApprovalPolicy("auto")).toBe("auto");
     expect(delegatedApprovalPolicy("bypass")).toBe("auto");
   });
+
+  test("deduplicates principal-scoped run submissions durably and rejects conflicting key reuse", async () => {
+    const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
+    const idempotencyKey = `submit-${crypto.randomUUID()}`;
+    const input = { ...run(fixture.backend, "idempotent-run"), idempotencyKey };
+
+    const first = fixture.service.submit(input, "coordinator");
+    const replay = fixture.service.submit(input, "coordinator");
+
+    expect(replay.id).toBe(first.id);
+    expect(fixture.jobs.list()).toHaveLength(1);
+    expect(fixture.started).toEqual(["idempotent-run"]);
+    expect(new JobStore(fixture.paths.jobsDir).findSubmission("coordinator", idempotencyKey)?.id).toBe(first.id);
+    expect(fixture.events.snapshot({ jobId: first.id }).events).toContainEqual(expect.objectContaining({
+      kind: "policy",
+      decision: "allowed",
+      rule: "run-submit-idempotent-replay",
+    }));
+    expect(() => fixture.service.submit({ ...input, prompt: "different-run" }, "coordinator"))
+      .toThrow("idempotency key is already bound to a different normalized request");
+
+    fixture.release("idempotent-run");
+    await fixture.service.waitForIdle();
+    fixture.service.dispose();
+  });
+
+  test("keeps keyless identical submissions as distinct runs", async () => {
+    const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
+    const input = run(fixture.backend, "keyless-run");
+    const first = fixture.service.submit(input, "coordinator");
+    const second = fixture.service.submit(input, "coordinator");
+
+    expect(second.id).not.toBe(first.id);
+    expect(fixture.jobs.list()).toHaveLength(2);
+    expect(fixture.jobs.get(first.id)?.idempotencyKey).toBeNull();
+    expect(fixture.jobs.get(second.id)?.idempotencyKey).toBeNull();
+
+    fixture.release("keyless-run");
+    await waitUntil(() => fixture.started.length === 2);
+    fixture.release("keyless-run");
+    await fixture.service.waitForIdle();
+    fixture.service.dispose();
+  });
+
+  test("uses the injected daemon environment for broker admission", async () => {
+    const backend = `injected-env-${crypto.randomUUID()}`;
+    const model = `injected-model-${crypto.randomUUID()}`;
+    registerBackendDefinition(adapter(backend, { provider: "openai", strictAuth: "broker-api-key" }));
+    adapters.push(backend);
+    const pricingId = `injected-pricing-${crypto.randomUUID()}`;
+    registerPricing({ id: pricingId, provider: "openai", model, effectiveFrom: 0, inputUsdPerMillion: 1, outputUsdPerMillion: 1 });
+    pricingIds.push(pricingId);
+    const withoutCredential = { ...process.env, OPENAI_API_KEY: undefined };
+    const withCredential = { ...process.env, OPENAI_API_KEY: "injected-only-key" };
+
+    const deniedFixture = createFixture({ maxConcurrency: 1, maxQueued: 1 }, withoutCredential);
+    const denied = deniedFixture.service.submit({
+      ...run(backend, "missing-injected-credential", "read-only", 5_000, "auto"),
+      authMode: "broker",
+      model,
+    }, "coordinator");
+    expect(deniedFixture.jobs.get(denied.id)).toMatchObject({
+      state: "blocked",
+      result: { error: { code: "AUTH_UNAVAILABLE" } },
+    });
+    expect(deniedFixture.started).toEqual([]);
+    deniedFixture.service.dispose();
+
+    const admittedFixture = createFixture({ maxConcurrency: 1, maxQueued: 1 }, withCredential);
+    const admitted = admittedFixture.service.submit({
+      ...run(backend, "present-injected-credential", "read-only", 5_000, "auto"),
+      authMode: "broker",
+      model,
+    }, "coordinator");
+    expect(admittedFixture.jobs.get(admitted.id)?.state).toBe("running");
+    expect(admittedFixture.started).toEqual(["present-injected-credential"]);
+    admittedFixture.release("present-injected-credential");
+    await admittedFixture.service.waitForIdle();
+    admittedFixture.service.dispose();
+  });
+
   test("preserves eligible FIFO order, emits positions, rejects overflow, and cancels queued work", async () => {
     const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
     const first = fixture.service.submit(run(fixture.backend, "first"), "coordinator");
@@ -857,7 +938,10 @@ async function admitLinkedFixture(
   return { parent, child };
 }
 
-function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
+function createFixture(
+  limits: { maxConcurrency: number; maxQueued: number },
+  env: NodeJS.ProcessEnv = process.env,
+) {
   const root = mkdtempSync(join(tmpdir(), "headless-admission-service-"));
   roots.push(root);
   const project = join(root, "project");
@@ -883,7 +967,7 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
 
   const brokerQuotas = new DurableBrokerQuotaStore(paths);
   const broker = new ProviderBroker({
-    credentials: process.env,
+    credentials: env,
     upstreams: { anthropic: "http://127.0.0.1:9", openai: "http://127.0.0.1:9" },
     fetch: (async () => Response.json({ usage: { input_tokens: 1, output_tokens: 1 } })) as typeof fetch,
     initialBudgetQuotas: brokerQuotas.snapshot(),
@@ -905,6 +989,7 @@ function createFixture(limits: { maxConcurrency: number; maxQueued: number }) {
     authority: new AuthorityStore(paths, { coordinator: "coordinator" }),
     budgets,
     broker,
+    env,
     brokerQuotas,
     activeLeadBackend: () => activeLeadBackend,
     isStopping: () => false,

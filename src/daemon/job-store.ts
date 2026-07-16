@@ -38,6 +38,7 @@ export class JobStore {
     councilId?: string | null;
     councilSlot?: string | null;
     delegationOf?: Job["delegationOf"];
+    idempotencyKey?: string | null;
   }) {
     const now = Date.now();
     const job = JobSchema.parse({
@@ -49,6 +50,7 @@ export class JobStore {
       councilId: input.councilId ?? null,
       councilSlot: input.councilSlot ?? null,
       delegationOf: input.delegationOf ?? null,
+      idempotencyKey: input.idempotencyKey ?? null,
       backend: input.request.backend,
       mode: input.request.mode,
       authMode: input.request.authMode,
@@ -95,6 +97,13 @@ export class JobStore {
     return this.list().find((job) => (
       job.delegationOf?.parentJobId === parentJobId
       && job.delegationOf.requestId === requestId
+    )) ?? null;
+  }
+
+  findSubmission(principal: string, idempotencyKey: string) {
+    return this.list().find((job) => (
+      job.principal === principal
+      && job.idempotencyKey === idempotencyKey
     )) ?? null;
   }
 

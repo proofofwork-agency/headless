@@ -21,14 +21,25 @@ const CLAUDE_READ_DENIED_TOOLS = [
 
 const CLAUDE_WRITE_DENIED_TOOLS = ["WebFetch", "WebSearch", "Task", "Skill"] as const;
 
+/** Native tool controls shared by one-shot and resumable Claude transports. */
+export function claudeToolArguments(mode: "read-only" | "write") {
+  const allowed = mode === "write" ? CLAUDE_WRITE_TOOLS : CLAUDE_READ_TOOLS;
+  const denied = mode === "write" ? CLAUDE_WRITE_DENIED_TOOLS : CLAUDE_READ_DENIED_TOOLS;
+  return [
+    "--tools",
+    allowed.join(","),
+    "--allowedTools",
+    allowed.join(","),
+    "--disallowedTools",
+    denied.join(","),
+  ];
+}
+
 /**
  * Claude's native permissions are defense in depth. The outer OS containment
  * remains authoritative for filesystem and network access in both modes.
  */
 export function buildClaudeCommand(opts: ExecOptions) {
-  const write = opts.mode === "write";
-  const allowed = write ? CLAUDE_WRITE_TOOLS : CLAUDE_READ_TOOLS;
-  const denied = write ? CLAUDE_WRITE_DENIED_TOOLS : CLAUDE_READ_DENIED_TOOLS;
   const cmd = [
     "claude",
     "-p",
@@ -47,12 +58,7 @@ export function buildClaudeCommand(opts: ExecOptions) {
     "--no-chrome",
     "--permission-mode",
     claudePermissionMode(opts.approvalPolicy),
-    "--tools",
-    allowed.join(","),
-    "--allowedTools",
-    allowed.join(","),
-    "--disallowedTools",
-    denied.join(","),
+    ...claudeToolArguments(opts.mode ?? "read-only"),
   ];
   if ((opts.authMode ?? "broker") === "broker") cmd.splice(5, 0, "--bare");
   if (opts.model) cmd.push("--model", safeOption(opts.model, "model", { namespace: "Claude" }));

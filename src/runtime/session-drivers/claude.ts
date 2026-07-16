@@ -2,7 +2,7 @@ import { CommandSessionDriver, type CommandSessionDriverOptions } from "./comman
 import { decodeClaudeEvent } from "./event-decoder";
 import { safeSessionOption } from "./options";
 import type { SessionDriverRuntime } from "./base";
-import { CLAUDE_EMPTY_MCP_CONFIG, CLAUDE_READ_TOOLS, CLAUDE_WRITE_TOOLS } from "../../backends/claude";
+import { CLAUDE_EMPTY_MCP_CONFIG, claudeToolArguments } from "../../backends/claude";
 
 export class ClaudeSessionDriver extends CommandSessionDriver {
   constructor(options: CommandSessionDriverOptions) {
@@ -29,6 +29,8 @@ export class ClaudeSessionDriver extends CommandSessionDriver {
 }
 
 function claudeCommand(runtime: SessionDriverRuntime, prompt: string, sessionFlag: "--session-id" | "--resume", sessionId: string) {
+  // Durable sessions are native-login only: --bare would disable their OAuth
+  // state, while --no-session-persistence would defeat native resume.
   const argv = [
     "claude",
     "-p",
@@ -47,10 +49,7 @@ function claudeCommand(runtime: SessionDriverRuntime, prompt: string, sessionFla
     safeSessionOption(sessionId, "native id")!,
     "--permission-mode",
     claudePermissionMode(runtime.approvalPolicy),
-    "--tools",
-    (runtime.mode === "write" ? CLAUDE_WRITE_TOOLS : CLAUDE_READ_TOOLS).join(","),
-    "--allowedTools",
-    (runtime.mode === "write" ? CLAUDE_WRITE_TOOLS : CLAUDE_READ_TOOLS).join(","),
+    ...claudeToolArguments(runtime.mode),
   ];
   if (runtime.model) argv.push("--model", safeSessionOption(runtime.model, "model")!);
   return { argv, stdin: `${prompt}\n`, protocol: "jsonl" as const };

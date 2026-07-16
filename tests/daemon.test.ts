@@ -24,6 +24,7 @@ import { LedgerV2 } from "../src/runtime/ledger-v2";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { recordArtifact } from "../src/runtime/ledger-api";
 import { WorktreeLeaseStore } from "../src/runtime/worktree-leases";
+import { SkillRegistry } from "../src/runtime/skill-registry";
 import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
 import { parseGrokJsonl } from "../src/backends/grok";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
@@ -624,6 +625,128 @@ console.log(JSON.stringify({type:"text",text:"daemon result"}));`);
     expect(recovered?.state).toBe("failed");
     expect(recovered?.result?.jobId).toBe(job.id);
     expect(recovered?.result?.error?.retryable).toBe(true);
+  });
+
+  test("uses the admitted session deadline for its completion guard", async () => {
+    const fixture = createFixture();
+    installBackend(fixture.bin, `await Bun.sleep(50); console.log(JSON.stringify({type:"text",text:"completed after guard registration"}));`);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48), enableExperimentalSessions: true });
+    daemons.push(daemon);
+    await daemon.start();
+    const internals = daemon as unknown as {
+      wait(jobId: string, timeoutMs?: number): Promise<Job>;
+    };
+    const originalWait = internals.wait.bind(daemon);
+    const observedTimeouts: number[] = [];
+    internals.wait = (jobId, timeoutMs) => {
+      if (timeoutMs !== undefined) observedTimeouts.push(timeoutMs);
+      return originalWait(jobId, timeoutMs);
+    };
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
+    const session = await client.call<DurableSession>("session.create", { backend: FIXTURE_READ_BACKEND, containment: "unsafe" });
+
+    await client.call<{ job: Job }>("session.send", { sessionId: session.id, prompt: "long admitted turn", timeoutMs: 200_000 });
+    const completed = await waitForSessionState(client, session.id, "completed", 5_000);
+
+    expect(completed.result?.output).toBe("completed after guard registration");
+    expect(observedTimeouts).toContain(210_000);
+  });
+
+  test("completes a session from the terminal bridge after its waiter is lost", async () => {
+    const fixture = createFixture();
+    installBackend(fixture.bin, `await Bun.sleep(150); console.log(JSON.stringify({type:"text",text:"terminal bridge completed"}));`);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48), enableExperimentalSessions: true });
+    daemons.push(daemon);
+    await daemon.start();
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
+    const session = await client.call<DurableSession>("session.create", { backend: FIXTURE_READ_BACKEND, containment: "unsafe" });
+    const sent = await client.call<{ job: Job }>("session.send", { sessionId: session.id, prompt: "drop watcher", timeoutMs: 5_000 });
+    const internals = daemon as unknown as {
+      waiters: Map<string, Array<{ timer: ReturnType<typeof setTimeout> }>>;
+    };
+    for (const waiter of internals.waiters.get(sent.job.id) ?? []) clearTimeout(waiter.timer);
+    internals.waiters.delete(sent.job.id);
+
+    const completed = await waitForSessionState(client, session.id, "completed", 5_000);
+
+    expect(completed.result?.status).toBe("succeeded");
+    expect(completed.result?.output).toBe("terminal bridge completed");
+    expect(new PersistentSessionStore(daemon.state).transcript(session.id).filter((entry) => entry.role === "assistant")).toHaveLength(1);
+  });
+
+  test("drains pending job waiter timers during daemon stop", async () => {
+    const fixture = createFixture();
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
+    daemons.push(daemon);
+    await daemon.start();
+    let rejected = false;
+    const timer = setTimeout(() => {}, 60_000);
+    const internals = daemon as unknown as {
+      waiters: Map<string, Array<{
+        callback: (job: Job) => void;
+        reject: () => void;
+        timer: ReturnType<typeof setTimeout>;
+      }>>;
+    };
+    internals.waiters.set("pending-test-wait", [{
+      callback: () => {},
+      reject: () => {
+        rejected = true;
+        clearTimeout(timer);
+      },
+      timer,
+    }]);
+
+    await daemon.stop();
+    daemons.splice(daemons.indexOf(daemon), 1);
+
+    expect(rejected).toBe(true);
+    expect(internals.waiters.size).toBe(0);
+  });
+
+  test("reconciles a pending skill audit from its durable terminal job on boot", async () => {
+    const fixture = createFixture();
+    installBackend(fixture.bin, `console.log(JSON.stringify({type:"text",text:"skill result"}));`);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
+    daemons.push(daemon);
+    await daemon.start();
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
+    const submitted = await client.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "skill work", containment: "unsafe", timeoutMs: 5_000 });
+    const completed = await client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 10_000 });
+    await daemon.stop();
+    daemons.splice(daemons.indexOf(daemon), 1);
+
+    const skillSource = join(fixture.root, "skill-source");
+    mkdirSync(skillSource);
+    writeFileSync(join(skillSource, "manifest.json"), JSON.stringify({
+      schemaVersion: 1,
+      id: "recovery-skill",
+      version: "1.0.0",
+      name: "Recovery skill",
+      license: "MIT",
+      instructions: "instructions.md",
+      references: [],
+      tools: [],
+      requirements: {},
+      roles: [],
+      providers: [],
+      verification: [],
+    }));
+    writeFileSync(join(skillSource, "instructions.md"), "Recover the durable invocation.\n");
+    const state = ensureProjectStateDirectories(getProjectStatePaths(fixture.project, fixture.state));
+    const skills = new SkillRegistry(state);
+    skills.import(skillSource, "coordinator");
+    skills.enable("recovery-skill@1.0.0", "coordinator");
+    const invocation = skills.invocation("recovery-skill@1.0.0", "", "coordinator", [FIXTURE_READ_BACKEND]);
+    skills.markInvocationPending(invocation.auditId, completed.id);
+
+    const restarted = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
+    daemons.push(restarted);
+    await restarted.start();
+    const audit = new SkillRegistry(state).audit().find((entry) => entry.id === invocation.auditId);
+
+    expect(audit).toMatchObject({ jobId: completed.id, status: "succeeded" });
+    expect(audit?.result).toContain("skill result");
   });
 
   test("persists a bounded replay session across fresh worker processes", async () => {
@@ -1570,6 +1693,21 @@ async function waitForPath(path: string, timeoutMs: number) {
     if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
     await Bun.sleep(10);
   }
+}
+
+async function waitForSessionState(
+  client: HeadlessDaemonClient,
+  sessionId: string,
+  state: DurableSession["state"],
+  timeoutMs: number,
+) {
+  const attempts = schedulingAttempts(Math.max(1, Math.ceil(timeoutMs / 10)));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const session = await client.call<DurableSession>("session.status", { sessionId });
+    if (session.state === state) return session;
+    await Bun.sleep(10);
+  }
+  throw new Error(`Timed out waiting for session ${sessionId} to reach ${state}.`);
 }
 
 function processIsAlive(pid: number) {

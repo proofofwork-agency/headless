@@ -7,6 +7,7 @@ import {
   PrincipalIdSchema,
   ProjectIdSchema,
   RunModeSchema,
+  SubmissionIdempotencyKeySchema,
   StructuredErrorSchema,
   TimestampSchema,
 } from "./common";
@@ -47,6 +48,8 @@ export const JobSchema = z.object({
   councilSlot: z.string().min(1).max(160).nullable().default(null),
   /** Daemon-assigned worker delegation relationship; never accepted from RPC input. */
   delegationOf: RunDelegationLinkSchema.nullable().default(null),
+  /** Principal-scoped client replay key; absent submissions retain mint-on-call behavior. */
+  idempotencyKey: SubmissionIdempotencyKeySchema.nullable().default(null),
   backend: BackendIdSchema,
   mode: RunModeSchema,
   authMode: AuthModeSchema.default("broker"),

@@ -30,6 +30,7 @@ export type SessionDriverFactoryOptions = {
   executor: SessionExecutor;
   createId?: () => string;
   now?: () => number;
+  platform?: string;
 };
 
 export class SessionDriverFactory {
@@ -38,7 +39,7 @@ export class SessionDriverFactory {
   private readonly now: () => number;
 
   constructor(options: SessionDriverFactoryOptions) {
-    const driverOptions = { executor: options.executor, createId: options.createId, now: options.now };
+    const driverOptions = { executor: options.executor, createId: options.createId, now: options.now, platform: options.platform };
     this.now = options.now ?? Date.now;
     this.candidates = {
       codex: [

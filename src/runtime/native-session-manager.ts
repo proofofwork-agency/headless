@@ -351,6 +351,7 @@ export class NativeSessionManager {
           handle = await selected.driver.resume({
             cwd: this.projectRoot,
             mode: "read-only",
+            containment: session.containment,
             model: selectedModel ?? undefined,
             agent: session.agent ?? undefined,
             env,
@@ -369,6 +370,7 @@ export class NativeSessionManager {
           handle = await selected.driver.resume({
             cwd: this.projectRoot,
             mode: "read-only",
+            containment: session.containment,
             model: selectedModel ?? undefined,
             agent: session.agent ?? undefined,
             env,
@@ -386,6 +388,7 @@ export class NativeSessionManager {
           handle = await selected.driver.resume({
             cwd: this.projectRoot,
             mode: "read-only",
+            containment: session.containment,
             model: selectedModel ?? undefined,
             agent: session.agent ?? undefined,
             env,
@@ -405,6 +408,7 @@ export class NativeSessionManager {
         handle = await selected.driver.create({
             cwd: this.projectRoot,
             mode: "read-only",
+            containment: session.containment,
             model: selectedModel ?? undefined,
             agent: session.agent ?? undefined,
             env,
@@ -519,6 +523,7 @@ export class NativeSessionManager {
     runtime.handle = await runtime.driver.resume({
       cwd: this.projectRoot,
       mode: "read-only",
+      containment: session.containment,
       model: runtime.model ?? undefined,
       agent: session.agent ?? undefined,
       env: runtime.env,

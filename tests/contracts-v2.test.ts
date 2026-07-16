@@ -62,7 +62,8 @@ describe("v0.2 wire bounds", () => {
       leaseExpiresAt: null,
       result: null,
     };
-    expect(JobSchema.parse(job).delegationOf?.depth).toBe(1);
+    expect(JobSchema.parse(job)).toMatchObject({ delegationOf: { depth: 1 }, idempotencyKey: null });
+    expect(JobSchema.parse({ ...job, idempotencyKey: "submission-1" }).idempotencyKey).toBe("submission-1");
     expect(() => JobSchema.parse({ ...job, delegationOf: { ...job.delegationOf, depth: 2 } })).toThrow();
     expect(() => JobSchema.parse({ ...job, delegationOf: { ...job.delegationOf, forged: true } })).toThrow();
   });

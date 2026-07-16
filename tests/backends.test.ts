@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { normalizeBackend, SUPPORTED_BACKENDS, backendChoices } from "../src/backends/ids";
 import { backendDefinitions, buildBackendEnv } from "../src/backends/registry";
 import { buildGrokCommand, parseGrokJsonl } from "../src/backends/grok";
-import { decodeGrokEvent } from "../src/runtime/session-drivers/event-decoder";
+import {
+  decodeClaudeEvent,
+  decodeCodexEvent,
+  decodeGrokEvent,
+  decodeOpenCodeEvent,
+  decoderForBackend,
+} from "../src/runtime/session-drivers/event-decoder";
 import { GROK_HEADLESS_SYSTEM_PROMPT, GROK_READ_TOOLS, GROK_WRITE_TOOLS } from "../src/runtime/grok-isolation";
 import { parseClaudeStreamJson, parseCodexJson, parseGenericAgentJson, tokenCount } from "../src/backends/json";
 import { buildOpenCodeCommand, nextOpenCodeEnv, OPENCODE_CONFIG_CONTENT, parseOpenCodeJsonl } from "../src/backends/opencode";
@@ -54,6 +60,74 @@ describe("opencode backend helpers", () => {
     expect(p.output).toContain("hi");
     // tokens may be summed or null depending on fixture shape; just assert no crash + text
     expect(typeof p.tokens === "number" || p.tokens === null).toBe(true);
+  });
+});
+
+describe("built-in session event decoders", () => {
+  test("decodes Codex agent-message completion snapshots", () => {
+    const [event] = decodeCodexEvent({
+      type: "item.completed",
+      thread_id: "thread-1",
+      turn_id: "turn-1",
+      item: { id: "item-1", type: "agent_message", text: "codex output" },
+    });
+
+    expect(event).toMatchObject({
+      kind: "text",
+      stableId: "item:item-1:completed",
+      sessionId: "thread-1",
+      turnId: "turn-1",
+      itemId: "item-1",
+      text: "codex output",
+      textMode: "snapshot",
+    });
+  });
+
+  test("decodes Claude result text, usage, and completion", () => {
+    const events = decodeClaudeEvent({
+      type: "result",
+      session_id: "session-1",
+      result: "claude output",
+      usage: { input_tokens: 3, output_tokens: 2 },
+      total_cost_usd: 0.01,
+    });
+
+    expect(events.find((event) => event.kind === "text")).toMatchObject({ text: "claude output", textMode: "snapshot" });
+    expect(events.find((event) => event.kind === "usage")).toMatchObject({ usage: { input: 3, output: 2 }, costUsd: 0.01 });
+    expect(events.find((event) => event.kind === "completion")).toMatchObject({ sessionId: "session-1", failed: false });
+  });
+
+  test("decodes completed OpenCode text parts", () => {
+    const [event] = decodeOpenCodeEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-1",
+          type: "text",
+          text: "opencode output",
+          sessionID: "session-1",
+          messageID: "message-1",
+          time: { end: 123 },
+        },
+      },
+    });
+
+    expect(event).toMatchObject({
+      kind: "text",
+      stableId: "part:part-1:completed",
+      sessionId: "session-1",
+      turnId: "message-1",
+      itemId: "part-1",
+      text: "opencode output",
+      textMode: "snapshot",
+    });
+  });
+
+  test("dispatches every built-in backend to its decoder", () => {
+    expect(decoderForBackend("codex")).toBe(decodeCodexEvent);
+    expect(decoderForBackend("claude-code")).toBe(decodeClaudeEvent);
+    expect(decoderForBackend("opencode")).toBe(decodeOpenCodeEvent);
+    expect(decoderForBackend("grok-build")).toBe(decodeGrokEvent);
   });
 });
 

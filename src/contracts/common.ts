@@ -4,6 +4,7 @@ export const BackendIdSchema = z.string().trim().min(1).max(64);
 export const PrincipalIdSchema = z.string().trim().min(1).max(128);
 export const ProjectIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const IdentifierSchema = z.string().trim().min(1).max(160);
+export const SubmissionIdempotencyKeySchema = z.string().trim().min(1).max(200);
 export const TimestampSchema = z.number().int().nonnegative();
 export const PositiveTimeoutSchema = z.number().int().positive().max(86_400_000);
 export const MAX_RUN_PROMPT_BYTES = 500_000;

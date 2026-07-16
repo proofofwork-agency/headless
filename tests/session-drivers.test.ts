@@ -22,6 +22,8 @@ import {
   type SessionTransportResult,
 } from "../src/runtime/session-drivers";
 import { schedulingWindow } from "./support/timing";
+import { buildClaudeCommand } from "../src/backends/claude";
+import { codexSandbox } from "../src/backends/codex";
 
 describe("session driver selection", () => {
   test("reports native login presence and rejects a missing auth capsule", async () => {
@@ -225,6 +227,7 @@ describe("Codex session drivers", () => {
     const driver = new CodexAppServerSessionDriver(executor, {
       createId: ids("local-session", "local-turn"),
       now: clock(1_000),
+      platform: "darwin",
     });
 
     const handle = await driver.create({
@@ -247,7 +250,7 @@ describe("Codex session drivers", () => {
         ?.params,
     ).toMatchObject({
       cwd: "/repo",
-      sandbox: "workspace-write",
+      sandbox: "danger-full-access",
       approvalPolicy: "never",
     });
 
@@ -337,6 +340,7 @@ describe("Codex session drivers", () => {
     const driver = new CodexExecSessionDriver({
       executor,
       createId: ids("local", "turn-1", "turn-2"),
+      platform: "darwin",
     });
     const handle = await driver.create({ cwd: "/repo", mode: "read-only" });
 
@@ -348,7 +352,7 @@ describe("Codex session drivers", () => {
       "exec",
       "--json",
       "--sandbox",
-      "read-only",
+      "danger-full-access",
       "--cd",
       "/repo",
       "--skip-git-repo-check",
@@ -503,6 +507,43 @@ describe("native command session drivers", () => {
         executor.executions[1].argv.indexOf("--resume") + 1
       ],
     ).toBe("claude-native");
+  });
+
+  test("Claude sessions retain one-shot allow and deny tool controls in both modes", async () => {
+    for (const mode of ["read-only", "write"] as const) {
+      const nativeId = `claude-${mode}`;
+      const executor = new FakeExecutor({
+        execute: sequenceExecutions([
+          jsonl([
+            { type: "system", subtype: "init", session_id: nativeId },
+            { type: "result", session_id: nativeId },
+          ]),
+          jsonl([{ type: "result", session_id: nativeId }]),
+        ]),
+      });
+      const driver = new ClaudeSessionDriver({
+        executor,
+        createId: ids(nativeId, `${nativeId}-turn-1`, `${nativeId}-turn-2`),
+      });
+      const handle = await driver.create({ cwd: "/repo", mode });
+      await driver.send(handle, "first");
+      await driver.send(handle, "resume");
+
+      const oneShot = buildClaudeCommand({
+        backend: "claude-code",
+        prompt: "one-shot",
+        mode,
+        authMode: "native-login",
+      });
+      for (const execution of executor.executions) {
+        for (const flag of ["--tools", "--allowedTools", "--disallowedTools"]) {
+          expect(argumentValue(execution.argv, flag)).toBe(argumentValue(oneShot, flag));
+        }
+        expect(execution.argv).not.toContain("--bare");
+        expect(execution.argv).not.toContain("--no-session-persistence");
+      }
+      expect(oneShot).toContain("--no-session-persistence");
+    }
   });
 
   test("OpenCode captures the first native session and continues with run --session", async () => {
@@ -1216,6 +1257,11 @@ class AbortableInitializeTransport implements SessionTransport {
 
 function responseCallback(input: SessionTransportRequest) {
   return (input as SessionTransportRequest & { onResponse?: (value: unknown) => void }).onResponse;
+}
+
+function argumentValue(argv: string[], flag: string) {
+  const index = argv.indexOf(flag);
+  return index < 0 ? undefined : argv[index + 1];
 }
 
 function versionAndHelp(

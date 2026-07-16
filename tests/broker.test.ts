@@ -198,6 +198,56 @@ describe("provider broker", () => {
     expect((await post("/openai/v1/chat/completions", lease.token, { model: "allowed" })).status).toBe(429);
   });
 
+  test("rejects encoded route traversal and preserves canonical Gemini generation routes", async () => {
+    const upstreamPaths: string[] = [];
+    const broker = new ProviderBroker({
+      credentials: { OPENAI_API_KEY: "openai-secret", GEMINI_API_KEY: "gemini-secret" },
+      upstreams: { openai: "http://127.0.0.1:9", gemini: "http://127.0.0.1:9" },
+      fetch: (async (input) => {
+        upstreamPaths.push(new URL(input instanceof Request ? input.url : String(input)).pathname);
+        return Response.json({ ok: true });
+      }) as typeof fetch,
+    });
+    broker.start();
+    closers.push(() => broker.stop());
+    const openai = broker.issueLease({
+      runId: "canonical-openai",
+      provider: "openai",
+      models: ["allowed"],
+      endpointClasses: ["embeddings", "models"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 10,
+    });
+    const postOpenAi = (path: string) => fetch(`${openai.baseUrl}${path}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${openai.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "allowed", input: "test" }),
+    });
+
+    expect((await postOpenAi("/v1/embeddings/..%2fchat%2fcompletions")).status).toBe(400);
+    expect((await postOpenAi("/v1/embeddings/..%252fchat%252fcompletions")).status).toBe(400);
+    expect((await postOpenAi("/v1/embeddings/%2e%2e/chat/completions")).status).toBe(403);
+    expect((await postOpenAi("/v1/models/../chat/completions")).status).toBe(403);
+    expect((await postOpenAi("/v1/modelsX")).status).toBe(403);
+    expect(upstreamPaths).toEqual([]);
+
+    const gemini = broker.issueLease({
+      runId: "canonical-gemini",
+      provider: "gemini",
+      models: ["gemini-pro"],
+      endpointClasses: ["generate"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 1,
+    });
+    const generated = await fetch(`${gemini.baseUrl}/v1beta/models/gemini-pro:generateContent`, {
+      method: "POST",
+      headers: { "x-goog-api-key": gemini.token, "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(generated.status).toBe(200);
+    expect(upstreamPaths).toEqual(["/v1beta/models/gemini-pro:generateContent"]);
+  });
+
   test("atomically reserves request slots across concurrent lease use", async () => {
     let upstreamCalls = 0;
     const broker = new ProviderBroker({

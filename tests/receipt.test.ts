@@ -11,11 +11,19 @@ import { RunEventStore } from "../src/daemon/run-event-store";
 import { clearRuntimeDiagnostics, listRuntimeDiagnostics } from "../src/runtime/diagnostics";
 import type { AuthorityStore } from "../src/runtime/authority-store";
 import { runGitStrict } from "../src/runtime/git";
-import { ledgerIntegrityOptionsFromEnv, verifyLedgerChain } from "../src/runtime/ledger-v2";
-import { RECEIPT_ANCHOR_ARTIFACT_KIND } from "../src/runtime/receipt-anchor";
+import { LedgerRecordV2Schema, ledgerIntegrityOptionsFromEnv, verifyLedgerChain } from "../src/runtime/ledger-v2";
+import { findReceiptAnchor, parseReceiptAnchorRecord, RECEIPT_ANCHOR_ARTIFACT_KIND } from "../src/runtime/receipt-anchor";
 import { sha256Hex } from "../src/runtime/receipt-canonical";
+import { ReceiptJournal } from "../src/runtime/receipt-journal";
 import { ReceiptStore } from "../src/runtime/receipt-store";
-import { receiptBrokerLeaseSnapshot } from "../src/runtime/receipt-service";
+import {
+  assembleAndAnchorReceipt,
+  RECEIPT_GAP_ARTIFACT_KIND,
+  recordReceiptGap,
+  receiptAnchorEventId,
+  receiptBrokerLeaseSnapshot,
+  receiptIdForRun,
+} from "../src/runtime/receipt-service";
 
 setDefaultTimeout(45_000);
 
@@ -244,6 +252,146 @@ describe("terminal execution receipts", () => {
     expect(new ReceiptStore(daemon.state.receiptsDir).get(completed.id)).toEqual(receiptBefore);
   });
 
+  test("recovers one pending terminal receipt exactly once across restarts", async () => {
+    const fixture = createFixture();
+    fixture.state.env.HEADLESS_RECEIPTS = "off";
+    const { daemon, client } = await startFixture(fixture);
+    const completed = await run(client, fixture.backend, "recover pending receipt");
+    const request = daemon.jobs.request(completed.id)!;
+    expect(new ReceiptStore(daemon.state.receiptsDir).get(completed.id)).toBeNull();
+    await stopTracked(daemon);
+
+    const journal = new ReceiptJournal(daemon.state);
+    journal.pending(receiptJournalIntent(completed, "b".repeat(40)));
+    fixture.state.env.HEADLESS_RECEIPTS = "on";
+    const recovered = await restartFixture(fixture);
+    const receipt = new ReceiptStore(recovered.state.receiptsDir).get(completed.id);
+    expect(receipt?.body.provenance.commit).toBe("b".repeat(40));
+    expect(await new HeadlessDaemonClient({
+      projectRoot: fixture.project,
+      state: fixture.state,
+      token: "r".repeat(48),
+    }).call<{ ok: boolean }>("receipt.verify", { runId: completed.id })).toMatchObject({ ok: true });
+    expect(anchorRecords(recovered.state.ledgerPath, completed.id)).toHaveLength(1);
+    expect(journal.get(completed.id)?.state).toBe("completed");
+
+    await stopTracked(recovered);
+    const second = await restartFixture(fixture);
+    expect(anchorRecords(second.state.ledgerPath, completed.id)).toHaveLength(1);
+    expect(new ReceiptStore(second.state.receiptsDir).get(completed.id)).toEqual(receipt);
+  });
+
+  test("turns a mismatched dangling anchor into an explicit non-anchor gap", async () => {
+    const fixture = createFixture();
+    fixture.state.env.HEADLESS_RECEIPTS = "off";
+    const { daemon, client } = await startFixture(fixture);
+    const completed = await run(client, fixture.backend, "dangling receipt anchor");
+    const request = daemon.jobs.request(completed.id)!;
+    await stopTracked(daemon);
+
+    const journal = new ReceiptJournal(daemon.state);
+    const intent = receiptJournalIntent(completed, "b".repeat(40));
+    journal.pending(intent);
+    expect(() => assembleAndAnchorReceipt({
+      paths: daemon.state,
+      stateOptions: fixture.state,
+      receipts: { put: () => { throw new Error("simulated crash after receipt anchor"); } },
+      provenance: journalProvenance(request.backend, intent.provenance),
+    }, {
+      jobId: completed.id,
+      sessionId: completed.sessionId,
+      principal: completed.principal,
+      request,
+      result: completed.result!,
+      policyEvents: new RunEventStore(daemon.state.runEventsPath, { compactOnOpen: false })
+        .snapshot({ jobId: completed.id, limit: 1_000 }).events,
+      authorization: intent.authorization!,
+      brokerLease: intent.brokerLease,
+      gates: intent.gates,
+      budget: intent.budget,
+      startedAt: intent.startedAt!,
+      endedAt: completed.updatedAt,
+    })).toThrow("simulated crash");
+    const markerPath = join(journal.directory, `${completed.id}.json`);
+    const mutated = JSON.parse(readFileSync(markerPath, "utf8"));
+    mutated.provenance.commit = "c".repeat(40);
+    writeFileSync(markerPath, `${JSON.stringify(mutated)}\n`, { mode: 0o600 });
+
+    fixture.state.env.HEADLESS_RECEIPTS = "on";
+    clearRuntimeDiagnostics();
+    const recovered = await restartFixture(fixture);
+    expect(new ReceiptStore(recovered.state.receiptsDir).get(completed.id)).toBeNull();
+    expect(journal.get(completed.id)).toMatchObject({ state: "gap", gapReason: expect.stringContaining("replay mismatch") });
+    const records = ledgerRecords(recovered.state.ledgerPath);
+    const gap = records.find((record) => (
+      (record.payload.event as { artifact?: { kind?: string } } | undefined)?.artifact?.kind === RECEIPT_GAP_ARTIFACT_KIND
+    ));
+    expect(gap).toBeDefined();
+    expect(parseReceiptAnchorRecord(gap!)).toBeNull();
+    expect(findReceiptAnchor(records, receiptIdForRun(completed.id))?.anchor.runId).toBe(completed.id);
+    expect(listRuntimeDiagnostics()).toContainEqual(expect.objectContaining({
+      scope: `daemon.start.receipt:${completed.id}`,
+      message: expect.stringContaining("replay mismatch"),
+    }));
+  });
+
+  test("keeps a pending marker when verifier-only HMAC state cannot append receipt or gap", async () => {
+    const fixture = createFixture();
+    const key = "receipt-hmac-key-material";
+    fixture.state.env.HEADLESS_RECEIPTS = "off";
+    fixture.state.env.HEADLESS_LEDGER_KEY = key;
+    fixture.state.env.HEADLESS_LEDGER_KEY_ID = "receipt-test-key";
+    const { daemon, client } = await startFixture(fixture);
+    const completed = await run(client, fixture.backend, "hmac receipt recovery");
+    recordReceiptGap({ paths: daemon.state, stateOptions: fixture.state }, {
+      jobId: "hmac-history-seed",
+      sessionId: null,
+      principal: "receipt-hmac-seed",
+      reason: "seed signed history",
+    });
+    await stopTracked(daemon);
+    const journal = new ReceiptJournal(daemon.state);
+    journal.pending(receiptJournalIntent(completed, "b".repeat(40)));
+
+    fixture.state.env.HEADLESS_RECEIPTS = "on";
+    delete fixture.state.env.HEADLESS_LEDGER_KEY;
+    delete fixture.state.env.HEADLESS_LEDGER_KEY_ID;
+    fixture.state.env.HEADLESS_LEDGER_KEYS = JSON.stringify({ "receipt-test-key": key });
+    clearRuntimeDiagnostics();
+    const recovered = await restartFixture(fixture);
+
+    expect((recovered as unknown as { ready: boolean }).ready).toBe(true);
+    expect(journal.get(completed.id)?.state).toBe("pending");
+    expect(new ReceiptStore(recovered.state.receiptsDir).get(completed.id)).toBeNull();
+    expect(listRuntimeDiagnostics()).toContainEqual(expect.objectContaining({
+      scope: `daemon.start.receipt-gap:${completed.id}`,
+      message: expect.stringContaining("Refusing to append an unsigned SHA record"),
+    }));
+  });
+
+  test("boots past a malformed receipt marker and leaves it for repair", async () => {
+    const fixture = createFixture();
+    const daemon = new HeadlessDaemon({
+      projectRoot: fixture.project,
+      state: fixture.state,
+      token: "r".repeat(48),
+      principal: "receipt-root",
+    });
+    const journal = new ReceiptJournal(daemon.state);
+    const markerPath = join(journal.directory, "corrupt.json");
+    writeFileSync(markerPath, "{broken\n", { mode: 0o600 });
+    clearRuntimeDiagnostics();
+    daemons.push(daemon);
+
+    await daemon.start();
+
+    expect((daemon as unknown as { ready: boolean }).ready).toBe(true);
+    expect(existsSync(markerPath)).toBe(true);
+    expect(listRuntimeDiagnostics()).toContainEqual(expect.objectContaining({
+      scope: "daemon.start.receipt-journal-record",
+    }));
+  });
+
   test("records an assembly diagnostic without changing a successful run", async () => {
     const fixture = createFixture();
     const { daemon, client } = await startFixture(fixture);
@@ -323,13 +471,85 @@ console.log("completed:" + prompt);
   const backend = `receipt-fixture-${++fixtureNumber}`;
   registerBackendDefinition(fixtureAdapter(backend, bin));
   adapters.push(backend);
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     HEADLESS_STATE_HOME: join(root, "state"),
     HEADLESS_RUNTIME_HOME: runtime,
     HEADLESS_COMMIT: "a".repeat(40),
   };
   return { root, project, backend, state: { env, homeDir: root } };
+}
+
+async function stopTracked(daemon: HeadlessDaemon) {
+  await daemon.stop();
+  const index = daemons.indexOf(daemon);
+  if (index >= 0) daemons.splice(index, 1);
+}
+
+async function restartFixture(fixture: ReturnType<typeof createFixture>) {
+  const daemon = new HeadlessDaemon({
+    projectRoot: fixture.project,
+    state: fixture.state,
+    token: "r".repeat(48),
+    principal: "receipt-root",
+    writeGateChecks: [{ name: "receipt-check", command: "bun", args: ["-e", "console.log('receipt gate ok')"] }],
+  });
+  daemons.push(daemon);
+  await daemon.start();
+  return daemon;
+}
+
+function receiptJournalIntent(job: Job, commit: string) {
+  return {
+    jobId: job.id,
+    sessionId: job.sessionId,
+    principal: job.principal,
+    startedAt: job.createdAt,
+    authorization: {
+      source: "root" as const,
+      mergeAllowed: true,
+      maxCostUsd: null,
+      grantId: null,
+      grantTerms: null,
+      finality: null,
+    },
+    brokerLease: null,
+    gates: [],
+    budget: {
+      passed: true,
+      reasons: [],
+      usage: job.result!.usage,
+      cost: job.result!.cost,
+      reservationId: null,
+    },
+    provenance: {
+      headlessVersion: "0.2.0-crash-test",
+      platform: "test-platform",
+      commit,
+      backendVersion: "receipt-fixture 1.0.0",
+    },
+    captureFailure: null,
+  };
+}
+
+function journalProvenance(backend: string, provenance: ReturnType<typeof receiptJournalIntent>["provenance"]) {
+  return {
+    headlessVersion: provenance.headlessVersion,
+    platform: provenance.platform,
+    commit: provenance.commit,
+    backendVersions: { [backend]: provenance.backendVersion },
+  };
+}
+
+function ledgerRecords(path: string) {
+  return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => (
+    LedgerRecordV2Schema.parse(JSON.parse(line))
+  ));
+}
+
+function anchorRecords(path: string, runId: string) {
+  const eventId = receiptAnchorEventId(runId);
+  return ledgerRecords(path).filter((record) => record.eventId === eventId);
 }
 
 function fixtureAdapter(id: string, executable: string): BackendDefinition {

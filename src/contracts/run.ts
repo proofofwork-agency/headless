@@ -21,6 +21,8 @@ export const RunRequestObjectSchema = z.object({
   timeoutMs: PositiveTimeoutSchema.default(180_000),
   sessionId: IdentifierSchema.optional(),
   containment: ContainmentRequirementSchema.default("required"),
+  // The execution contract intentionally defaults to broker isolation; the
+  // interactive MCP/plugin tool surface separately defaults to native-login.
   authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
 }).strict();
