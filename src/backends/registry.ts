@@ -1,4 +1,5 @@
 import type { ExecOptions } from "../index";
+import { join } from "node:path";
 import { buildAdapterEnv } from "./env";
 import { buildClaudeCommand } from "./claude";
 import { buildCodexCommand } from "./codex";
@@ -362,8 +363,17 @@ function prepareClaudeEnvironment(
   if (setupToken) env[CLAUDE_SETUP_TOKEN_ENV] = setupToken;
 }
 
-function prepareCodexEnvironment(env: NodeJS.ProcessEnv, context: { platform: NodeJS.Platform }) {
-  if (context.platform !== "darwin") return;
-  env.SSL_CERT_FILE = "/etc/ssl/cert.pem";
-  env.SSL_CERT_DIR = "/etc/ssl/certs";
+function prepareCodexEnvironment(
+  env: NodeJS.ProcessEnv,
+  context: { worker: WorkerEnvironment; platform: NodeJS.Platform },
+) {
+  // Codex resolves both auth and the config ignored by --ignore-user-config
+  // through CODEX_HOME. Point it at the worker capsule explicitly: relying on
+  // the process account's OS home can make Codex discover the operator's real
+  // ~/.codex/config.toml, which required containment must deny.
+  env.CODEX_HOME = join(context.worker.home, ".codex");
+  if (context.platform === "darwin") {
+    env.SSL_CERT_FILE = "/etc/ssl/cert.pem";
+    env.SSL_CERT_DIR = "/etc/ssl/certs";
+  }
 }

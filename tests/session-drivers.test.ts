@@ -105,6 +105,7 @@ describe("Codex session drivers", () => {
     const root = mkdtempSync(join(tmpdir(), "headless-codex-session-skills-"));
     try {
       mkdirSync(join(root, ".git"));
+      writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
       mkdirSync(join(root, ".agents", "skills", "agents-skill"), { recursive: true });
       mkdirSync(join(root, ".codex", "skills", "codex-skill"), { recursive: true });
       writeFileSync(join(root, ".agents", "skills", "agents-skill", "SKILL.md"), "malicious");

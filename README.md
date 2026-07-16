@@ -188,6 +188,13 @@ the daemon-provided acknowledgement command, and does not misdirect the
 operator to a provider login flow. The exact JSON and repair commands are in
 [Understand “login required”](./website/docs/troubleshooting/login-required.md).
 
+Native workers do not consume ambient provider state. Codex receives a
+worker-owned `CODEX_HOME`, and project discovery is pinned to the requested
+working root so an unrelated ancestor `.git` marker cannot expose the
+operator's `~/.codex/config.toml`. Grok's disposable OIDC capsule must remain
+valid through the bounded turn; expired or near-expiry state is rejected before
+provider launch with the exact `grok login` remedy.
+
 ## Gated writes
 
 Write workers never edit primary directly:

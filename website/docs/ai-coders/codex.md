@@ -18,7 +18,7 @@ Log in once with the official CLI:
 codex login
 ```
 
-That produces the fixed canonical credential file `~/.codex/auth.json`. Headless accepts only that source: it must be a canonical, non-symlinked, single-link regular file no larger than 2 MiB. Headless copies it owner-only (`0600`) into the isolated worker's `$HOME/.codex/auth.json` and fingerprints the exact contents for session-recovery checks — it never mounts your real home, and the worker receives no sibling-provider files, ambient API keys, Git/SSH material, or host sockets. So that TLS validation works from the isolated home on macOS, the contained Codex process additionally receives the read-only system trust-store paths `SSL_CERT_FILE=/etc/ssl/cert.pem` and `SSL_CERT_DIR=/etc/ssl/certs`.
+That produces the fixed canonical credential file `~/.codex/auth.json`. Headless accepts only that source: it must be a canonical, non-symlinked, single-link regular file no larger than 2 MiB. Headless copies it owner-only (`0600`) into the isolated worker's `$HOME/.codex/auth.json`, binds `CODEX_HOME` to that capsule, and fingerprints the exact contents for session-recovery checks — it never mounts your real home, and the worker receives no sibling-provider files, ambient API keys, Git/SSH material, or host sockets. Project discovery is pinned to the requested working root, so an unrelated ancestor `.git` marker cannot cause Codex to inspect the operator's real `~/.codex/config.toml` as project configuration. So that TLS validation works from the isolated home on macOS, the contained Codex process additionally receives the read-only system trust-store paths `SSL_CERT_FILE=/etc/ssl/cert.pem` and `SSL_CERT_DIR=/etc/ssl/certs`.
 
 ### Grant consent and confirm readiness
 
@@ -109,6 +109,6 @@ Navigate with `Tab`/`Shift-Tab`, number keys `1`–`7`, arrows, `PgUp`/`PgDn`, a
 | Prompt delivery | stdin |
 | Default timeout | 180000 ms |
 | Minimum probed CLI version | 0.144.1 |
-| Containment notes | Hardened profile: project config, hooks, MCP, and skills disabled; self-sandboxed on top of required outer containment; capsule source `~/.codex/auth.json` only; system CA bundle paths injected on macOS |
+| Containment notes | Hardened profile: isolated `CODEX_HOME`; project root pinned; project config, hooks, MCP, and skills disabled; self-sandboxed on top of required outer containment; capsule source `~/.codex/auth.json` only; system CA bundle paths injected on macOS |
 
 Full credential contract: the canonical [native-login.md](https://github.com/proofofwork-agency/headless/blob/main/docs/native-login.md) in the repository.

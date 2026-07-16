@@ -3,7 +3,7 @@ import type { DurableSession } from "../contracts/durable";
 import type { ExecOptions } from "../index";
 import { getBackendDefinition, requiredContainmentSecurityGaps, type BackendDefinition } from "../backends/registry";
 import { executableReadRoots, maybeWrapWithSandbox } from "../runner/simple";
-import { installNativeAuthCapsule, supportsNativeAuthCapsule } from "./native-auth-capsule";
+import { installNativeAuthCapsule, nativeAuthMinimumValidityMs, supportsNativeAuthCapsule } from "./native-auth-capsule";
 import { installGrokIsolation, validateGrokIsolationInspection } from "./grok-isolation";
 import { createWorkerEnvironment, type WorkerEnvironment } from "./worker-environment";
 import type { PersistentSessionStore } from "./persistent-sessions";
@@ -268,6 +268,7 @@ export class NativeSessionManager {
           homeDir: this.options.authHomeDir,
           requestedModel: session.model ?? undefined,
           resolveOpenCodeModel: session.backend === "opencode",
+          minimumValidityMs: nativeAuthMinimumValidityMs(timeoutMs),
         });
       } catch (error) {
         if (isHeadlessError(error) && error.code === "INVALID_REQUEST") {

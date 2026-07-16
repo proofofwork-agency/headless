@@ -20,7 +20,7 @@ grok login
 grok login --device-auth
 ```
 
-Grok reads credentials **only** from `$GROK_HOME/auth.json` — by default `~/.grok/auth.json` — with no XDG fallback (confirmed against the open-sourced grok-build source). Headless accepts only that file: a canonical, non-symlinked, single-link regular file no larger than 2 MiB, copied owner-only (`0600`) into the isolated worker's `$HOME/.grok/auth.json` and fingerprinted. The copy is disposable: Headless sets `GROK_AUTH_EARLY_INVALIDATION_SECS=0` inside the worker so proactive token refresh cannot silently rotate your real `~/.grok/auth.json` out from under you; reactive 401 refresh-and-retry still covers bounded runs.
+Grok reads credentials **only** from `$GROK_HOME/auth.json` — by default `~/.grok/auth.json` — with no XDG fallback (confirmed against the open-sourced grok-build source). Headless accepts only that file: a canonical, non-symlinked, single-link regular file no larger than 2 MiB, copied owner-only (`0600`) into the isolated worker's `$HOME/.grok/auth.json` and fingerprinted. The copy is disposable: Headless sets `GROK_AUTH_EARLY_INVALIDATION_SECS=0` inside the worker so proactive refresh cannot rotate the operator's login. For recognized OIDC state, Headless also requires the access token to remain valid through the bounded turn plus a safety margin; otherwise Fleet reports `Login required` with `grok login` / `grok login --device-auth`. This prevents a reactive refresh in a disposable worker from rotating a refresh token that the next worker cannot reuse.
 
 ### Grant consent and confirm readiness
 

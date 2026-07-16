@@ -13,6 +13,8 @@ export const CLAUDE_SETUP_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 export const CLAUDE_SETUP_TOKEN_LOGICAL_ENTRY = `env:${CLAUDE_SETUP_TOKEN_ENV}`;
 export const CLAUDE_SETUP_TOKEN_PATTERN = /^sk-ant-oat[A-Za-z0-9_-]{20,}$/;
 export const CLAUDE_SETUP_TOKEN_REMEDY = "Run `claude setup-token`, store its output at ~/.claude/.headless-setup-token, and run `chmod 600 ~/.claude/.headless-setup-token`.";
+export const GROK_LOGIN_REMEDY = "Run `grok login` or `grok login --device-auth`, then retry.";
+const NATIVE_AUTH_EXPIRY_MARGIN_MS = 30_000;
 const NATIVE_AUTH_CAPSULE_BACKENDS = new Set(["codex", "claude-code", "opencode", "grok-build"]);
 
 type CapsuleFile = {
@@ -31,7 +33,13 @@ export type NativeAuthCapsuleOptions = {
   homeDir?: string;
   requestedModel?: string;
   resolveOpenCodeModel?: boolean;
+  minimumValidityMs?: number;
+  nowMs?: number;
 };
+
+export function nativeAuthMinimumValidityMs(timeoutMs: number) {
+  return Math.min(86_400_000, Math.max(0, timeoutMs) + NATIVE_AUTH_EXPIRY_MARGIN_MS);
+}
 
 /** Backends with an audited, minimal regular-file native-auth capsule. */
 export function supportsNativeAuthCapsule(backend: string) {
@@ -75,6 +83,17 @@ export function installNativeAuthCapsule(
     const read = readCapsuleSource(home, file.source, Math.min(MAX_AUTH_FILE_BYTES, MAX_AUTH_CAPSULE_BYTES - totalBytes));
     if (read.status === "missing") continue;
     if (read.status === "invalid") return { available: false, manifest: null, reason: read.reason, model: model?.model ?? null };
+    if (backend === "grok-build") {
+      const reason = grokOidcReadinessReason(
+        read.contents,
+        options.nowMs ?? Date.now(),
+        options.minimumValidityMs ?? 0,
+      );
+      if (reason) {
+        read.contents.fill(0);
+        return { available: false, manifest: null, reason, model: model?.model ?? null };
+      }
+    }
     const destination = file.destination(worker);
     assertWithinWorker(worker.root, destination);
     const contents = read.contents;
@@ -118,6 +137,39 @@ export function installNativeAuthCapsule(
     createdAt: Date.now(),
   });
   return { available: true, manifest, reason: null, model: model?.model ?? null };
+}
+
+/**
+ * Grok rotates its OIDC refresh token when an expired disposable capsule is
+ * refreshed. That refreshed file cannot safely update the operator's real
+ * login, so the next worker would copy an invalidated refresh token. Refuse a
+ * recognized OIDC capsule before it can expire during the bounded turn. Keep
+ * unknown future/auth-file formats forward compatible and let the CLI decide.
+ */
+function grokOidcReadinessReason(contents: Buffer, nowMs: number, minimumValidityMs: number) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents.toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const entries = Object.values(parsed as Record<string, unknown>);
+  const oidc = entries.filter((entry): entry is Record<string, unknown> => (
+    !!entry
+    && typeof entry === "object"
+    && !Array.isArray(entry)
+    && (entry as Record<string, unknown>).auth_mode === "oidc"
+  ));
+  if (oidc.length === 0) return null;
+  const requiredUntil = nowMs + Math.max(0, minimumValidityMs);
+  if (oidc.some((entry) => {
+    if (typeof entry.key !== "string" || entry.key.length === 0) return false;
+    if (typeof entry.expires_at !== "string") return false;
+    const expiresAt = Date.parse(entry.expires_at);
+    return Number.isFinite(expiresAt) && expiresAt > requiredUntil;
+  })) return null;
+  return `Grok native login is expired or expires before this bounded turn can finish. ${GROK_LOGIN_REMEDY}`;
 }
 
 function readClaudeSetupToken(home: string):

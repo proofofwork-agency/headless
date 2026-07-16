@@ -69,7 +69,7 @@ export function classifyAdapterFailure(input: {
   if (/(?:approval (?:is )?required|requires? approval|permission request|tool (?:use )?awaiting approval|not approved|user rejected permission)/i.test(evidence)) {
     return { code: "APPROVAL_REQUIRED", retryable: false, status: "blocked" };
   }
-  if (input.authMode === "native-login" && /(?:not logged in|please (?:log|sign) in|login required|authentication (?:is )?(?:required|unavailable|failed)|unauthori[sz]ed|invalid (?:oauth|auth|credential)|(?:oauth|credential|access token).*(?:missing|expired|unavailable))/i.test(evidence)) {
+  if (input.authMode === "native-login" && /(?:not (?:logged|signed) in|please (?:log|sign) in|login required|authentication (?:is )?(?:required|unavailable|failed)|unauthori[sz]ed|invalid (?:oauth|auth|credential)|(?:oauth|credential|access token).*(?:missing|expired|unavailable))/i.test(evidence)) {
     return { code: "NATIVE_AUTH_UNAVAILABLE", retryable: false, status: "blocked" };
   }
   if ((input.malformedEvents ?? 0) > 0 && input.error) {

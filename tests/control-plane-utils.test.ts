@@ -79,6 +79,12 @@ describe("adapter failure classification", () => {
     })).toEqual({ code: "NATIVE_AUTH_UNAVAILABLE", retryable: false, status: "blocked" });
     expect(classifyAdapterFailure({
       authMode: "native-login",
+      error: "Not signed in. Run grok login --device-auth.",
+      output: "",
+      stderr: "",
+    })).toEqual({ code: "NATIVE_AUTH_UNAVAILABLE", retryable: false, status: "blocked" });
+    expect(classifyAdapterFailure({
+      authMode: "native-login",
       error: "Tool use awaiting approval.",
       output: "",
       stderr: "",
