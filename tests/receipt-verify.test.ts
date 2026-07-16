@@ -30,7 +30,21 @@ describe("receipt verification", () => {
     expect(verifyReceiptSelfDigest(tampered)).toEqual({
       ok: false,
       failingSection: "result",
-      reason: "Receipt self-digest mismatch in section result.",
+      reason: "Receipt section digest mismatch in section result.",
+    });
+  });
+
+  test("rejects doctored section digests even when the body self-digest is intact", () => {
+    const { receipt } = fixture();
+    const tampered = {
+      ...receipt,
+      sectionDigests: { ...receipt.sectionDigests, result: "f".repeat(64) },
+    } as Receipt;
+
+    expect(verifyReceiptSelfDigest(tampered)).toEqual({
+      ok: false,
+      failingSection: "result",
+      reason: "Receipt section digest mismatch in section result.",
     });
   });
 

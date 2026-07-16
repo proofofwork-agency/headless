@@ -92,6 +92,8 @@ type ReadCache = {
   events: LedgerRecordV2[];
   seenEventIds: string[];
   prefixSha256: string | null;
+  /** Once true, every later live record must remain HMAC-signed. */
+  hmacSeen: boolean;
 };
 
 export type LedgerV2Options = {
@@ -297,6 +299,7 @@ export class LedgerV2 {
     if (!this.fullEvents) {
       this.fullEvents = scanVerifiedLedger(this.ledgerPath, this.projectId, this.integrityKeys);
       this.exactEventIndex = new Map(this.fullEvents.map((record) => [record.eventId, record]));
+      this.cache.hmacSeen = this.fullEvents.some((record) => record.integrity.algorithm === "hmac-sha256");
     }
     return [...this.fullEvents];
   }
@@ -372,6 +375,10 @@ export class LedgerV2 {
         throw new LedgerV2IntegrityError(`Invalid v2 ledger record after sequence ${this.cache.lastSequence}: ${messageOf(error)}`);
       }
       verifyRecord(record, this.cache.lastSequence + 1, this.cache.lastHash, this.projectId, this.integrityKeys);
+      if (this.cache.hmacSeen && record.integrity.algorithm === "sha256") {
+        throw new LedgerV2IntegrityError(`Refusing unsigned SHA downgrade at sequence ${record.sequence}.`, record.sequence);
+      }
+      if (record.integrity.algorithm === "hmac-sha256") this.cache.hmacSeen = true;
       this.cache.lastSequence = record.sequence;
       this.cache.lastHash = record.hash;
       if (seen.has(record.eventId)) continue;
@@ -396,12 +403,19 @@ export class LedgerV2 {
 
   private ensureExactEventIndex() {
     if (this.exactEventIndex) return this.exactEventIndex;
-    const index = scanVerifiedLedgerPrefixIndex(
+    const prefix = scanVerifiedLedgerPrefixIndex(
       this.ledgerPath,
       this.projectId,
       this.integrityKeys,
       this.cache.lastSequence,
     );
+    if (prefix.hmacSeen !== this.cache.hmacSeen) {
+      throw new LedgerV2IntegrityError(
+        `Ledger HMAC prefix state mismatch at sequence ${this.cache.lastSequence}.`,
+        this.cache.lastSequence || undefined,
+      );
+    }
+    const index = prefix.index;
     if (index.size !== this.cache.eventCount) {
       throw new LedgerV2IntegrityError(
         `Ledger event index mismatch at sequence ${this.cache.lastSequence}: expected ${this.cache.eventCount} unique events, got ${index.size}.`,
@@ -952,6 +966,7 @@ function emptyReadCache(): ReadCache {
     events: [],
     seenEventIds: [],
     prefixSha256: null,
+    hmacSeen: false,
   };
 }
 
@@ -967,6 +982,7 @@ function cloneReadCache(cache: ReadCache): ReadCache {
     events: [...cache.events],
     seenEventIds: [...cache.seenEventIds],
     prefixSha256: cache.prefixSha256,
+    hmacSeen: cache.hmacSeen,
   };
 }
 
@@ -984,6 +1000,7 @@ function loadReadCache(path: string): ReadCache {
       events: z.array(LedgerRecordV2Schema).max(MAX_CACHED_EVENTS),
       seenEventIds: z.array(z.string().uuid()).max(MAX_CACHED_EVENT_IDS),
       prefixSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+      hmacSeen: z.boolean().default(false),
     }).strict().parse(safeJsonParse(readFileSync(path, "utf8")));
   } catch {
     return emptyReadCache();
@@ -1012,7 +1029,8 @@ function cachedPrefixMatches(ledgerPath: string, cache: ReadCache, projectId: st
     return cache.lastSequence === 0
       && cache.lastHash === null
       && cache.eventCount === 0
-      && cache.events.length === 0;
+      && cache.events.length === 0
+      && !cache.hmacSeen;
   }
   const stat = fileStat(ledgerPath);
   if (cache.offset > stat.size || !cache.prefixSha256) return false;
@@ -1032,7 +1050,9 @@ function cachedPrefixMatches(ledgerPath: string, cache: ReadCache, projectId: st
     }
     const tail = readCachedPrefixTail(ledgerPath, cache.offset, Buffer.byteLength(cache.partial));
     if (!tail) return false;
-    return tail.sequence === cache.lastSequence && tail.hash === cache.lastHash;
+    return tail.sequence === cache.lastSequence
+      && tail.hash === cache.lastHash
+      && cache.hmacSeen === (tail.integrity?.algorithm === "hmac-sha256");
   } catch {
     return false;
   }
@@ -1097,11 +1117,12 @@ function scanVerifiedLedgerPrefixIndex(
   expectedSequence: number,
 ) {
   const index = new Map<string, LedgerRecordV2>();
-  if (expectedSequence === 0) return index;
+  if (expectedSequence === 0) return { index, hmacSeen: false };
   if (!existsSync(path)) throw new LedgerV2IntegrityError(`Ledger ended before sequence ${expectedSequence}.`);
   const lines = readFileSync(path, "utf8").split("\n");
   let sequence = 0;
   let previousHash: string | null = null;
+  let hmacSeen = false;
   for (const line of lines) {
     if (sequence === expectedSequence) break;
     if (!line.trim()) continue;
@@ -1115,6 +1136,10 @@ function scanVerifiedLedgerPrefixIndex(
       throw new LedgerV2IntegrityError(`Invalid v2 ledger record after sequence ${sequence}: ${messageOf(error)}`);
     }
     verifyRecord(record, sequence + 1, previousHash, projectId, keys);
+    if (hmacSeen && record.integrity.algorithm === "sha256") {
+      throw new LedgerV2IntegrityError(`Refusing unsigned SHA downgrade at sequence ${record.sequence}.`, record.sequence);
+    }
+    if (record.integrity.algorithm === "hmac-sha256") hmacSeen = true;
     sequence = record.sequence;
     previousHash = record.hash;
     if (!index.has(record.eventId)) index.set(record.eventId, record);
@@ -1122,7 +1147,7 @@ function scanVerifiedLedgerPrefixIndex(
   if (sequence !== expectedSequence) {
     throw new LedgerV2IntegrityError(`Ledger ended at sequence ${sequence}, before indexed prefix ${expectedSequence}.`);
   }
-  return index;
+  return { index, hmacSeen };
 }
 
 function writePrivateJson(path: string, value: unknown) {

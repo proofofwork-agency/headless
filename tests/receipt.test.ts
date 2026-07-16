@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerBackendDefinition, unregisterBackendDefinition, type BackendDefinition } from "../src/backends/registry";
+import { RECEIPT_POLICY_REASON_MAX, RECEIPT_PREVIEW_MAX } from "../src/contracts/receipt";
 import type { Job } from "../src/contracts/durable";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
@@ -103,6 +104,60 @@ describe("terminal execution receipts", () => {
       projectId: daemon.state.projectId,
       ...ledgerIntegrityOptionsFromEnv(fixture.state.env),
     })).toMatchObject({ ok: true });
+  });
+
+  test("stores and anchors receipts whose output exceeds the preview bound", async () => {
+    const fixture = createFixture();
+    const { daemon, client } = await startFixture(fixture);
+    const completed = await run(client, fixture.backend, "x".repeat(RECEIPT_PREVIEW_MAX + 1_000));
+
+    expect(completed.result?.status).toBe("succeeded");
+    expect(completed.result!.output.length).toBeGreaterThan(RECEIPT_PREVIEW_MAX);
+    const receipt = new ReceiptStore(daemon.state.receiptsDir).get(completed.id);
+    expect(receipt, JSON.stringify(listRuntimeDiagnostics())).not.toBeNull();
+    expect(receipt!.body.request.prompt.preview.length).toBeLessThanOrEqual(RECEIPT_PREVIEW_MAX);
+    expect(receipt!.body.result.output.preview.length).toBeLessThanOrEqual(RECEIPT_PREVIEW_MAX);
+    expect(readFileSync(daemon.state.ledgerPath, "utf8")).toContain(RECEIPT_ANCHOR_ARTIFACT_KIND);
+  });
+
+  test("hard-bounds an oversized preview carrying an existing truncation marker", async () => {
+    const fixture = createFixture();
+    const { daemon, client } = await startFixture(fixture);
+    const alreadyTruncated = `${"y".repeat(RECEIPT_PREVIEW_MAX + 1_000)}\n[TRUNCATED 1000 chars]`;
+    const completed = await run(client, fixture.backend, alreadyTruncated);
+
+    expect(completed.result?.status).toBe("succeeded");
+    const receipt = new ReceiptStore(daemon.state.receiptsDir).get(completed.id);
+    expect(receipt, JSON.stringify(listRuntimeDiagnostics())).not.toBeNull();
+    expect(receipt!.body.request.prompt.preview.length).toBeLessThanOrEqual(RECEIPT_PREVIEW_MAX);
+    expect(receipt!.body.request.prompt.preview).toEndWith("[TRUNCATED]");
+  });
+
+  test("bounds a maximum-size policy reason after receipt redaction", async () => {
+    const fixture = createFixture();
+    const { daemon, client } = await startFixture(fixture);
+    const submitted = await client.call<Job>("run.submit", {
+      backend: fixture.backend,
+      prompt: "delay-policy-receipt",
+      containment: "unsafe",
+      authMode: "broker",
+      timeoutMs: 15_000,
+    });
+    const internal = daemon as unknown as { runEvents: RunEventStore };
+    internal.runEvents.append({ jobId: submitted.id, sessionId: null }, {
+      kind: "policy",
+      decision: "allowed",
+      rule: "maximum-policy-reason",
+      reason: "p".repeat(RECEIPT_POLICY_REASON_MAX),
+    });
+    const completed = await client.call<Job>("run.wait", { jobId: submitted.id, timeoutMs: 30_000 }, 35_000);
+
+    expect(completed.result?.status).toBe("succeeded");
+    const receipt = new ReceiptStore(daemon.state.receiptsDir).get(completed.id);
+    const policy = receipt?.body.policyTrail.find((entry) => entry.rule === "maximum-policy-reason");
+    expect(receipt, JSON.stringify(listRuntimeDiagnostics())).not.toBeNull();
+    expect(policy?.reason.length).toBeLessThanOrEqual(RECEIPT_POLICY_REASON_MAX);
+    expect(policy?.reason).toContain("TRUNCATED");
   });
 
   test("captures write authorization, bounded gates, and the integrated diff digest", async () => {
@@ -256,6 +311,7 @@ if (process.argv[2] === "--version") {
 }
 const mode = process.argv[2];
 const prompt = process.argv[3] ?? "";
+if (prompt === "delay-policy-receipt") await Bun.sleep(200);
 if (mode === "write") await Bun.write(join(process.cwd(), "receipt-change.txt"), "receipt write\\n");
 console.log("completed:" + prompt);
 `, { mode: 0o700 });

@@ -63,6 +63,12 @@ describe("v0.2 CLI contracts", () => {
     expect(parseCliInvocation(["tui"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "tui")! });
     expect(parseCliInvocation(["verify", "--evidence"])).toEqual({ kind: "command", spec: COMMAND_SPECS.find((spec) => spec.name === "verify")! });
     expect(parseCliInvocation(["exec", "--version", "--help"])).toEqual({ kind: "help" });
+    const execSpec = COMMAND_SPECS.find((spec) => spec.name === "exec")!;
+    expect(parseCliInvocation(["exec", "--", "--help"])).toEqual({ kind: "command", spec: execSpec });
+    expect(parseCliInvocation(["exec", "--", "--version"])).toEqual({ kind: "command", spec: execSpec });
+    expect(parseCliInvocation(["exec", "--", "-V"])).toEqual({ kind: "command", spec: execSpec });
+    expect(getPrompt(["exec", "--", "--help"])).toBe("--help");
+    expect(parseCliInvocation(["--help"])).toEqual({ kind: "help" });
     expect(parseCliInvocation(["missing"])).toEqual({ kind: "unknown", name: "missing" });
   });
 

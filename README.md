@@ -266,7 +266,6 @@ bun run smoke:pack
 
 cd website
 bun install --frozen-lockfile
-bun run typecheck
 bun run build
 ```
 

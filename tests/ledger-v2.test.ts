@@ -206,6 +206,49 @@ describe("ledger v2", () => {
     expect(() => verifierOnly.append("downgrade", { value: 4 })).toThrow(/Refusing to append an unsigned SHA record/i);
   });
 
+  test("refuses a directly-appended SHA downgrade in the live cache and on cache rebuild", () => {
+    const { ledgerPath, readModelPath, projectId, root } = fixture();
+    const hmacKey = "live-downgrade-key-material-0001";
+    const ledger = new LedgerV2({
+      ledgerPath,
+      readModelPath,
+      projectId,
+      principal: "test-principal",
+      hmacKeyring: { active: hmacKey },
+      activeHmacKeyId: "active",
+    });
+    const signed = ledger.append("signed", { value: 1 });
+    const withoutHash = {
+      version: 2 as const,
+      sequence: 2,
+      timestamp: Date.now(),
+      projectId,
+      principal: "test-principal",
+      eventId: crypto.randomUUID(),
+      previousHash: signed.hash,
+      integrity: { algorithm: "sha256" as const, keyId: null },
+      type: "forged-downgrade",
+      payload: { value: 2 },
+    };
+    const forged = {
+      ...withoutHash,
+      hash: createHash("sha256").update(JSON.stringify(withoutHash)).digest("hex"),
+    };
+    writeFileSync(ledgerPath, `${JSON.stringify(forged)}\n`, { flag: "a" });
+
+    expect(() => ledger.readRecent()).toThrow("Refusing unsigned SHA downgrade at sequence 2.");
+    expect(() => ledger.snapshot()).toThrow("Refusing unsigned SHA downgrade at sequence 2.");
+    rmSync(readModelPath, { force: true });
+    expect(() => new LedgerV2({
+      ledgerPath,
+      readModelPath: join(root, "rebuilt-read-model.json"),
+      projectId,
+      principal: "test-principal",
+      hmacKeyring: { active: hmacKey },
+      activeHmacKeyId: "active",
+    })).toThrow("Refusing unsigned SHA downgrade at sequence 2.");
+  });
+
   test("returns the first broken sequence for byte flips, gaps, and reordered records", () => {
     const { ledger, ledgerPath, projectId } = fixture();
     ledger.append("one", { value: 1 });

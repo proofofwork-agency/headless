@@ -1,6 +1,7 @@
 import type { ExecOptions } from "../index";
 import { GROK_HEADLESS_SYSTEM_PROMPT, GROK_READ_TOOLS, GROK_WRITE_TOOLS } from "../runtime/grok-isolation";
 import { GROK_BUILTIN_AGENT_NAMES, safeAgentName, safeOption } from "../runtime/validation";
+import { grokStopReasonFailed } from "../runtime/grok-stop-reason";
 import {
   appendText,
   collectText,
@@ -115,6 +116,12 @@ export function parseGrokJsonl(stdout: string): GrokJsonParseResult {
     } else if (event.type === "max_turns_reached") {
       // grok-build emits this then bails with exit 1 (headless.rs:1313-1318).
       errors.push("Grok reached its maximum turn limit before completing the turn.");
+    } else if (event.type === "end") {
+      const stopReason = stringValue(event.stop_reason) ?? stringValue(event.stopReason);
+      if (grokStopReasonFailed(stopReason)) {
+        errors.push(`Grok ended the turn without completion${stopReason ? ` (${stopReason})` : ""}.`);
+      }
+      collectText(event, text);
     } else if (event.type !== "error" && event.type !== "thought") {
       collectText(event, text);
     }

@@ -17,7 +17,11 @@ import { FinalityDecisionSchema, GrantSchema } from "./durable";
 export const Sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
 /** Upper bound on a redacted preview embedded in a receipt (the full bytes live in the run stores, not here). */
-const RECEIPT_PREVIEW_MAX = 4_096;
+export const RECEIPT_PREVIEW_MAX = 4_096;
+/** Upper bound on one redacted policy reason retained in a receipt. */
+export const RECEIPT_POLICY_REASON_MAX = 16_384;
+/** Upper bound on one redacted budget reason retained in a receipt. */
+export const RECEIPT_BUDGET_REASON_MAX = 4_096;
 /** Upper bound on retained policy-decision entries so a chatty run cannot unbound the receipt. */
 export const RECEIPT_POLICY_TRAIL_MAX = 256;
 /** Upper bound on gate-manifest entries retained in a receipt. */
@@ -77,7 +81,7 @@ const ReceiptResultSchema = z.object({
 const ReceiptPolicyEntrySchema = z.object({
   decision: z.enum(["allowed", "denied", "deferred"]),
   rule: z.string().max(256),
-  reason: z.string().max(16_384),
+  reason: z.string().max(RECEIPT_POLICY_REASON_MAX),
 }).strict();
 
 /**
@@ -159,7 +163,7 @@ const ReceiptGateEntrySchema = z.object({
 /** Budget outcome for the run. */
 const ReceiptBudgetSchema = z.object({
   passed: z.boolean(),
-  reasons: z.array(z.string().max(4_096)).max(128),
+  reasons: z.array(z.string().max(RECEIPT_BUDGET_REASON_MAX)).max(128),
   usage: TokenUsageSchema,
   cost: CostAttributionSchema,
   reservationId: IdentifierSchema.nullable(),

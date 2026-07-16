@@ -163,8 +163,10 @@ export type CliInvocation =
 export function parseCliInvocation(args: string[]): CliInvocation {
   const experimental = args[0] === "experimental";
   const name = experimental ? args[1] : args[0];
-  if (!name || name === "help" || args.includes("--help") || args.includes("-h")) return { kind: "help" };
-  if (args.includes("--version") || args.includes("-V")) return { kind: "version" };
+  const separator = args.indexOf("--");
+  const controlArgs = separator < 0 ? args : args.slice(0, separator);
+  if (!name || name === "help" || controlArgs.includes("--help") || controlArgs.includes("-h")) return { kind: "help" };
+  if (controlArgs.includes("--version") || controlArgs.includes("-V")) return { kind: "version" };
   const spec = resolveCommandSpec(name);
   if (!spec) return { kind: "unknown", name };
   return experimental || STABLE_COMMAND_NAMES.has(spec.name)

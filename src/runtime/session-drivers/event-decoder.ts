@@ -1,4 +1,5 @@
 import type { SessionBackend, SessionEventKind, SessionTokenUsage } from "./types";
+import { grokStopReasonFailed } from "../grok-stop-reason";
 
 export type DecodedSessionEvent = {
   stableId?: string | null;
@@ -297,17 +298,12 @@ export function decodeGrokEvent(value: Record<string, unknown>): DecodedSessionE
       costUsd,
       providerSequence: sequence,
     }));
-    const stopReason = firstString(value.stop_reason, value.stopReason)?.toLowerCase() ?? "";
-    // grok-build Debug-formats acp::StopReason into stopReason; these variants
-    // mean the turn did not complete usefully (Refusal, ContentFilter,
-    // Cancelled, ModelContextWindowExceeded) even though no error event fires.
-    const stopFailed = ["refusal", "contentfilter", "content_filter", "cancelled", "canceled", "modelcontextwindowexceeded"]
-      .some((marker) => stopReason.includes(marker));
+    const stopReason = firstString(value.stop_reason, value.stopReason) ?? "";
     events.push(decoded("completion", {
       stableId: turnId ? `turn:${turnId}:completed` : providerEventId(value),
       sessionId,
       turnId,
-      failed: value.ok === false || value.success === false || stopReason.includes("error") || stopReason.includes("fail") || stopFailed,
+      failed: value.ok === false || value.success === false || grokStopReasonFailed(stopReason),
       providerSequence: sequence,
     }));
     return events;

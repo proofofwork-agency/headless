@@ -295,20 +295,30 @@ export class HeadlessDaemon {
   private accept(socket: Socket) {
     this.sockets.add(socket);
     socket.once("close", () => this.sockets.delete(socket));
+    socket.once("error", () => {
+      this.sockets.delete(socket);
+      if (!socket.destroyed) socket.destroy();
+    });
     socket.setEncoding("utf8");
     let buffer = "";
+    let handled = false;
     socket.on("data", (chunk) => {
+      if (handled) return;
       buffer += chunk;
       if (Buffer.byteLength(buffer) > MAX_DAEMON_MESSAGE_BYTES) {
-        socket.destroy(new Error("Daemon request exceeded the message limit."));
+        handled = true;
+        socket.destroy();
         return;
       }
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        void this.respond(socket, line);
-      }
+      const line = lines.find((candidate) => candidate.trim());
+      if (!line) return;
+      // The daemon protocol is deliberately one request per connection. Do
+      // not dispatch pipelined lines that would race multiple half-closes.
+      handled = true;
+      buffer = "";
+      void this.respond(socket, line);
     });
   }
 
@@ -318,7 +328,7 @@ export class HeadlessDaemon {
       request = DaemonRequestSchema.parse(safeJsonParse(line));
     } catch (error) {
       const validation = error instanceof ZodError;
-      socket.end(`${JSON.stringify(failure(crypto.randomUUID(), error, {
+      endSocketResponse(socket, `${JSON.stringify(failure(crypto.randomUUID(), error, {
         code: "INVALID_REQUEST",
         safeMessage: validation ? validationErrorMessage(error) : messageOf(error),
         details: validation ? validationErrorDetails(error) : undefined,
@@ -326,16 +336,16 @@ export class HeadlessDaemon {
       return;
     }
     if (!this.ready) {
-      socket.end(`${JSON.stringify(failure(request.id, new HeadlessError("DAEMON_UNAVAILABLE", "Daemon is still acquiring or releasing project ownership.", { retryable: true })))}\n`);
+      endSocketResponse(socket, `${JSON.stringify(failure(request.id, new HeadlessError("DAEMON_UNAVAILABLE", "Daemon is still acquiring or releasing project ownership.", { retryable: true })))}\n`);
       return;
     }
     const credential = this.credentials.authenticate(request.token);
     if (!credential) {
-      socket.end(`${JSON.stringify(failure(request.id, new HeadlessError("DAEMON_AUTH_FAILED", "Daemon authentication failed.")))}\n`);
+      endSocketResponse(socket, `${JSON.stringify(failure(request.id, new HeadlessError("DAEMON_AUTH_FAILED", "Daemon authentication failed.")))}\n`);
       return;
     }
     if (credential.kind === "observer" && request.method !== "ping" && !request.method.startsWith("observer.")) {
-      socket.end(`${JSON.stringify(failure(request.id, new HeadlessError("POLICY_DENIED", "Observer credentials are read-only and may only use observer operations.")))}\n`);
+      endSocketResponse(socket, `${JSON.stringify(failure(request.id, new HeadlessError("POLICY_DENIED", "Observer credentials are read-only and may only use observer operations.")))}\n`);
       return;
     }
     if (credential.kind === "integration" && credential.id.startsWith("integration:lead-")) {
@@ -345,12 +355,12 @@ export class HeadlessDaemon {
           throw new HeadlessError("POLICY_DENIED", "The configured foreground lead must attach before changing project state.");
         }
       } catch (error) {
-        socket.end(`${JSON.stringify(failure(request.id, error))}\n`);
+        endSocketResponse(socket, `${JSON.stringify(failure(request.id, error))}\n`);
         return;
       }
     }
     if (request.method.startsWith("session.") && !this.enableExperimentalSessions) {
-      socket.end(`${JSON.stringify(failure(
+      endSocketResponse(socket, `${JSON.stringify(failure(
         request.id,
         new HeadlessError(
           "BACKEND_UNSUPPORTED",
@@ -361,7 +371,7 @@ export class HeadlessDaemon {
     }
     try {
       const result = await dispatchDaemonRoute(this.routeHandlers, request.method, request.params, credential);
-      socket.end(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: request.id, ok: true, result } satisfies DaemonResponse)}\n`);
+      endSocketResponse(socket, `${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: request.id, ok: true, result } satisfies DaemonResponse)}\n`);
     } catch (error) {
       const fallback = error instanceof ZodError || error instanceof TypeError
         ? {
@@ -370,7 +380,7 @@ export class HeadlessDaemon {
             details: error instanceof ZodError ? validationErrorDetails(error) : undefined,
           }
         : { code: "INTERNAL_ERROR" as const, safeMessage: "The daemon could not complete the request." };
-      socket.end(`${JSON.stringify(failure(request.id, error, fallback))}\n`);
+      endSocketResponse(socket, `${JSON.stringify(failure(request.id, error, fallback))}\n`);
     }
   }
 
@@ -1436,6 +1446,11 @@ function socketAcceptsConnections(path: string) {
     socket.once("error", () => done(false));
     socket.setTimeout(500, () => done(false));
   });
+}
+
+function endSocketResponse(socket: Socket, response: string) {
+  if (socket.destroyed || socket.writableEnded) return;
+  socket.end(response);
 }
 
 async function waitForExecutions(executions: Set<Promise<void>>, timeoutMs: number) {

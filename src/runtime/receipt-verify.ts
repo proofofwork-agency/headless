@@ -43,17 +43,21 @@ export type ReceiptVerificationVerdict = {
 
 /** Recompute the receipt root digest, localizing a mismatch to its first body section. */
 export function verifyReceiptSelfDigest(receipt: Receipt): ReceiptSelfDigestVerdict {
-  if (receiptSelfDigest(receipt.body) === receipt.integrity.selfDigest) return { ok: true };
   const actualSections = receiptSectionDigests(receipt.body);
   const failingSection = RECEIPT_SECTIONS.find(
     (section) => actualSections[section] !== receipt.sectionDigests[section],
   );
+  if (failingSection) {
+    return {
+      ok: false,
+      failingSection,
+      reason: `Receipt section digest mismatch in section ${failingSection}.`,
+    };
+  }
+  if (receiptSelfDigest(receipt.body) === receipt.integrity.selfDigest) return { ok: true };
   return {
     ok: false,
-    ...(failingSection ? { failingSection } : {}),
-    reason: failingSection
-      ? `Receipt self-digest mismatch in section ${failingSection}.`
-      : "Receipt self-digest mismatch.",
+    reason: "Receipt self-digest mismatch.",
   };
 }
 

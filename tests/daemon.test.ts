@@ -2,8 +2,10 @@ import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from "
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createConnection } from "node:net";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { HeadlessDaemonClient } from "../src/daemon/client";
+import { DAEMON_PROTOCOL_VERSION, MAX_DAEMON_MESSAGE_BYTES } from "../src/daemon/protocol";
 import { connectLeadDaemon, connectOrStartDaemon } from "../src/daemon/connect";
 import { BudgetSchema, type Job, type Task } from "../src/contracts/durable";
 import type { DurableSession } from "../src/contracts/durable";
@@ -252,6 +254,47 @@ describe("authenticated project daemon", () => {
     const attacker = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "z".repeat(48) });
 
     await expect(attacker.call("ping")).rejects.toMatchObject({ code: "DAEMON_AUTH_FAILED" });
+  });
+
+  test("survives an oversized pre-auth socket request", async () => {
+    const fixture = createFixture();
+    const token = "a".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token });
+    daemons.push(daemon);
+    await daemon.start();
+
+    await rawDaemonExchange(daemon.state.socketPath, "x".repeat(MAX_DAEMON_MESSAGE_BYTES + 1), true);
+
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
+    expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
+  });
+
+  test("answers only the first pipelined request and remains available", async () => {
+    const fixture = createFixture();
+    const token = "a".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token });
+    daemons.push(daemon);
+    await daemon.start();
+    const firstId = crypto.randomUUID();
+    const secondId = crypto.randomUUID();
+    const request = (id: string) => JSON.stringify({
+      version: DAEMON_PROTOCOL_VERSION,
+      id,
+      token,
+      method: "ping",
+      params: {},
+    });
+
+    const output = await rawDaemonExchange(
+      daemon.state.socketPath,
+      `${request(firstId)}\n${request(secondId)}\n`,
+    );
+    const responses = output.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toMatchObject({ id: firstId, ok: true });
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
+    expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
   });
 
   test("keeps persistent execution routes disabled unless explicitly enabled", async () => {
@@ -1496,6 +1539,29 @@ function createFixture() {
   mkdirSync(bin);
   process.env.PATH = `${bin}:${originalPath}`;
   return { root, project, bin, state: { env: { ...process.env, HEADLESS_STATE_HOME: stateHome } } };
+}
+
+function rawDaemonExchange(path: string, payload: string, allowReset = false) {
+  return new Promise<string>((resolve, reject) => {
+    const socket = createConnection(path);
+    let output = "";
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error("Timed out waiting for raw daemon socket.")), 5_000);
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error && !allowReset) reject(error);
+      else resolve(output);
+    };
+    socket.setEncoding("utf8");
+    socket.once("connect", () => socket.write(payload));
+    socket.on("data", (chunk) => { output += chunk; });
+    socket.once("end", () => finish());
+    socket.once("close", () => finish());
+    socket.once("error", (error) => finish(error));
+  });
 }
 
 async function waitForPath(path: string, timeoutMs: number) {

@@ -72,7 +72,7 @@ An unkeyed chain detects accidental or unaudited modification but can be recompu
 
 The stable `headless verify` command performs an auditor-requested full-chain scan and exits non-zero at the first sequence, previous-hash, project, digest, key, or HMAC-downgrade break. Opt-in release-evidence smokes atomically write provenance-bearing JSON, hash those exact bytes, and record the relative path and digest through authenticated `ledger.artifact`; `headless verify --evidence` additionally compares each current file with its latest durable anchor. The file does not contain its ledger receipt, avoiding a circular digest.
 
-Execution receipts are assembled and ledger-anchored for every terminal read-only and write run by default. `HEADLESS_RECEIPTS=off` disables that evidence path only for operator recovery; using it weakens the independently verifiable proof for every run completed while it is set.
+Execution receipts are assembled and ledger-anchored by default for every run that passes the execution-authorization checkpoint — read-only and write alike; a run denied at that checkpoint terminates without ever executing, and deliberately carries no receipt. `HEADLESS_RECEIPTS=off` disables that evidence path only for operator recovery; using it weakens the independently verifiable proof for every run completed while it is set.
 
 The same-user operator can read or modify external state and daemon credentials. Filesystem modes prevent access by other users, not by malware already running as the owner.
 
