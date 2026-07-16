@@ -67,7 +67,7 @@ import { TaskStore } from "./task-store";
 import { RunEventStore } from "./run-event-store";
 import { ReceiptStore } from "../runtime/receipt-store";
 import type { ReceiptProvenanceContext } from "../runtime/receipt-service";
-import { verifyReceipt as verifyStoredReceipt } from "../runtime/receipt-verify";
+import { ExportedReceiptSchema, verifyReceipt as verifyStoredReceipt } from "../runtime/receipt-verify";
 import { PersistentMessageQueue } from "../runtime/message-queue";
 import { CredentialStore, type AuthenticatedCredential } from "../runtime/credential-store";
 import { LeadBindingStore, leadCredentialName } from "../runtime/lead-binding";
@@ -1216,6 +1216,26 @@ export class HeadlessDaemon {
           ...ledgerIntegrityOptionsFromEnv(this.stateOptions?.env ?? process.env),
         });
       },
+      exportReceipt: (runId) => {
+        const receipt = this.receipts.get(runId);
+        if (!receipt) throw new HeadlessError("INVALID_REQUEST", `Unknown receipt: ${runId}`);
+        const records = this.ledger.readAllForVerification();
+        const anchorRecord = records.find((record) => record.sequence === receipt.integrity.ledgerAnchor.sequence);
+        if (!anchorRecord) {
+          throw new HeadlessError("INVALID_REQUEST", `Receipt anchor record ${receipt.integrity.ledgerAnchor.sequence} is missing for run ${runId}.`);
+        }
+        const verdict = verifyLedgerChain({ records, projectId: this.state.projectId, ...ledgerIntegrityOptionsFromEnv(this.stateOptions?.env ?? process.env) });
+        const ledgerHead = verdict.head ?? { sequence: anchorRecord.sequence, hash: anchorRecord.hash };
+        return ExportedReceiptSchema.parse({
+          receipt,
+          anchorRecord,
+          exportEnvelope: {
+            exportedAt: new Date().toISOString(),
+            exporterVersion: HEADLESS_VERSION,
+            ledgerHead: { sequence: ledgerHead.sequence, hash: ledgerHead.hash },
+          },
+        });
+      },
     });
   }
 
@@ -1335,6 +1355,7 @@ function leadMutationRequiresAttachment(method: DaemonRequest["method"]) {
     "receipt.get",
     "receipt.list",
     "receipt.verify",
+    "receipt.export",
     "messages.pull",
     "council.status",
     "workflow.status",

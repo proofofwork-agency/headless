@@ -32,4 +32,5 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | `loop` | Experimental | — | `experimental loop <start|list|status|pause|resume|cancel> --confirm [finite policy options]` |
 | `verify` | Beta 1 | — | `verify [--evidence] [--json] [--cwd dir]   Verify the tamper-evident ledger and optional evidence files.` |
 | `ledger` | Experimental | — | `experimental ledger <verify [--evidence] [--json] | repair-tail --confirm> [--cwd dir]` |
+| `receipt` | Experimental | — | `experimental receipt <show <runId> | list | export <runId> [--out file] | verify <runId> | verify --file export.json [--ledger ledger.jsonl] | diff <runIdA> <runIdB>> [--json] [--cwd dir]   Inspect, export, compare, and verify execution receipts.` |
 | `budget` | Experimental | — | `experimental budget <list|upsert|linked-hold inspect|linked-hold quarantine> [options] [--cwd dir]` |

@@ -16,6 +16,10 @@ export function receiptRouteHandlers(context: DaemonRouteContext): ReceiptFamili
         requireReceiptFor(context, params.runId, credential);
         return context.verifyReceipt(params.runId);
       },
+      "receipt.export": (params, credential) => {
+        requireReceiptFor(context, params.runId, credential);
+        return context.exportReceipt(params.runId);
+      },
     },
   };
 }

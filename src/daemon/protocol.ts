@@ -84,6 +84,7 @@ export const DaemonMethodSchema = z.enum([
   "receipt.get",
   "receipt.list",
   "receipt.verify",
+  "receipt.export",
   "messages.push",
   "messages.pull",
   "messages.markPushed",

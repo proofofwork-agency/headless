@@ -18,6 +18,7 @@ import { COMMAND_SPECS, resolveCommandSpec, type CliCommandName } from "./comman
 import { runSkillCommand } from "./commands/skill";
 import { runLoopCommand } from "./commands/loop";
 import { runLedgerCommand, runVerifyCommand } from "./commands/ledger";
+import { runReceiptCommand } from "./commands/receipt";
 import { runLeadCommand } from "./commands/lead";
 import { runBudgetCommand } from "./commands/budget";
 import { UNIFIED_COMMAND_REGISTRY } from "../command-registry";
@@ -55,6 +56,7 @@ const handlers = {
   lead: runLeadCommand,
   budget: runBudgetCommand,
   verify: runVerifyCommand,
+  receipt: runReceiptCommand,
 } satisfies Record<CliCommandName, CliCommandHandler>;
 
 export const COMMAND_TABLE = new Map(UNIFIED_COMMAND_REGISTRY.cli.map(({ source: spec }) => [spec.name, {
