@@ -3,6 +3,7 @@ import { getProvider } from "../broker/providers";
 import type { BrokerLeaseCarve, BrokerLeaseScope, BrokerLinkedTargetScope, ProviderBroker } from "../broker/server";
 import { getBackendDefinition, resolveBackendId } from "../backends/registry";
 import type { ApprovalRequest } from "../contracts/collaboration";
+import { SubmissionIdempotencyKeySchema } from "../contracts/common";
 import type { Job } from "../contracts/durable";
 import type { LinkedHoldRecord, LinkedHoldUsageProjection } from "../contracts/linked-hold";
 import { RunRequestSchema, type RunResult, type SerializedRunRequest } from "../contracts/run";
@@ -43,6 +44,7 @@ export type JobAdmissionServiceOptions = {
   authority: AuthorityStore;
   budgets: BudgetStore;
   broker: ProviderBroker;
+  env: Readonly<NodeJS.ProcessEnv>;
   activeLeadBackend: () => string | null;
   isStopping: () => boolean;
   execute: (jobId: string, request: SerializedRunRequest, controls: RunExecutionControls) => Promise<void>;
@@ -160,14 +162,14 @@ export class JobAdmissionService {
     if (!adapter) throw this.delegationDenied(parent, audit, `Unknown delegation backend: ${backend}.`);
     if (request.agent && !adapter.supportsNamedAgent) throw this.delegationDenied(parent, audit, `Backend ${backend} does not support named agents.`);
     if (request.agent) safeAgentName(request.agent, backend);
-    const parentProvider = providerForRequest(parentRequest);
-    const childProvider = providerForRequest(request);
+    const parentProvider = providerForRequest(parentRequest, this.options.env);
+    const childProvider = providerForRequest(request, this.options.env);
     if (adapter.security.strictAuth === "broker-api-key") {
       if (!request.model) throw this.delegationDenied(parent, audit, `Backend ${backend} requires an explicit broker-scoped model.`);
       const provider = childProvider ? getProvider(childProvider) : null;
-      if (!provider || !process.env[provider.credentialEnv]) throw this.delegationDenied(parent, audit, `Backend ${backend} has no daemon-broker credential.`);
+      if (!provider || !this.options.env[provider.credentialEnv]) throw this.delegationDenied(parent, audit, `Backend ${backend} has no daemon-broker credential.`);
     }
-    const estimate = estimateRequestResources(request);
+    const estimate = estimateRequestResources(request, this.options.env);
     const unpriced = request.authMode === "broker"
       && adapter.security.strictAuth === "broker-api-key"
       && estimate.cost.amountUsd === null
@@ -323,7 +325,9 @@ export class JobAdmissionService {
     if (this.activeJobs >= this.maxConcurrency || this.maxConcurrency === 1) {
       throw new HeadlessError("DELEGATION_CAPACITY_UNAVAILABLE", "No ordinary worker slot is immediately available for delegation.", { retryable: true });
     }
-    if (providerForRequest(currentRequest) !== parentProvider || providerForRequest(request) !== childProvider || parentProvider === childProvider) {
+    if (providerForRequest(currentRequest, this.options.env) !== parentProvider
+      || providerForRequest(request, this.options.env) !== childProvider
+      || parentProvider === childProvider) {
       throw this.delegationDenied(parent, audit, "Linked delegation provider identity changed during admission.");
     }
     if (resolveBackendId(currentParent.backend) === resolveBackendId(request.backend)) {
@@ -350,7 +354,7 @@ export class JobAdmissionService {
     }
     for (const providerId of [parentProvider, childProvider]) {
       const provider = getProvider(providerId);
-      if (!provider || !process.env[provider.credentialEnv]) {
+      if (!provider || !this.options.env[provider.credentialEnv]) {
         throw this.delegationDenied(parent, audit, `Provider ${providerId} has no daemon-broker credential.`);
       }
     }
@@ -487,7 +491,7 @@ export class JobAdmissionService {
     deadlineAt: number,
     replyMarginMs: number,
   ): BrokerLinkedTargetScope {
-    const providerId = providerForRequest(request);
+    const providerId = providerForRequest(request, this.options.env);
     const provider = providerId ? getProvider(providerId) : null;
     if (!providerId || !provider) throw new HeadlessError("AUTH_UNAVAILABLE", "Linked target provider is unavailable.");
     const limits = this.options.budgets.brokerLeaseLimits(childId);
@@ -624,11 +628,28 @@ export class JobAdmissionService {
       authMode: bound.authMode,
       approvalPolicy: bound.approvalPolicy,
     });
+    const idempotencyKey = SubmissionIdempotencyKeySchema.nullable().parse(bound.idempotencyKey ?? null);
     const adapter = getBackendDefinition(resolveBackendId(request.backend));
     if (request.agent && !adapter?.supportsNamedAgent) {
       throw new HeadlessError("BACKEND_UNSUPPORTED", `Backend ${request.backend} does not support named agents in contained Headless runs.`);
     }
     if (request.agent) safeAgentName(request.agent, request.backend);
+    if (idempotencyKey) {
+      const existing = this.options.jobs.findSubmission(principal, idempotencyKey);
+      if (existing) {
+        const existingRequest = this.options.jobs.request(existing.id);
+        if (!existingRequest || JSON.stringify(existingRequest) !== JSON.stringify(request)) {
+          throw new HeadlessError("CONFLICT", "The run submission idempotency key is already bound to a different normalized request.");
+        }
+        this.options.runEvents.append({ jobId: existing.id, sessionId: existing.sessionId }, {
+          kind: "policy",
+          decision: "allowed",
+          rule: "run-submit-idempotent-replay",
+          reason: "Returned the durable job already bound to this principal-scoped submission key.",
+        });
+        return existing;
+      }
+    }
     if (this.pendingJobs.length + this.waitingApprovalJobs.size >= this.maxQueued) {
       throw new HeadlessError(
         "QUEUE_CAPACITY_EXCEEDED",
@@ -646,6 +667,7 @@ export class JobAdmissionService {
       retryNumber: options.retryNumber ?? 0,
       councilId: options.councilId ?? null,
       councilSlot: options.councilSlot ?? null,
+      idempotencyKey,
     });
     return this.admitDurableJob(job, request, true);
   }
@@ -896,9 +918,9 @@ export class JobAdmissionService {
           `Backend ${request.backend} requires an explicit model so its broker lease can be model-scoped.`,
         ), "broker-auth");
       }
-      const providerId = providerForRequest(request);
+      const providerId = providerForRequest(request, this.options.env);
       const provider = providerId ? getProvider(providerId) : null;
-      if (!provider || !process.env[provider.credentialEnv]) {
+      if (!provider || !this.options.env[provider.credentialEnv]) {
         return this.completeAdmission(job, blockedResult(
           request,
           job.id,
@@ -907,7 +929,7 @@ export class JobAdmissionService {
         ), "broker-auth");
       }
     }
-    const estimate = estimateRequestResources(request);
+    const estimate = estimateRequestResources(request, this.options.env);
     const unpricedBrokerNeedsApproval = request.authMode === "broker"
       && adapter?.security.strictAuth === "broker-api-key"
       && estimate.cost.amountUsd === null
@@ -916,7 +938,7 @@ export class JobAdmissionService {
         principal: job.principal,
         sessionId: request.sessionId ?? null,
         workflowId: job.workflowId,
-        provider: providerForRequest(request),
+        provider: providerForRequest(request, this.options.env),
       });
     if (unpricedBrokerNeedsApproval) {
       const approval = this.unpricedBrokerApproval(job, request);
@@ -954,7 +976,7 @@ export class JobAdmissionService {
       principal: job.principal,
       sessionId: request.sessionId ?? null,
       workflowId: job.workflowId,
-      provider: providerForRequest(request),
+      provider: providerForRequest(request, this.options.env),
       inputTokens: estimate.inputTokens,
       outputTokens: estimate.outputTokens,
       costUsd: estimate.cost.amountUsd,
@@ -1440,7 +1462,7 @@ export function jobDeadlineAt(job: Job, request: SerializedRunRequest) {
   return Math.min(Number.MAX_SAFE_INTEGER, job.createdAt + request.timeoutMs);
 }
 
-export function providerForRequest(request: SerializedRunRequest) {
+export function providerForRequest(request: SerializedRunRequest, env: Readonly<NodeJS.ProcessEnv> = process.env) {
   if (request.authMode === "native-login") return null;
   const adapter = getBackendDefinition(request.backend);
   if (adapter?.security.strictAuth === "credential-free") return null;
@@ -1453,14 +1475,14 @@ export function providerForRequest(request: SerializedRunRequest) {
   if (prefix === "openai") return "openai";
   for (const id of ["openai", "anthropic", "gemini", "xai"] as const) {
     const definition = getProvider(id);
-    if (definition && process.env[definition.credentialEnv]) return id;
+    if (definition && env[definition.credentialEnv]) return id;
   }
   return null;
 }
 
-export function estimateRequestResources(request: SerializedRunRequest) {
+export function estimateRequestResources(request: SerializedRunRequest, env: Readonly<NodeJS.ProcessEnv> = process.env) {
   return estimateRunCost({
-    provider: providerForRequest(request),
+    provider: providerForRequest(request, env),
     model: request.model,
     prompt: request.prompt,
   });

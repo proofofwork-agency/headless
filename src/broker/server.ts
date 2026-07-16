@@ -790,6 +790,9 @@ export class ProviderBroker {
     if (lease.provider !== providerId) return this.failure(lease, providerId, request, route, 403, "Broker token is scoped to a different provider.", started, 0);
     if (lease.revoked || lease.expiresAt <= Date.now()) return this.failure(lease, providerId, request, route, 401, "Broker token is expired or revoked.", started, 0);
     if (lease.requests >= lease.maxRequests) return this.failure(lease, providerId, request, route, 429, "Broker request budget exhausted.", started, 0);
+    if (/%(?:2f|5c|2e|25)/i.test(providerPath)) {
+      return this.failure(lease, providerId, request, route, 400, "Encoded provider path separators, dots, and percent signs are not allowed.", started, 0);
+    }
     if (!routeAllowed(provider, providerPath)) return this.failure(lease, providerId, request, route, 403, "Provider route is not allowed.", started, 0);
     const endpointClass = classifyEndpoint(providerPath);
     if (!endpointClass || !lease.endpointClasses.includes(endpointClass)) return this.failure(lease, providerId, request, route, 403, "Endpoint class is outside the lease scope.", started, 0);
@@ -1309,7 +1312,11 @@ function extractToken(request: Request, url: URL) {
 }
 
 function routeAllowed(provider: ProviderDefinition, path: string) {
-  return provider.routePrefixes.some((prefix) => path === prefix || path.startsWith(prefix));
+  return provider.routePrefixes.some((prefix) => (
+    path === prefix
+    || path.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`)
+    || path.startsWith(`${prefix}:`)
+  ));
 }
 
 function classifyEndpoint(path: string): BrokerLeaseScope["endpointClasses"][number] | null {

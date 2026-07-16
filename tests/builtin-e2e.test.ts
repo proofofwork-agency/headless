@@ -27,10 +27,10 @@ afterEach(async () => {
 
 describe("built-in backend end-to-end sessions", () => {
   test("runs contained one-shots and replay sessions for OpenCode, Claude, and Codex", async () => {
-    const fixture = createFixture();
-    installBuiltins(fixture.bin);
     process.env.OPENAI_API_KEY = "host-openai-secret";
     process.env.ANTHROPIC_API_KEY = "host-anthropic-secret";
+    const fixture = createFixture();
+    installBuiltins(fixture.bin);
     for (const [id, provider] of [[pricingIds[0], "openai"], [pricingIds[1], "anthropic"]] as const) {
       registerPricing({
         id,

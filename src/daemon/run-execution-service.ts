@@ -843,9 +843,9 @@ export class RunExecutionService {
     deadlineAt: number,
     grantCostLimitUsd: number | null,
   ) {
-    const providerId = providerForRequest(request);
+    const providerId = providerForRequest(request, this.options.stateOptions?.env ?? process.env);
     const provider = providerId ? getProvider(providerId) : null;
-    if (!providerId || !provider || !process.env[provider.credentialEnv]) return null;
+    if (!providerId || !provider || !(this.options.stateOptions?.env ?? process.env)[provider.credentialEnv]) return null;
     const models = modelScope(request.model, providerId);
     const limits = this.options.budgets.brokerLeaseLimits(jobId);
     const trustedPrice = request.model

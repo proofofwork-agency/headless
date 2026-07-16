@@ -193,7 +193,7 @@ async function setupFixture(withPricing: boolean, workerMaxOutputTokens = 10) {
   mkdirSync(project);
   mkdirSync(bin);
   process.env.PATH = `${bin}:${originalPath}`;
-  process.env.COST_TEST_KEY = "parent-only-secret";
+  delete process.env.COST_TEST_KEY;
 
   let calls = 0;
   const upstream = Bun.serve({
@@ -251,7 +251,7 @@ console.log(JSON.stringify({ type: "text", text: "priced result", usage: { input
 `, { mode: 0o700 });
   chmodSync(executable, 0o700);
 
-  const state = { env: { ...process.env, HEADLESS_STATE_HOME: join(root, "state") } };
+  const state = { env: { ...process.env, COST_TEST_KEY: "injected-parent-only-secret", HEADLESS_STATE_HOME: join(root, "state") } };
   const daemon = new HeadlessDaemon({ projectRoot: project, state, token: "a".repeat(48), principal: "coordinator" });
   daemons.push(daemon);
   await daemon.start();

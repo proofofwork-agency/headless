@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunRequestSchema } from "../src/contracts/run";
-import { DaemonMethodSchema, GoalStartParamsSchema, SessionCreateParamsSchema } from "../src/daemon/protocol";
+import { DaemonMethodSchema, GoalStartParamsSchema, RunSubmitParamsSchema, SessionCreateParamsSchema } from "../src/daemon/protocol";
 import { DAEMON_ROUTES, parseDaemonRouteParams } from "../src/daemon/routes";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { ProjectTrustStore } from "../src/runtime/project-trust-store";
@@ -29,6 +29,8 @@ describe("native-login control plane", () => {
     expect(RunRequestSchema.parse({ ...request, backend: "grok-build", agent: "review" }).agent).toBe("review");
     expect(() => RunRequestSchema.parse({ ...request, backend: "grok-build", agent: "custom" })).toThrow();
     expect(() => RunRequestSchema.parse({ ...request, backend: "opencode", agent: "agent.toml" })).toThrow();
+    expect(RunSubmitParamsSchema.parse({ backend: "codex", prompt: "inspect", idempotencyKey: " replay-1 " }).idempotencyKey).toBe("replay-1");
+    expect(() => RunRequestSchema.parse({ ...request, idempotencyKey: "replay-1" })).toThrow();
     expect(SessionCreateParamsSchema.parse({ backend: "grok-build", agent: "build" }).agent).toBe("build");
     expect(() => SessionCreateParamsSchema.parse({ backend: "grok-build", agent: "custom" })).toThrow();
   });

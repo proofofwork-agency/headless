@@ -5,6 +5,7 @@ import {
   IdentifierSchema,
   PositiveTimeoutSchema,
   RunModeSchema,
+  SubmissionIdempotencyKeySchema,
   StructuredErrorSchema,
   TimestampSchema,
 } from "../contracts/common";
@@ -185,6 +186,7 @@ export const RunSubmitParamsSchema = RunRequestObjectSchema.omit({
   containment: ContainmentRequirementSchema.optional(),
   authMode: AuthModeSchema.optional(),
   approvalPolicy: ApprovalPolicySchema.optional(),
+  idempotencyKey: SubmissionIdempotencyKeySchema.optional(),
 })
   .superRefine(backendAgentSelectionRefinement);
 

@@ -1064,6 +1064,7 @@ export class HeadlessDaemon {
       authority: this.authority,
       budgets: this.budgets,
       broker: this.broker,
+      env: this.stateOptions?.env ?? process.env,
       activeLeadBackend: () => this.leads.status()?.backendId ?? null,
       isStopping: () => this.stopping,
       execute: (jobId, request, controls) => this.runExecution.execute(jobId, request, controls),
