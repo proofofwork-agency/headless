@@ -24,7 +24,7 @@ import { JobStore } from "./job-store";
 import { ProviderBroker } from "../broker/server";
 import { getProvider } from "../broker/providers";
 import { PersistentSessionStore } from "../runtime/persistent-sessions";
-import { ledgerIntegrityOptionsFromEnv, repairLedgerPartialTail, verifyLedgerChain } from "../runtime/ledger-v2";
+import { LedgerV2, ledgerIntegrityOptionsFromEnv, repairLedgerPartialTail, verifyLedgerChain } from "../runtime/ledger-v2";
 import { NativeSessionManager } from "../runtime/native-session-manager";
 import { ProjectTrustStore } from "../runtime/project-trust-store";
 import { FleetProfileStore } from "../runtime/fleet-profile-store";
@@ -67,6 +67,7 @@ import { TaskStore } from "./task-store";
 import { RunEventStore } from "./run-event-store";
 import { ReceiptStore } from "../runtime/receipt-store";
 import type { ReceiptProvenanceContext } from "../runtime/receipt-service";
+import { verifyReceipt as verifyStoredReceipt } from "../runtime/receipt-verify";
 import { PersistentMessageQueue } from "../runtime/message-queue";
 import { CredentialStore, type AuthenticatedCredential } from "../runtime/credential-store";
 import { LeadBindingStore, leadCredentialName } from "../runtime/lead-binding";
@@ -130,6 +131,7 @@ export class HeadlessDaemon {
   private tasks!: TaskStore;
   private runEvents!: RunEventStore;
   private receipts!: ReceiptStore;
+  private ledger!: LedgerV2;
   private authority!: AuthorityStore;
   private budgets!: BudgetStore;
   private finality!: FinalityStore;
@@ -773,6 +775,13 @@ export class HeadlessDaemon {
     this.jobs = new JobStore(this.state.jobsDir);
     this.tasks = new TaskStore(this.state.tasksDir, { recoverOnOpen: false });
     this.runEvents = new RunEventStore(this.state.runEventsPath, { compactOnOpen: false });
+    this.ledger = new LedgerV2({
+      ledgerPath: this.state.ledgerPath,
+      readModelPath: this.state.readModelPath,
+      projectId: this.state.projectId,
+      principal: this.principal,
+      ...ledgerIntegrityOptionsFromEnv(this.stateOptions?.env ?? process.env),
+    });
     this.receipts = new ReceiptStore(this.state.receiptsDir);
     this.sessions = new PersistentSessionStore(this.state);
     this.nativeSessions = new NativeSessionManager(this.state.canonicalProjectRoot, this.sessions, {
@@ -1186,7 +1195,7 @@ export class HeadlessDaemon {
       verifyLedger: (evidence) => verifyLedgerChain({
         ledgerPath: this.state.ledgerPath,
         projectId: this.state.projectId,
-        ...ledgerIntegrityOptionsFromEnv(),
+        ...ledgerIntegrityOptionsFromEnv(this.stateOptions?.env ?? process.env),
         ...(evidence ? { evidenceRoot: this.state.canonicalProjectRoot } : {}),
       }),
       repairLedgerTail: (principal) => repairLedgerPartialTail({
@@ -1194,8 +1203,19 @@ export class HeadlessDaemon {
         readModelPath: this.state.readModelPath,
         projectId: this.state.projectId,
         principal,
-        ...ledgerIntegrityOptionsFromEnv(),
+        ...ledgerIntegrityOptionsFromEnv(this.stateOptions?.env ?? process.env),
       }),
+      getReceipt: (runId) => this.receipts.get(runId),
+      listReceipts: (opts) => this.receipts.list(opts),
+      verifyReceipt: (runId) => {
+        const receipt = this.receipts.get(runId);
+        if (!receipt) throw new HeadlessError("INVALID_REQUEST", `Unknown receipt: ${runId}`);
+        return verifyStoredReceipt({
+          receipt,
+          records: this.ledger.readAllForVerification(),
+          ...ledgerIntegrityOptionsFromEnv(this.stateOptions?.env ?? process.env),
+        });
+      },
     });
   }
 
@@ -1312,6 +1332,9 @@ function leadMutationRequiresAttachment(method: DaemonRequest["method"]) {
     "task.list",
     "ledger.context",
     "ledger.task",
+    "receipt.get",
+    "receipt.list",
+    "receipt.verify",
     "messages.pull",
     "council.status",
     "workflow.status",

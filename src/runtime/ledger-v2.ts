@@ -301,6 +301,37 @@ export class LedgerV2 {
     return [...this.fullEvents];
   }
 
+  /**
+   * Strictly decode every persisted record without trusting its hash. Receipt
+   * verification feeds this untrusted enumeration back through
+   * `verifyLedgerChain`, so a syntactically valid byte flip becomes a
+   * structured integrity verdict instead of an RPC exception.
+   */
+  readAllForVerification() {
+    if (!existsSync(this.ledgerPath)) return [];
+    const lines = readFileSync(this.ledgerPath, "utf8").split("\n");
+    const partial = lines.pop() ?? "";
+    const records: LedgerRecordV2[] = [];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      if (Buffer.byteLength(line) > MAX_LEDGER_EVENT_BYTES) {
+        throw new LedgerV2IntegrityError(`Ledger line exceeds ${MAX_LEDGER_EVENT_BYTES} bytes.`, records.length + 1);
+      }
+      try {
+        records.push(LedgerRecordV2Schema.parse(safeJsonParse(line)));
+      } catch (error) {
+        throw new LedgerV2IntegrityError(
+          `Invalid v2 ledger record after sequence ${records.length}: ${messageOf(error)}`,
+          records.length + 1,
+        );
+      }
+    }
+    if (partial.length > 0) {
+      throw new LedgerV2IntegrityError("Ledger ends with an incomplete JSON line.", records.length + 1);
+    }
+    return records;
+  }
+
   readRecent(limit = 40) {
     if (!Number.isSafeInteger(limit) || limit < 0) throw new TypeError("Ledger read limit must be a non-negative safe integer.");
     const events = this.refresh();

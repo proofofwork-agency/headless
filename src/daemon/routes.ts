@@ -27,6 +27,8 @@ import {
   LedgerRepairTailParamsSchema,
   LedgerTaskParamsSchema,
   LedgerVerifyParamsSchema,
+  ReceiptListParamsSchema,
+  ReceiptRunParamsSchema,
   MessagesMarkPushedParamsSchema,
   MessagesPullParamsSchema,
   MessagesPushParamsSchema,
@@ -74,6 +76,7 @@ export type DaemonRouteFamily =
   | "events"
   | "task"
   | "ledger"
+  | "receipt"
   | "messages"
   | "council"
   | "workflow"
@@ -176,6 +179,9 @@ export const DAEMON_ROUTES = {
   "ledger.event": route("ledger.event", LedgerEventParamsSchema, "ledger:write", "ledger"),
   "ledger.verify": route("ledger.verify", LedgerVerifyParamsSchema, "ledger:read", "ledger"),
   "ledger.repairTail": route("ledger.repairTail", LedgerRepairTailParamsSchema, "admin", "ledger"),
+  "receipt.get": route("receipt.get", ReceiptRunParamsSchema, "ledger:read", "receipt"),
+  "receipt.list": route("receipt.list", ReceiptListParamsSchema, "ledger:read", "receipt"),
+  "receipt.verify": route("receipt.verify", ReceiptRunParamsSchema, "ledger:read", "receipt"),
   "messages.push": route("messages.push", MessagesPushParamsSchema, "messages", "messages"),
   "messages.pull": route("messages.pull", MessagesPullParamsSchema, "messages", "messages"),
   "messages.markPushed": route("messages.markPushed", MessagesMarkPushedParamsSchema, "messages", "messages"),
