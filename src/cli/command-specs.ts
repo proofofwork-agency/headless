@@ -34,8 +34,8 @@ export const COMMAND_SPECS = [
   },
   {
     name: "fleet",
-    valueFlags: ["--profile-id", "--file", "--auth-mode", "--approval-policy", "--cwd", "--extension-config", "--extension-module"],
-    help: "fleet <health|profile get|list|remove> [--profile-id id] | fleet profile upsert [--file profile.json | [--profile-id id] --auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate]",
+    valueFlags: ["--profile-id", "--agent", "--file", "--auth-mode", "--approval-policy", "--cwd", "--extension-config", "--extension-module"],
+    help: "fleet <health|profile get|list|remove> [--profile-id id] | fleet profile create --profile-id id --agent backend [--agent backend ...] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate] | fleet profile upsert [--file profile.json | [--profile-id id] --auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate]",
   },
   {
     name: "goal",

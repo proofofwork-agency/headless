@@ -33,32 +33,25 @@ headless project trust grant \
 
 ## 2. Create a native-login fleet profile
 
-The nested agents matter; set `authMode` on each one:
+The inline constructor applies the selected mode to the profile and every
+generated agent:
 
 ```bash
-cat > /tmp/headless-native-fleet.json <<'JSON'
-{
-  "id": "native-subscriptions",
-  "name": "Native subscription fleet",
-  "authMode": "native-login",
-  "approvalPolicy": "ask",
-  "agents": [
-    {"id": "codex", "backend": "codex", "name": "Codex", "authMode": "native-login"},
-    {"id": "opencode", "backend": "opencode", "name": "OpenCode", "authMode": "native-login"},
-    {"id": "claude", "backend": "claude-code", "name": "Claude", "authMode": "native-login"},
-    {"id": "grok", "backend": "grok-build", "name": "Grok", "authMode": "native-login"}
-  ]
-}
-JSON
-
-headless experimental fleet profile upsert \
-  --file /tmp/headless-native-fleet.json \
+headless experimental fleet profile create \
+  --profile-id native-subscriptions \
+  --agent codex \
+  --agent opencode \
+  --agent claude \
+  --agent grok \
   --auth-mode native-login \
+  --approval-policy ask \
+  --activate \
   --cwd "$PROJECT"
 ```
 
-The top-level `--auth-mode` is intentional, but it does not repair a nested
-agent explicitly configured as broker. Keep both levels aligned.
+For hand-authored JSON, the nested agents still matter: keep their `authMode`
+aligned with the top-level mode. A later top-level-only file edit does not
+repair an agent explicitly left in broker mode.
 
 ## 3. Verify the actual readiness evidence
 

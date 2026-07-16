@@ -393,11 +393,21 @@ reason; missing native consent is `trust_required`. See
 [Understand “login required”](../troubleshooting/login-required.md).
 
 ```bash
+headless experimental fleet profile create \
+  --profile-id opencode-assistants \
+  --agent codex \
+  --agent grok \
+  --auth-mode native-login \
+  --approval-policy ask \
+  --activate
 headless experimental fleet profile upsert --file fleet.json --activate
 headless experimental fleet profile list
 ```
 
 Expected: the stored profile echoed as JSON, then listed together with the
-active profile id. `--file` creates or replaces a profile; without `--file`,
-`--auth-mode` / `--approval-policy` patch the active profile (top level and
-every agent). `fleet profile get|remove --profile-id <id>` complete the set.
+active profile id. `profile create` builds a complete profile from repeated
+`--agent` values, canonicalizes built-in aliases such as `grok`, and applies
+the selected auth and approval mode to the profile and every generated agent.
+`--file` creates or replaces a full profile; without `--file`, `profile upsert`
+uses `--auth-mode` / `--approval-policy` to patch the active profile (top level
+and every agent). `fleet profile get|remove --profile-id <id>` complete the set.

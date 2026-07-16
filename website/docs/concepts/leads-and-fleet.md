@@ -47,6 +47,7 @@ Once bound, the lead's MCP surface includes `headless_run` for one bounded serva
 A fleet profile describes the servants: worker backends, optional models, authentication and approval modes, bounds, and idle-autonomy policy. Profiles are managed through the experimental CLI:
 
 ```bash
+headless experimental fleet profile create --profile-id assistants --agent codex --agent grok --auth-mode native-login --approval-policy ask --activate --cwd "$PROJECT"
 headless experimental fleet profile upsert --file profile.json --activate --cwd "$PROJECT"
 headless experimental fleet profile upsert --profile-id subs --auth-mode native-login --approval-policy ask --cwd "$PROJECT"
 headless experimental fleet profile list --cwd "$PROJECT"
@@ -54,7 +55,9 @@ headless experimental fleet profile get --profile-id subs --cwd "$PROJECT"
 headless experimental fleet profile remove --profile-id subs --cwd "$PROJECT"
 ```
 
-`--auth-mode` selects `native-login` or `broker` for the profile, `--approval-policy` selects `ask`, `auto`, or `bypass`, and `--activate`/`--no-activate` controls whether the upserted profile becomes the active one.
+`profile create` is the concise constructor for the common case: repeat `--agent` for each worker backend. Built-in aliases are canonicalized (`grok` becomes `grok-build`), agent IDs and display names are inferred from backend metadata, and profile-level authentication and approval settings are inherited by every generated agent. The profile ID is also used as its display name. The command sends the same complete upsert protocol as a JSON definition, so an existing profile with that ID is replaced.
+
+`--auth-mode` selects `native-login` or `broker` for the profile, `--approval-policy` selects `ask`, `auto`, or `bypass`, and `--activate`/`--no-activate` controls whether the created or upserted profile becomes the active one. Creation defaults to broker authentication, `ask`, and activation.
 
 A complete `profile.json` names each agent and may override the bounds explicitly — for subscription-backed workers, set `native-login` at the top level **and on every agent** (a top-level native profile does not rewrite an agent explicitly left in broker mode):
 
