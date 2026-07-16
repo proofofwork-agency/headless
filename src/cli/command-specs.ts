@@ -129,6 +129,11 @@ export const COMMAND_SPECS = [
   { name: "verify", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "verify [--evidence] [--json] [--cwd dir]   Verify the tamper-evident ledger and optional evidence files." },
   { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "ledger <verify [--evidence] [--json] | repair-tail --confirm> [--cwd dir]" },
   {
+    name: "receipt",
+    valueFlags: ["--out", "--file", "--ledger", "--limit", "--cwd", "--extension-config", "--extension-module"],
+    help: "receipt <show <runId> | list | export <runId> [--out file] | verify <runId> | verify --file export.json [--ledger ledger.jsonl] | diff <runIdA> <runIdB>> [--json] [--cwd dir]   Inspect, export, compare, and verify execution receipts.",
+  },
+  {
     name: "budget",
     valueFlags: ["--id", "--principal", "--session-id", "--workflow-id", "--provider", "--max-requests", "--max-input-tokens", "--max-output-tokens", "--max-cost-usd", "--max-artifact-bytes", "--max-concurrency", "--max-retries", "--expires-at", "--link-id", "--expected-digest", "--resolution", "--cwd", "--extension-config", "--extension-module"],
     help: "budget <list|upsert|linked-hold inspect|linked-hold quarantine> [options] [--cwd dir]",

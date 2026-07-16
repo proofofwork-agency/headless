@@ -182,6 +182,7 @@ export const DAEMON_ROUTES = {
   "receipt.get": route("receipt.get", ReceiptRunParamsSchema, "ledger:read", "receipt"),
   "receipt.list": route("receipt.list", ReceiptListParamsSchema, "ledger:read", "receipt"),
   "receipt.verify": route("receipt.verify", ReceiptRunParamsSchema, "ledger:read", "receipt"),
+  "receipt.export": route("receipt.export", ReceiptRunParamsSchema, "ledger:read", "receipt"),
   "messages.push": route("messages.push", MessagesPushParamsSchema, "messages", "messages"),
   "messages.pull": route("messages.pull", MessagesPullParamsSchema, "messages", "messages"),
   "messages.markPushed": route("messages.markPushed", MessagesMarkPushedParamsSchema, "messages", "messages"),

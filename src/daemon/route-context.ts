@@ -19,7 +19,7 @@ import type { RunEventStore } from "./run-event-store";
 import type { TaskStore } from "./task-store";
 import type { LeadBindingStore } from "../runtime/lead-binding";
 import type { Receipt } from "../contracts/receipt";
-import type { ReceiptVerificationVerdict } from "../runtime/receipt-verify";
+import type { ExportedReceipt, ReceiptVerificationVerdict } from "../runtime/receipt-verify";
 
 type GoalRecord = NonNullable<ReturnType<GoalStore["get"]>>;
 
@@ -108,4 +108,5 @@ export type DaemonRouteContext = {
   getReceipt: (runId: string) => Receipt | null;
   listReceipts: (opts?: { limit?: number }) => Receipt[];
   verifyReceipt: (runId: string) => ReceiptVerificationVerdict;
+  exportReceipt: (runId: string) => ExportedReceipt;
 };

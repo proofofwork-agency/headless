@@ -134,6 +134,7 @@ export async function runIsolatedCliAudit(): Promise<AuditResult[]> {
     { id: "verify", command: "verify", args: ["verify", "--json", "--cwd", project], expected: "PASS" },
     { id: "ledger:verify", command: "ledger", args: ["experimental", "ledger", "verify", "--json", "--cwd", project], expected: "PASS" },
     { id: "ledger:confirmation", command: "ledger", args: ["experimental", "ledger", "repair-tail", "--cwd", project], expected: "EXPECTED_REJECTION", expectedError: "--confirm" },
+    { id: "receipt:list", command: "receipt", args: ["experimental", "receipt", "list", "--cwd", project], expected: "PASS" },
     { id: "budget:upsert", command: "budget", args: ["experimental", "budget", "upsert", "--id", "audit-budget", "--max-requests", "8", "--max-cost-usd", "5", "--cwd", project], expected: "PASS" },
     { id: "budget:list", command: "budget", args: ["experimental", "budget", "list", "--cwd", project], expected: "PASS" },
     { id: "budget:missing-id", command: "budget", args: ["experimental", "budget", "upsert", "--cwd", project], expected: "EXPECTED_REJECTION" },
