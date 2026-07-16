@@ -21,6 +21,8 @@ export function recordArtifact(options: RuntimeOptions & {
   summary: string;
   status?: ArtifactStatus;
   evidence?: string[];
+  /** Optional deterministic id for crash-safe, idempotent artifact appends. */
+  eventId?: string;
 }) {
   const session = getOrCreateSession(options);
   const summary = redactAndTruncate(options.summary, 20_000).text;
@@ -35,7 +37,7 @@ export function recordArtifact(options: RuntimeOptions & {
       status: options.status ?? "unknown",
       evidence: options.evidence?.slice(0, 128).map((item) => redactAndTruncate(item, 4_096).text),
     },
-  });
+  }, options.eventId);
 }
 
 export function proposeFinal(options: RuntimeOptions & {
