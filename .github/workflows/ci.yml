@@ -54,10 +54,11 @@ jobs:
           # path that the read-only root bind keeps visible.
           sudo cp "$(command -v bun)" /usr/local/bin/bun
           sudo chmod 755 /usr/local/bin/bun
-          # Two-core hosted runners under full-suite load have exceeded 15s
-          # for a contained run-tool round trip. This is capability evidence,
-          # not a latency SLO, so raise only CI's clamped operability bound.
-          echo "HEADLESS_RUN_TOOL_TIMEOUT_MS=30000" >> "$GITHUB_ENV"
+          # Two-core hosted runners under full-suite load have exhausted the
+          # shorter 15s and 30s run-tool observation windows even though the
+          # same transports complete. This is capability evidence, not a
+          # latency SLO, so use the existing 60s clamp only in Linux CI.
+          echo "HEADLESS_RUN_TOOL_TIMEOUT_MS=60000" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
