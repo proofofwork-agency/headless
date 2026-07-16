@@ -17,6 +17,9 @@ jobs:
     name: Build GitHub Pages artifact
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: read
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
