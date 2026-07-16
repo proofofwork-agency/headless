@@ -6,8 +6,9 @@ const config: Config = {
   title: 'Headless',
   tagline:
     'Contained, policy-bound, independently verifiable AI coding runs — proof of work for agents.',
-  url: 'https://docs.proofofwork.agency',
-  baseUrl: '/',
+  url: 'https://proofofwork-agency.github.io',
+  baseUrl: '/headless/',
+  trailingSlash: false,
 
   organizationName: 'proofofwork-agency',
   projectName: 'headless',

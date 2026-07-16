@@ -22,7 +22,9 @@ foreground Claude / Codex / OpenCode / Grok lead
                     └─ result → ledger → observer TUI
 ```
 
-The full documentation lives in the [Docusaurus site sources](./website/README.md):
+The full documentation is hosted at
+[proofofwork-agency.github.io/headless](https://proofofwork-agency.github.io/headless/).
+Its [Docusaurus site sources](./website/README.md) include the
 [quickstart](./website/docs/getting-started/quickstart.md),
 [architecture and data flow](./website/docs/concepts/architecture.md),
 [the four policy axes](./website/docs/concepts/modes.md),
