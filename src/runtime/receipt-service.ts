@@ -57,6 +57,8 @@ export type ReceiptServiceDependencies = {
   provenance: ReceiptProvenanceContext;
 };
 
+export const RECEIPT_GAP_ARTIFACT_KIND = "execution_receipt_gap";
+
 /**
  * Assemble the bounded receipt, append its deterministic ledger anchor, and
  * only then persist the full receipt with that ledger position embedded.
@@ -176,6 +178,26 @@ export function assembleAndAnchorReceipt(
   return receipt;
 }
 
+/** Record an explicit, idempotent evidence gap without impersonating a receipt anchor. */
+export function recordReceiptGap(
+  deps: Pick<ReceiptServiceDependencies, "paths" | "stateOptions">,
+  input: { jobId: string; sessionId: string | null; principal: string; reason: string },
+) {
+  const reason = boundedRedactedText(input.reason, 2_048);
+  return recordArtifact({
+    cwd: deps.paths.canonicalProjectRoot,
+    state: deps.stateOptions,
+    authenticatedPrincipal: input.principal,
+    sessionId: input.sessionId ?? input.jobId,
+    kind: RECEIPT_GAP_ARTIFACT_KIND,
+    title: `Execution receipt gap: ${input.jobId}`,
+    summary: `Run ${input.jobId} completed, but its receipt evidence could not be durably assembled.`,
+    status: "failed",
+    evidence: [`run:${input.jobId}`, `reason:${reason}`],
+    eventId: receiptGapEventId(input.jobId),
+  });
+}
+
 /** Redacted, immutable enforcement envelope; excludes credentials and counters. */
 export function receiptBrokerLeaseSnapshot(scope: BrokerLeaseScope): ReceiptBrokerLeaseSnapshot {
   const envelope = {
@@ -222,6 +244,10 @@ export function receiptIdForRun(runId: string) {
 
 export function receiptAnchorEventId(runId: string) {
   return deterministicUuid("headless-receipt-anchor", runId);
+}
+
+export function receiptGapEventId(runId: string) {
+  return deterministicUuid("headless-receipt-gap", runId);
 }
 
 function receiptBlob(value: string) {

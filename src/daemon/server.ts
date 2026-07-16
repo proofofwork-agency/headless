@@ -66,7 +66,12 @@ import {
 import { TaskStore } from "./task-store";
 import { RunEventStore } from "./run-event-store";
 import { ReceiptStore } from "../runtime/receipt-store";
-import type { ReceiptProvenanceContext } from "../runtime/receipt-service";
+import {
+  assembleAndAnchorReceipt,
+  recordReceiptGap,
+  type ReceiptProvenanceContext,
+} from "../runtime/receipt-service";
+import { ReceiptJournal, type ReceiptJournalRecord } from "../runtime/receipt-journal";
 import { ExportedReceiptSchema, verifyReceipt as verifyStoredReceipt } from "../runtime/receipt-verify";
 import { PersistentMessageQueue } from "../runtime/message-queue";
 import { CredentialStore, type AuthenticatedCredential } from "../runtime/credential-store";
@@ -154,6 +159,7 @@ export class HeadlessDaemon {
   private leads!: LeadBindingStore;
   private worktreeLeases!: WorktreeLeaseStore;
   private integrationJournal!: IntegrationJournal;
+  private receiptJournal!: ReceiptJournal;
   private workflowService!: WorkflowService;
   private workflowDrafts!: WorkflowDraftStore;
   private jobAdmission!: JobAdmissionService;
@@ -228,6 +234,7 @@ export class HeadlessDaemon {
       this.reconcileIntegrationJournal();
       this.jobs.recoverInterruptedJobs(true);
       this.reconcileTerminalRunEvents();
+      this.reconcileReceipts();
       this.jobAdmission.recoverBudgetReservations();
       this.reconcilePersistentSessions();
       this.reconcileSkillInvocations();
@@ -837,6 +844,108 @@ export class HeadlessDaemon {
     }
   }
 
+  private reconcileReceipts() {
+    if ((this.stateOptions?.env ?? process.env).HEADLESS_RECEIPTS === "off") return;
+    let open: ReceiptJournalRecord[];
+    try {
+      open = this.receiptJournal.listOpen((_path, error) => {
+        // One malformed marker remains on disk for operator repair and cannot
+        // prevent unrelated durable work from becoming available.
+        recordRuntimeDiagnostic("state", "daemon.start.receipt-journal-record", error);
+      });
+    } catch (error) {
+      recordRuntimeDiagnostic("state", "daemon.start.receipt-journal", error);
+      return;
+    }
+    for (const record of open) {
+      try {
+        this.reconcileReceipt(record);
+      } catch (error) {
+        // Store/request corruption and every other unexpected per-record fault
+        // stay diagnostic-only so one receipt can never make the daemon fail.
+        recordRuntimeDiagnostic("state", `daemon.start.receipt-record:${record.jobId}`, error);
+      }
+    }
+  }
+
+  private reconcileReceipt(record: ReceiptJournalRecord) {
+    const job = this.jobs.get(record.jobId);
+    if (!job?.result || !TERMINAL_JOB_STATES.has(job.state)) return;
+    const request = this.jobs.request(record.jobId);
+    if (!request) return;
+    const existing = this.receipts.get(record.jobId);
+    if (existing) {
+      try {
+        this.receiptJournal.markCompleted(record.jobId);
+      } catch (error) {
+        recordRuntimeDiagnostic("state", `daemon.start.receipt-marker:${record.jobId}`, error);
+      }
+      return;
+    }
+
+    let assemblyError: unknown = null;
+    try {
+      if (record.principal !== job.principal || record.sessionId !== job.sessionId) {
+        throw new Error(`Receipt journal identity mismatch for run ${record.jobId}.`);
+      }
+      if (record.captureFailure) throw new Error(record.captureFailure);
+      if (record.startedAt === null) throw new Error(`Receipt start checkpoint is unavailable for run ${record.jobId}.`);
+      if (record.authorization === null) throw new Error(`Receipt authorization checkpoint is unavailable for run ${record.jobId}.`);
+      assembleAndAnchorReceipt({
+        paths: this.state,
+        stateOptions: this.stateOptions,
+        receipts: this.receipts,
+        provenance: {
+          headlessVersion: record.provenance.headlessVersion,
+          platform: record.provenance.platform,
+          commit: record.provenance.commit,
+          backendVersions: { [request.backend]: record.provenance.backendVersion },
+        },
+      }, {
+        jobId: record.jobId,
+        sessionId: record.sessionId,
+        principal: record.principal,
+        request,
+        result: job.result,
+        policyEvents: this.runEvents.snapshot({ jobId: record.jobId, limit: 1_000 }).events,
+        authorization: record.authorization,
+        brokerLease: record.brokerLease,
+        gates: record.gates,
+        budget: record.budget,
+        startedAt: record.startedAt,
+        endedAt: job.updatedAt,
+      });
+    } catch (error) {
+      assemblyError = error;
+      recordRuntimeDiagnostic("state", `daemon.start.receipt:${record.jobId}`, error);
+    }
+    if (assemblyError === null) {
+      try {
+        this.receiptJournal.markCompleted(record.jobId);
+      } catch (error) {
+        // A later boot will observe the already-durable receipt and finish
+        // this marker without emitting a false evidence gap.
+        recordRuntimeDiagnostic("state", `daemon.start.receipt-marker:${record.jobId}`, error);
+      }
+      return;
+    }
+    try {
+      const reason = redactAndTruncate(messageOf(assemblyError), 2_048).text.slice(0, 2_048)
+        || "Receipt evidence recovery failed.";
+      recordReceiptGap({ paths: this.state, stateOptions: this.stateOptions }, {
+        jobId: record.jobId,
+        sessionId: job.sessionId,
+        principal: job.principal,
+        reason,
+      });
+      this.receiptJournal.markGap(record.jobId, reason);
+    } catch (error) {
+      // Most importantly, a verifier-only HMAC keyring cannot append either
+      // artifact. Keep the marker pending for a future authorized writer.
+      recordRuntimeDiagnostic("state", `daemon.start.receipt-gap:${record.jobId}`, error);
+    }
+  }
+
   private reconcileTasks() {
     this.tasks.recoverStaleLeases();
     for (const task of this.tasks.list()) {
@@ -1000,6 +1109,7 @@ export class HeadlessDaemon {
       checkoutBase: join(this.state.daemonRuntimeDir, "worktrees", this.state.projectId),
     });
     this.integrationJournal = new IntegrationJournal(this.state);
+    this.receiptJournal = new ReceiptJournal(this.state);
     this.candidateIntegrations = createCandidateIntegrationService({
       paths: this.state,
       jobs: this.jobs,
@@ -1099,6 +1209,7 @@ export class HeadlessDaemon {
       runTools: this.runTools,
       worktreeLeases: this.worktreeLeases,
       integrationJournal: this.integrationJournal,
+      receiptJournal: this.receiptJournal,
       writeGateChecks: this.writeGateChecks,
       completed: (job) => this.resolveWaiters(job),
     });

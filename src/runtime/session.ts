@@ -114,7 +114,7 @@ export function getOrCreateSession(options: SessionOptions = {}): HeadlessSessio
       readModelPath: state.readModelPath,
       projectId: state.projectId,
       principal,
-      ...ledgerIntegrityOptionsFromEnv(),
+      ...ledgerIntegrityOptionsFromEnv(options.state?.env ?? process.env),
     });
     ledgers.set(ledgerKey, ledger);
   }

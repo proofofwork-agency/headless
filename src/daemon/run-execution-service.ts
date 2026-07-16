@@ -23,6 +23,7 @@ import { redactAndTruncate } from "../runtime/redaction";
 import { runReleaseGate, type GateCheck } from "../runtime/release-gate";
 import {
   assembleAndAnchorReceipt,
+  recordReceiptGap,
   receiptBrokerLeaseSnapshot,
   receiptGateManifest,
   type ReceiptAuthorizationSnapshot,
@@ -30,6 +31,7 @@ import {
   type ReceiptGateManifestEntry,
   type ReceiptProvenanceContext,
 } from "../runtime/receipt-service";
+import type { ReceiptJournal } from "../runtime/receipt-journal";
 import type { ReceiptStore } from "../runtime/receipt-store";
 import { appendEvent, getOrCreateSession, type HeadlessSession } from "../runtime/session";
 import type { WorktreeLeaseStore } from "../runtime/worktree-leases";
@@ -64,6 +66,7 @@ export type RunExecutionServiceOptions = {
   runTools: RunToolEndpointManager;
   worktreeLeases: WorktreeLeaseStore;
   integrationJournal: IntegrationJournal;
+  receiptJournal: ReceiptJournal;
   receipts: ReceiptStore;
   receiptProvenance: ReceiptProvenanceContext;
   writeGateChecks: readonly GateCheck[];
@@ -657,6 +660,44 @@ export class RunExecutionService {
         outcome: result.status === "succeeded" ? "completed" : "failed",
       });
     }
+    const receiptsEnabled = (this.options.stateOptions?.env ?? process.env).HEADLESS_RECEIPTS !== "off"
+      && executionAuthorization?.allowed === true;
+    let receiptJournalPending = false;
+    if (receiptsEnabled) {
+      const captureFailure = receiptCaptureFailure
+        ?? (receiptStartedAt === null ? new Error(`Receipt start checkpoint is unavailable for run ${jobId}.`) : null)
+        ?? (receiptAuthorization === null ? new Error(`Receipt authorization checkpoint is unavailable for run ${jobId}.`) : null);
+      try {
+        this.options.receiptJournal.pending({
+          jobId,
+          sessionId: request.sessionId ?? null,
+          principal,
+          startedAt: receiptStartedAt,
+          authorization: receiptAuthorization ? { ...receiptAuthorization, finality } : null,
+          brokerLease: receiptBrokerLease,
+          gates: receiptGates,
+          budget: {
+            passed: budgetPassed,
+            reasons: budgetReasons,
+            usage: budgetUsage ?? result.usage,
+            cost: budgetCost ?? result.cost,
+            reservationId: reservation.id,
+          },
+          provenance: {
+            headlessVersion: this.options.receiptProvenance.headlessVersion,
+            platform: this.options.receiptProvenance.platform,
+            commit: this.options.receiptProvenance.commit,
+            backendVersion: this.options.receiptProvenance.backendVersions[request.backend] ?? null,
+          },
+          captureFailure: captureFailure ? boundedReceiptError(captureFailure) : null,
+        });
+        receiptJournalPending = true;
+      } catch (error) {
+        // Receipt evidence is intentionally not part of job authority. A
+        // journal failure is visible, but cannot suppress terminal completion.
+        recordRuntimeDiagnostic("state", "receipt.journal-pending", error);
+      }
+    }
     const completed = this.options.jobs.complete(jobId, result);
     if (result.stderr) {
       try {
@@ -684,7 +725,7 @@ export class RunExecutionService {
       // deterministically repair missing lifecycle/completion projections.
       recordRuntimeDiagnostic("state", "terminal-run-event-reconciliation", error);
     }
-    if (process.env.HEADLESS_RECEIPTS !== "off" && executionAuthorization?.allowed === true) {
+    if (receiptsEnabled) {
       try {
         if (receiptCaptureFailure) throw receiptCaptureFailure;
         if (receiptStartedAt === null) throw new Error(`Receipt start checkpoint is unavailable for run ${jobId}.`);
@@ -714,10 +755,33 @@ export class RunExecutionService {
           startedAt: receiptStartedAt,
           endedAt: completed.updatedAt,
         });
+        if (receiptJournalPending) {
+          try {
+            this.options.receiptJournal.markCompleted(jobId);
+          } catch (error) {
+            // The durable receipt is authoritative for this projection. Leave
+            // the marker open so startup can observe it and finish the marker.
+            recordRuntimeDiagnostic("state", "receipt.journal-completion", error);
+          }
+        }
       } catch (error) {
         // Receipts are evidence about a completed run, never part of its
         // authority or terminal outcome. Evidence failure is diagnostic-only.
         recordRuntimeDiagnostic("state", "receipt.assemble-and-anchor", error);
+        try {
+          const reason = boundedReceiptError(error);
+          recordReceiptGap({ paths: this.options.paths, stateOptions: this.options.stateOptions }, {
+            jobId,
+            sessionId: request.sessionId ?? null,
+            principal,
+            reason,
+          });
+          if (receiptJournalPending) this.options.receiptJournal.markGap(jobId, reason);
+        } catch (gapError) {
+          // If the ledger cannot accept the gap (for example a keyless HMAC
+          // writer), retain the pending marker for a later authorized boot.
+          recordRuntimeDiagnostic("state", "receipt.gap", gapError);
+        }
       }
     }
     if (result.commit?.merged && result.commit.result) {
@@ -1057,4 +1121,8 @@ function conservativeBudgetUsage(
 
 function messageOf(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function boundedReceiptError(error: unknown) {
+  return redactAndTruncate(messageOf(error), 2_048).text.slice(0, 2_048) || "Receipt evidence assembly failed.";
 }
