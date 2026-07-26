@@ -57,6 +57,50 @@ describe("stream-safe redaction", () => {
     expect(redactAndTruncate("password='derivePassword(input)'").text).toContain('[REDACTED]');
   });
 
+  /**
+   * A triggered redaction rejects the entire write candidate
+   * (write-integration.ts), so a false positive here is not cosmetic: it means
+   * an agent cannot write that code at all, and the diff a human reviews comes
+   * back corrupted. This was found by a real agent whose duration parser was
+   * rejected for naming a variable `tokenPattern`.
+   */
+  test("does not mangle code that merely names a variable after a credential word", () => {
+    const source = [
+      String.raw`const tokenPattern = /(\d+)(ms|s|m|h|d)/gy;`,
+      "const secretSantaList = participants.map((p) => p.name);",
+      "const authHandlers = registry.resolve(scope).handlers;",
+      "const accessConfig = {enabled: true};",
+      "const apiTemplate = `${base}/v1/resource`;",
+    ].join("\n");
+    const result = redactAndTruncate(source);
+    expect(result.redacted).toBe(false);
+    expect(result.text).toBe(source);
+  });
+
+  test("still redacts real credentials assigned to the same keyword names", () => {
+    for (const secret of [
+      `tokenValue=${"a".repeat(40)}`,
+      `access_token=${"b".repeat(40)}`,
+      `authorization=${"c".repeat(40)}`,
+      `apiSecret=${"d".repeat(32)}`,
+    ]) {
+      const result = redactAndTruncate(secret);
+      expect(result.redacted, secret).toBe(true);
+      expect(result.text, secret).toContain("[REDACTED]");
+    }
+  });
+
+  /**
+   * The quoted form stays deliberately aggressive. A string literal assigned to
+   * an auth-named field is exactly the shape a leaked credential takes, so it
+   * keeps redacting even when the contents look harmless. That is a knowingly
+   * accepted false-positive cost in exchange for no false negatives.
+   */
+  test("keeps redacting quoted values assigned to credential-named fields", () => {
+    expect(redactAndTruncate(`const authHeaderName = "x-request-id";`).redacted).toBe(true);
+    expect(redactAndTruncate('api_key="makeSecret(options)"').redacted).toBe(true);
+  });
+
   test("does not reject ordinary storage constants or React key props", () => {
     const source = [
       "const STORAGE_KEY = 'signal-garden:intentions'",
