@@ -182,6 +182,10 @@ export class GoalRuntimeService {
     return this.idleAutonomy.scan();
   }
 
+  get activeCount() {
+    return this.coordinator.activeCount;
+  }
+
   waitForIdle() {
     return this.coordinator.waitForIdle();
   }

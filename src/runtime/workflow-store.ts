@@ -8,7 +8,7 @@ import { ensureOwnerOnlyDirectory, ensureOwnerOnlyFile } from "./project-state";
 import { safeJsonParse } from "./safe-json";
 import { decodePersistedRunResult } from "./persisted-run-result";
 
-export type WorkflowStepInput = Pick<WorkflowStep, "id" | "kind" | "backend" | "prompt" | "mode" | "authMode" | "approvalPolicy" | "model" | "agent" | "timeoutMs" | "dependsOn" | "maxAttempts">;
+export type WorkflowStepInput = Pick<WorkflowStep, "id" | "kind" | "backend" | "prompt" | "mode" | "authMode" | "approvalPolicy" | "model" | "agent" | "timeoutMs" | "dependsOn" | "optionalDependsOn" | "maxAttempts">;
 
 /** One owner-only file per workflow keeps updates atomic and restart recovery bounded. */
 export class WorkflowStore {
@@ -24,6 +24,7 @@ export class WorkflowStore {
     sessionId: string | null;
     authMode: Workflow["authMode"];
     approvalPolicy: Workflow["approvalPolicy"];
+    mergePolicy?: Workflow["mergePolicy"];
     steps: WorkflowStepInput[];
     requirements: Workflow["requirements"];
   }) {
@@ -35,6 +36,7 @@ export class WorkflowStore {
       sessionId: input.sessionId,
       authMode: input.authMode,
       approvalPolicy: input.approvalPolicy,
+      mergePolicy: input.mergePolicy ?? "preserve",
       state: "queued",
       steps: input.steps.map((step) => ({
         ...step,

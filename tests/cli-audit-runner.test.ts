@@ -1,10 +1,15 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { COMMAND_SPECS } from "../src/cli";
 import { runGitStrict } from "../src/runtime/git";
+import { stopTrackedDaemons, trackDaemonProjectRoot } from "./support/daemon-teardown";
+
+// Every audit row runs the real CLI, and each one bootstraps a detached daemon
+// for the disposable checkout. Drain them or the suite leaks one per run.
+afterAll(async () => { await stopTrackedDaemons(); });
 
 const cliPath = process.env.HEADLESS_AUDIT_CLI
   ? resolve(process.env.HEADLESS_AUDIT_CLI)
@@ -26,7 +31,7 @@ type AuditResult = {
  */
 export async function runIsolatedCliAudit(): Promise<AuditResult[]> {
   const root = mkdtempSync(join(tmpdir(), "headless-cli-audit-"));
-  const project = join(root, "project");
+  const project = trackDaemonProjectRoot(join(root, "project"));
   const state = join(root, "state");
   const home = join(root, "home");
   const runtime = `/tmp/hr-${process.pid}-${Date.now().toString(36).slice(-4)}`;
@@ -199,7 +204,7 @@ describe("isolated CLI audit runner", () => {
 
   test("does not modify the disposable checkout during init", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-cli-audit-checkout-"));
-    const project = join(root, "project");
+    const project = trackDaemonProjectRoot(join(root, "project"));
     mkdirSync(project);
     writeFileSync(join(project, "keep.txt"), "keep\n");
     const before = readdirSync(project);

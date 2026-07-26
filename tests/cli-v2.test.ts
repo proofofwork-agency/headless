@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -19,9 +19,15 @@ import {
 } from "../src/cli";
 import { parseBudgetCommand } from "../src/cli/commands/budget";
 import { schedulingWindow } from "./support/timing";
+import { stopTrackedDaemons, trackDaemonProjectRoot } from "./support/daemon-teardown";
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const cliSharedUrl = new URL("../src/cli/shared.ts", import.meta.url).href;
+
+// Any CLI command that reaches the control plane bootstraps a detached daemon
+// for its --cwd. Without this drain each disposable root leaks one resident
+// daemon per run.
+afterAll(async () => { await stopTrackedDaemons(); });
 
 describe("v0.2 CLI contracts", () => {
   test("registers every command and alias through one exhaustive command table", () => {
@@ -174,7 +180,7 @@ describe("v0.2 CLI contracts", () => {
   });
 
   test("init creates only external state and leaves the project untouched", async () => {
-    const project = mkdtempSync(join(tmpdir(), "headless-cli-project-"));
+    const project = trackDaemonProjectRoot(mkdtempSync(join(tmpdir(), "headless-cli-project-")));
     const state = mkdtempSync(join(tmpdir(), "headless-cli-state-"));
     writeFileSync(join(project, "marker.txt"), "unchanged\n");
     const before = readdirSync(project);
@@ -264,7 +270,7 @@ describe("v0.2 CLI contracts", () => {
 
   test("session send waits for the durable daemon job and leaves its owned daemon cleanly stoppable", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-cli-session-"));
-    const project = join(root, "project");
+    const project = trackDaemonProjectRoot(join(root, "project"));
     const state = join(root, "state");
     const bin = join(root, "bin");
     mkdirSync(project);

@@ -11,6 +11,8 @@ import { getBackendDefinition, resolveBackendId } from "../backends/registry";
 import { assertPrincipalOwns } from "./auth";
 import { WorkflowRunParamsSchema } from "./protocol";
 import {
+  TERMINAL_STEP_STATES,
+  TERMINAL_UNSUCCESSFUL_STEP_STATES,
   isTerminalWorkflow,
   requireWorkflowStep,
   updateWorkflowStep,
@@ -73,6 +75,7 @@ export class WorkflowService {
       sessionId: parsed.sessionId,
       authMode: parsed.authMode,
       approvalPolicy: parsed.approvalPolicy,
+      mergePolicy: parsed.mergePolicy,
       steps,
       requirements: parsed.requirements,
     });
@@ -202,6 +205,10 @@ export class WorkflowService {
     }
   }
 
+  get activeCount() {
+    return this.activeExecutions.size;
+  }
+
   async waitForIdle() {
     await Promise.allSettled([...this.activeExecutions]);
   }
@@ -227,8 +234,13 @@ export class WorkflowService {
           continue;
         }
         if (step.state !== "pending") continue;
-        const dependencies = step.dependsOn.map((id) => workflow.steps.find((candidate) => candidate.id === id)!);
-        if (dependencies.some((dependency) => ["failed", "blocked", "cancelled"].includes(dependency.state))) {
+        const find = (id: string) => workflow.steps.find((candidate) => candidate.id === id)!;
+        const required = step.dependsOn.map(find);
+        const optional = step.optionalDependsOn.map(find);
+        // Only a failed *required* dependency blocks. An optional dependency
+        // that failed still settles the edge, so the step runs and receives the
+        // failure as evidence rather than being blocked into silence.
+        if (required.some((dependency) => TERMINAL_UNSUCCESSFUL_STEP_STATES.has(dependency.state))) {
           this.store.update(workflowId, (current) => updateWorkflowStep(current, step.id, {
             state: "blocked",
             updatedAt: this.now(),
@@ -236,7 +248,9 @@ export class WorkflowService {
           stateChanged = true;
           continue;
         }
-        if (dependencies.every((dependency) => dependency.state === "succeeded")) {
+        const requiredReady = required.every((dependency) => dependency.state === "succeeded");
+        const optionalSettled = optional.every((dependency) => TERMINAL_STEP_STATES.has(dependency.state));
+        if (requiredReady && optionalSettled) {
           actions.push(this.runStep(workflowId, step.id));
         }
       }
@@ -279,7 +293,9 @@ export class WorkflowService {
       authMode: queued.authMode,
       approvalPolicy: queued.approvalPolicy,
     }, workflow.principal, {
-      mergePolicy: queued.mode === "write" ? "preserve" : "authorized",
+      // Write steps honor the workflow's declared policy, which defaults to
+      // candidate isolation. Read-only steps never merge, so the value is moot.
+      mergePolicy: queued.mode === "write" ? workflow.mergePolicy : "authorized",
       workflowId,
       retryNumber: Math.max(0, queued.attempt - 1),
     });
@@ -387,7 +403,7 @@ export class WorkflowService {
   }
 }
 
-function validateDependencies(steps: Array<{ id: string; dependsOn: string[] }>) {
+function validateDependencies(steps: Array<{ id: string; dependsOn: string[]; optionalDependsOn?: string[] }>) {
   const ids = new Set(steps.map((step) => step.id));
   if (ids.size !== steps.length) throw new HeadlessError("INVALID_REQUEST", "Workflow step ids must be unique.");
   const visiting = new Set<string>();
@@ -397,7 +413,12 @@ function validateDependencies(steps: Array<{ id: string; dependsOn: string[] }>)
     if (visited.has(id)) return;
     visiting.add(id);
     const step = steps.find((item) => item.id === id)!;
-    for (const dependency of step.dependsOn) { if (!ids.has(dependency)) throw new HeadlessError("INVALID_REQUEST", `Unknown workflow dependency: ${dependency}`); visit(dependency); }
+    // Optional edges order execution exactly like required ones, so they are
+    // admitted through the same unknown-dependency and cycle checks.
+    for (const dependency of [...step.dependsOn, ...step.optionalDependsOn ?? []]) {
+      if (!ids.has(dependency)) throw new HeadlessError("INVALID_REQUEST", `Unknown workflow dependency: ${dependency}`);
+      visit(dependency);
+    }
     visiting.delete(id); visited.add(id);
   };
   for (const step of steps) visit(step.id);

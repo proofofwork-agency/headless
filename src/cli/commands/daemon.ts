@@ -5,9 +5,11 @@ import {
   flagArgsBeforeSeparator,
   getArg,
   getRepeatedArgs,
+  parseIntegerArg,
   setActiveDaemon,
 } from "../shared";
 import { connectExistingDaemon } from "../../daemon/connect";
+import { listDaemonInventory } from "../../runtime/daemon-inventory";
 import { HeadlessError } from "../../runtime/headless-error";
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
@@ -20,12 +22,17 @@ export async function runDaemonCommand(args: string[]) {
   const projectRoot = getArg(flags, "--cwd") || process.cwd();
   ensureSupportedPlatform();
   if (action === "serve" || action === "start") {
-    const { HeadlessDaemon } = await import("../../daemon/server.js");
+    const { HeadlessDaemon, DEFAULT_DAEMON_IDLE_TIMEOUT_MS } = await import("../../daemon/server.js");
+    const idleTimeoutMs = flags.includes("--no-idle-timeout")
+      ? 0
+      : parseIntegerArg(flags, "--idle-timeout-ms") ?? DEFAULT_DAEMON_IDLE_TIMEOUT_MS;
     const daemon = new HeadlessDaemon({
       projectRoot,
       extensionConfigPath: getArg(flags, "--extension-config"),
       extensionModules: getRepeatedArgs(flags, "--extension-module"),
       enableExperimentalSessions: flags.includes("--experimental-sessions"),
+      idleTimeoutMs,
+      onIdleShutdown: () => { void shutdownIdleDaemon(daemon, idleTimeoutMs); },
     });
     await daemon.start();
     setActiveDaemon(daemon);
@@ -59,9 +66,60 @@ export async function runDaemonCommand(args: string[]) {
     console.log(JSON.stringify({ stopped: true, pid }, null, 2));
     return;
   }
-  if (action !== "status") throw new CliUsageError("Usage: headless daemon <serve|status|stop> [--cwd dir]");
+  if (action === "reap") return runDaemonReap(flags);
+  if (action !== "status") throw new CliUsageError("Usage: headless daemon <serve|status|stop|reap> [--cwd dir]");
   const client = await daemonClient(projectRoot, flags);
   console.log(JSON.stringify(await client.call("ping"), null, 2));
+}
+
+/**
+ * Reports every daemon this user owns and, once confirmed, signals the stray
+ * ones. Reaping is never automatic: a resident daemon is a live control plane
+ * for a real checkout, so only disposable and root-less daemons are candidates
+ * unless the operator explicitly widens the selection.
+ */
+async function runDaemonReap(flags: string[]) {
+  const inventory = listDaemonInventory();
+  const all = flags.includes("--all");
+  const candidates = inventory.filter((entry) => all || entry.strayed);
+  const report = {
+    scanned: inventory.length,
+    candidates: candidates.length,
+    selection: all ? "all" : "strayed",
+    daemons: inventory.map((entry) => ({
+      pid: entry.pid,
+      projectRoot: entry.projectRoot,
+      reason: entry.reason,
+      selected: all || entry.strayed,
+    })),
+  };
+  if (!flags.includes("--confirm")) {
+    console.log(JSON.stringify({ ...report, reaped: [], confirmed: false }, null, 2));
+    console.error(`Re-run with --confirm to stop ${candidates.length} daemon(s).`);
+    return;
+  }
+  const reaped: Array<{ pid: number; stopped: boolean; error?: string }> = [];
+  for (const entry of candidates) {
+    try {
+      signalDaemonOwner(entry.pid);
+      reaped.push({ pid: entry.pid, stopped: true });
+    } catch (error) {
+      reaped.push({ pid: entry.pid, stopped: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  console.log(JSON.stringify({ ...report, reaped, confirmed: true }, null, 2));
+  process.exitCode = reaped.some((entry) => !entry.stopped) ? 1 : 0;
+}
+
+/**
+ * The watchdog only fires on a quiescent daemon, so a clean stop is expected.
+ * Failures propagate back to the watchdog, which records the diagnostic, keeps
+ * the daemon resident, and retries after another idle window.
+ */
+async function shutdownIdleDaemon(daemon: { stop: () => Promise<void> }, idleTimeoutMs: number) {
+  await daemon.stop();
+  console.error(`Headless daemon exited after ${idleTimeoutMs}ms idle.`);
+  process.exit(0);
 }
 
 function signalDaemonOwner(pid: number) {

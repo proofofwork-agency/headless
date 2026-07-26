@@ -1,6 +1,15 @@
 import type { Job, Workflow } from "../contracts/durable";
 import { redactAndTruncate } from "../runtime/redaction";
 
+/** Step states from which a step will never transition again. */
+export const TERMINAL_STEP_STATES = new Set<Workflow["steps"][number]["state"]>([
+  "succeeded", "failed", "blocked", "cancelled",
+]);
+/** Terminal states that mean the step did not deliver its work. */
+export const TERMINAL_UNSUCCESSFUL_STEP_STATES = new Set<Workflow["steps"][number]["state"]>([
+  "failed", "blocked", "cancelled",
+]);
+
 export function isTerminalWorkflow(workflow: Workflow) {
   return workflow.state === "succeeded" || workflow.state === "failed" || workflow.state === "blocked" || workflow.state === "cancelled";
 }
@@ -27,7 +36,9 @@ export function workflowStepState(job: Job): Workflow["steps"][number]["state"] 
 }
 
 export function workflowStepPrompt(workflow: Workflow, step: Workflow["steps"][number]) {
-  const dependencies = step.dependsOn.map((dependencyId) => {
+  // Optional dependencies are included precisely because they may have failed:
+  // a verifier is only useful if it can see which sibling died and why.
+  const dependencies = [...step.dependsOn, ...step.optionalDependsOn].map((dependencyId) => {
     const dependency = requireWorkflowStep(workflow, dependencyId);
     return {
       stepId: dependency.id,
@@ -35,6 +46,7 @@ export function workflowStepPrompt(workflow: Workflow, step: Workflow["steps"][n
       jobId: dependency.lastJobId,
       backend: dependency.backend,
       status: dependency.state,
+      required: step.dependsOn.includes(dependencyId),
       output: dependency.result?.output.slice(0, 80_000) ?? "",
       diff: dependency.result?.diff?.patch.slice(0, 120_000) ?? null,
       error: dependency.result?.error ?? null,

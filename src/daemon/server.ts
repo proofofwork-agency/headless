@@ -97,6 +97,11 @@ import { HEADLESS_VERSION } from "../version";
 
 const receiptBackendVersionCache = new Map<string, string | null>();
 const JOB_COMPLETION_GRACE_MS = 10_000;
+/** Bootstrapped daemons exit after this long without a connection or resident work. */
+export const DEFAULT_DAEMON_IDLE_TIMEOUT_MS = 900_000;
+const MAX_DAEMON_IDLE_TIMEOUT_MS = 86_400_000;
+const MIN_DAEMON_IDLE_TIMEOUT_MS = 1_000;
+const IDLE_WATCHDOG_INTERVAL_MS = 15_000;
 const TERMINAL_JOB_STATES = new Set<Job["state"]>(["succeeded", "failed", "timed_out", "cancelled", "blocked"]);
 
 type JobWaiter = {
@@ -121,6 +126,18 @@ export type HeadlessDaemonOptions = {
   extensionModules?: readonly string[];
   /** Beta 1 compatibility switch. Persistent execution routes are off by default. */
   enableExperimentalSessions?: boolean;
+  /**
+   * Shut the daemon down after this many milliseconds without a client
+   * connection or resident work. Zero disables the watchdog, which is the
+   * default for embedded daemons that a host process already owns.
+   */
+  idleTimeoutMs?: number;
+  /**
+   * Invoked once the idle deadline passes and the daemon is quiescent. The
+   * bootstrapped `daemon serve` host uses this to stop and exit; embedded
+   * hosts decide for themselves.
+   */
+  onIdleShutdown?: () => void | Promise<void>;
 };
 
 export class HeadlessDaemon {
@@ -177,6 +194,11 @@ export class HeadlessDaemon {
   private server: Server | null = null;
   private readonly sockets = new Set<Socket>();
   private routeHandlers!: DaemonRouteHandlerMap;
+  private readonly idleTimeoutMs: number;
+  private readonly onIdleShutdown?: () => void;
+  private idleTimer: ReturnType<typeof setInterval> | null = null;
+  private idleShutdownInFlight = false;
+  private lastActivityAt = Date.now();
 
   constructor(options: HeadlessDaemonOptions) {
     this.state = ensureProjectStateDirectories(getProjectStatePaths(options.projectRoot, options.state));
@@ -187,6 +209,8 @@ export class HeadlessDaemon {
     this.writeGateChecks = options.writeGateChecks ?? DEFAULT_GATES;
     this.jobAdmissionLimits = { maxConcurrency: options.maxConcurrency, maxQueued: options.maxQueued };
     this.enableExperimentalSessions = options.enableExperimentalSessions === true;
+    this.idleTimeoutMs = boundedIdleTimeout(options.idleTimeoutMs);
+    this.onIdleShutdown = options.onIdleShutdown;
     this.extensionConfig = resolveDaemonExtensionConfig({
       configPath: options.extensionConfigPath,
       modulePaths: options.extensionModules,
@@ -264,11 +288,66 @@ export class HeadlessDaemon {
     this.councilService.recover();
     this.goalRuntime.recover();
     this.loopService.recover();
+    this.startIdleWatchdog();
     return this.state.socketPath;
+  }
+
+  /**
+   * Bootstrapped daemons are spawned detached and outlive the CLI that started
+   * them, so without a watchdog every ephemeral project root leaks a resident
+   * daemon forever. Resident work — including a loop parked in backoff — holds
+   * the daemon open; only a fully quiescent daemon is allowed to exit.
+   */
+  private startIdleWatchdog() {
+    if (this.idleTimeoutMs <= 0 || this.idleTimer) return;
+    this.markActivity();
+    const interval = Math.max(1_000, Math.min(this.idleTimeoutMs, IDLE_WATCHDOG_INTERVAL_MS));
+    this.idleTimer = setInterval(() => {
+      if (this.idleShutdownInFlight) return;
+      if (!this.isQuiescent()) {
+        this.markActivity();
+        return;
+      }
+      if (Date.now() - this.lastActivityAt < this.idleTimeoutMs) return;
+      this.idleShutdownInFlight = true;
+      void Promise.resolve()
+        .then(() => this.onIdleShutdown?.())
+        // A refused shutdown means work raced teardown. Stay resident rather
+        // than orphaning the socket, and retry after another idle window.
+        .catch((error) => recordRuntimeDiagnostic("cleanup", "daemon.idle-shutdown", error))
+        .finally(() => {
+          this.idleShutdownInFlight = false;
+          this.markActivity();
+        });
+    }, interval);
+    this.idleTimer.unref?.();
+  }
+
+  private clearIdleWatchdog() {
+    if (!this.idleTimer) return;
+    clearInterval(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  private markActivity() {
+    this.lastActivityAt = Date.now();
+  }
+
+  /** True only when no connection, execution, or durable orchestration remains. */
+  private isQuiescent() {
+    if (this.stopping || !this.ready || !this.ownedStateInitialized) return false;
+    if (this.sockets.size > 0 || this.executions.size > 0 || this.waiters.size > 0) return false;
+    const load = this.jobAdmission.load();
+    if (load.activeJobs > 0 || load.queuedJobs > 0) return false;
+    return this.workflowService.activeCount === 0
+      && this.councilService.activeCount === 0
+      && this.goalRuntime.activeCount === 0
+      && this.loopService.activeCount === 0;
   }
 
   async stop() {
     this.stopping = true;
+    this.clearIdleWatchdog();
     this.jobAdmission?.dispose();
     this.runExecution?.cancelAll("daemon stopping");
     this.drainWaiters(new HeadlessError("DAEMON_UNAVAILABLE", "Daemon is stopping before the job wait completed.", { retryable: true }));
@@ -310,6 +389,7 @@ export class HeadlessDaemon {
   }
 
   private accept(socket: Socket) {
+    this.markActivity();
     this.sockets.add(socket);
     socket.once("close", () => this.sockets.delete(socket));
     socket.once("error", () => {
@@ -1282,9 +1362,64 @@ export class HeadlessDaemon {
       },
       cancelGoal: (id, principal) => this.goalRuntime.cancelGoalAs(id, principal),
       cancelWorkflow: (id) => this.workflowService.cancel(id),
+      // The gate is the repair loop's oracle. It runs against the daemon's own
+      // project root through the same contained runner every other gate uses,
+      // so a loop can never grade itself.
+      runGate: (target) => runReleaseGate({
+        checks: parseGateChecks(target.checks),
+        cwd: this.state.canonicalProjectRoot,
+        state: this.stateOptions,
+        timeoutMs: target.gateTimeoutMs,
+        authenticatedPrincipal: this.principal,
+      }),
+      startRepairWorkflow: (steps, target, principal, workId, integrationPolicy) => {
+        const existing = this.workflowService.store.get(workId);
+        if (existing) return { id: existing.id };
+        const repairBackend = target.backend ?? "opencode";
+        const verifyBackend = target.verifyBackend ?? this.contrastingBackend(repairBackend);
+        const definition = {
+          id: workId,
+          authMode: target.authMode,
+          approvalPolicy: target.approvalPolicy,
+          // Only an explicitly authorized loop lets a repair leave its
+          // candidate; "request" and "preserve" both keep the human in the
+          // loop. The daemon's write gates still apply on top of this.
+          mergePolicy: integrationPolicy === "authorized" ? "authorized" : "preserve",
+          steps: steps.map((step) => ({
+            id: step.id,
+            kind: step.kind,
+            // Verification runs on a different adapter than the repairs by
+            // default. A reviewer sharing the author's model and context tends
+            // to ratify the author's mistakes, so same-model review buys much
+            // less than its cost suggests.
+            backend: step.kind === "test" ? verifyBackend : repairBackend,
+            prompt: step.prompt,
+            mode: step.kind === "execution" ? target.mode : "read-only",
+            ...(target.model ? { model: target.model } : {}),
+            timeoutMs: target.stepTimeoutMs,
+            dependsOn: step.dependsOn,
+            optionalDependsOn: step.optionalDependsOn,
+            maxAttempts: 1,
+          })),
+          requirements: { policy: true, tests: false, review: false, vote: false, budget: true },
+        };
+        return { id: this.workflowService.create(definition, internalCredential(principal)).id };
+      },
     });
     this.initializeRouteHandlers();
     this.ownedStateInitialized = true;
+  }
+
+  /**
+   * Picks a registered adapter other than the one doing the repairs, so the
+   * verifier does not share the author's model. Falls back to the same adapter
+   * only when nothing else is registered — a same-model verifier is still worth
+   * more than no verifier, and the gate is the real oracle regardless.
+   */
+  private contrastingBackend(repairBackend: string) {
+    const registered = new Set(listBackendDefinitions().map((definition) => definition.id));
+    const preferred = ["codex", "claude-code", "opencode", "grok-build"];
+    return preferred.find((candidate) => candidate !== repairBackend && registered.has(candidate)) ?? repairBackend;
   }
 
   private reconcileManualLinkedRecoveries() {
@@ -1735,6 +1870,16 @@ function localPrincipal() {
   }
 }
 
+/** Zero disables the watchdog; anything else is clamped to a sane bounded window. */
+function boundedIdleTimeout(value: number | undefined) {
+  if (value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError("Daemon idle timeout must be a non-negative bounded integer.");
+  }
+  if (value === 0) return 0;
+  return Math.min(MAX_DAEMON_IDLE_TIMEOUT_MS, Math.max(MIN_DAEMON_IDLE_TIMEOUT_MS, value));
+}
+
 function gitIsAncestor(commit: string, descendant: string, cwd: string) {
   const result = runGitStrict(["merge-base", "--is-ancestor", commit, descendant], cwd);
   if (result.ok) return true;
@@ -1901,6 +2046,9 @@ function parseGateChecks(value: unknown): GateCheck[] | undefined {
     build: { name: "build", command: "bun", args: ["run", "build"] },
     test: { name: "test", command: "bun", args: ["test", "tests", "--timeout", "20000"] },
     pack: { name: "pack", command: "npm", args: ["pack", "--dry-run"] },
+    // Opt-in only. A concurrent test run holds short-lived disposable daemons,
+    // so this must never join the default set that every write candidate runs.
+    daemons: { name: "daemons", command: "bun", args: ["run", "check:daemons"] },
   };
   return value.map((name) => {
     const check = configured[name];

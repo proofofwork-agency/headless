@@ -8,7 +8,7 @@ import { WorkflowService, type WorkflowSubmitOptions } from "../src/daemon/workf
 import { FinalityStore } from "../src/runtime/finality-store";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import type { AuthenticatedCredential } from "../src/runtime/credential-store";
-import { schedulingWindow } from "./support/timing";
+import { schedulingDeadline, schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 
@@ -36,6 +36,74 @@ describe("WorkflowService", () => {
     expect(completed.finality?.allowed).toBe(true);
     expect(completed.steps[1]?.result?.output).toBe("review-saw-actual-seed");
     expect(completed.steps.every((step) => harness.jobs.get(step.lastJobId!)?.workflowId === workflow.id)).toBe(true);
+  });
+
+  /**
+   * Blast-radius containment: one node dying must not silence the rest of the
+   * graph. A required dependency still blocks, but an optional one only has to
+   * settle, and its failure is handed to the dependent as evidence.
+   */
+  test("runs a step whose optional dependency failed and gives it the failure as evidence", async () => {
+    const harness = createHarness((request) => request.prompt.includes("verify")
+      ? succeeded(request.prompt.includes("broken-repair") ? "verifier-saw-the-failure" : "verifier-was-blind")
+      : request.prompt.includes("fix b") ? failed("broken-repair", false) : succeeded("fixed-a"));
+
+    const workflow = harness.service.create({
+      id: "optional-dependency-workflow",
+      steps: [
+        { id: "fix-a", backend: "opencode", prompt: "fix a", timeoutMs: 5_000 },
+        { id: "fix-b", backend: "opencode", prompt: "fix b", timeoutMs: 5_000 },
+        { id: "verify", kind: "test", backend: "opencode", prompt: "verify", optionalDependsOn: ["fix-a", "fix-b"], timeoutMs: 5_000 },
+      ],
+    }, credential());
+
+    const completed = await harness.service.wait(workflow.id, schedulingWindow(5_000));
+    const verify = completed.steps.find((step) => step.id === "verify")!;
+    expect(verify.state).toBe("succeeded");
+    expect(verify.result?.output).toBe("verifier-saw-the-failure");
+    // The failed sibling is still a failure; the workflow does not pretend otherwise.
+    expect(completed.steps.find((step) => step.id === "fix-b")?.state).toBe("failed");
+    expect(completed.state).toBe("failed");
+  });
+
+  test("still blocks a step whose required dependency failed", async () => {
+    const harness = createHarness((request) => request.prompt.includes("fix")
+      ? failed("broken", false)
+      : succeeded("should-not-run"));
+
+    const workflow = harness.service.create({
+      id: "required-dependency-workflow",
+      steps: [
+        { id: "fix", backend: "opencode", prompt: "fix", timeoutMs: 5_000 },
+        { id: "after", backend: "opencode", prompt: "after", dependsOn: ["fix"], timeoutMs: 5_000 },
+      ],
+    }, credential());
+
+    const completed = await harness.service.wait(workflow.id, schedulingWindow(5_000));
+    expect(completed.steps.find((step) => step.id === "after")?.state).toBe("blocked");
+    expect(completed.state).toBe("blocked");
+  });
+
+  test("rejects a dependency declared both required and optional", () => {
+    const harness = createHarness(() => succeeded("unused"));
+    expect(() => harness.service.create({
+      id: "conflicting-dependency-workflow",
+      steps: [
+        { id: "a", backend: "opencode", prompt: "a", timeoutMs: 5_000 },
+        { id: "b", backend: "opencode", prompt: "b", dependsOn: ["a"], optionalDependsOn: ["a"], timeoutMs: 5_000 },
+      ],
+    }, credential())).toThrow();
+  });
+
+  test("rejects a cycle formed through optional edges", () => {
+    const harness = createHarness(() => succeeded("unused"));
+    expect(() => harness.service.create({
+      id: "optional-cycle-workflow",
+      steps: [
+        { id: "a", backend: "opencode", prompt: "a", optionalDependsOn: ["b"], timeoutMs: 5_000 },
+        { id: "b", backend: "opencode", prompt: "b", optionalDependsOn: ["a"], timeoutMs: 5_000 },
+      ],
+    }, credential())).toThrow();
   });
 
   test("retries ordinary failed work up to the durable step attempt bound", async () => {
@@ -160,7 +228,9 @@ function createHarness(
     getJob: (jobId) => jobs.get(jobId),
     getJobRequest: (jobId) => jobs.request(jobId),
     waitJob: async (jobId, timeoutMs) => {
-      const deadline = Date.now() + timeoutMs;
+      // The caller's timeout is a product deadline; this harness only observes
+      // it, so the observation ceiling scales with the machine.
+      const deadline = schedulingDeadline(timeoutMs);
       for (;;) {
         const job = jobs.get(jobId);
         if (!job) throw new Error(`Unknown test job: ${jobId}`);

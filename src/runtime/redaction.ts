@@ -41,7 +41,17 @@ export const SECRET_PATTERNS: Array<[RegExp, string]> = [
   // - value stops at JSON structure chars / ws / common terminators to avoid mangling code, urls, paths
   // - requires 8+ chars, skips already-redacted
   [/(?<![A-Za-z0-9])((?:["']?(?:api|access|secret|auth|bearer|token|password|passwd|pwd)[A-Z0-9_\-. ]{0,20}["']?\s*[:=]\s*))(["'])(?!\[REDACTED_)([^"'\r\n]{8,})\2/gi, '$1$2[REDACTED]$2'],
-  [/(?<![A-Za-z0-9])((?:["']?(?:api|access|secret|auth|bearer|token|password|passwd|pwd)[A-Z0-9_\-. ]{0,20}["']?\s*[:=]\s*))(["']?)(?!\[REDACTED_)(?![A-Za-z_$][A-Za-z0-9_$]*\s*\()([^"'\s,}\]>&|;]{8,})\2/gi, '$1$2[REDACTED]$2'],
+  // - the call lookahead spans member expressions, not just bare calls, so
+  //   `secretSantaList = participants.map(...)` is recognized as code the same
+  //   way `secret = makeSecret(...)` already was.
+  // - the value alphabet excludes bracket and template characters. No
+  //   credential encoding (base64, base64url, hex, JWT) contains `(`, `)`, `{`
+  //   or a backtick, so dropping them costs no detection while it stops the
+  //   scanner from eating regex literals and object/template expressions.
+  //   `tokenPattern = /(\d+)(ms|s)/g` used to be mangled into a match, and
+  //   because a triggered redaction rejects the whole write candidate, an agent
+  //   could not write code that merely named a variable `tokenPattern`.
+  [/(?<![A-Za-z0-9])((?:["']?(?:api|access|secret|auth|bearer|token|password|passwd|pwd)[A-Z0-9_\-. ]{0,20}["']?\s*[:=]\s*))(["']?)(?!\[REDACTED_)(?![A-Za-z_$][A-Za-z0-9_$]*(?:\s*\.\s*[A-Za-z_$][A-Za-z0-9_$]*)*\s*\()([^"'\s,}\]>&|;(){`]{8,})\2/gi, '$1$2[REDACTED]$2'],
 ];
 assert(SECRET_PATTERNS.length >= 18, `redaction must cover 18+ patterns, got ${SECRET_PATTERNS.length}`);
 
