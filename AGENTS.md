@@ -42,7 +42,7 @@ Autonomous decision flow:
 Useful ContextRelay tools for Codex:
 - `handoff_to_claude` to delegate to Claude (set `wait_for_reply: true` for validation requests); `send_to_claude` for a direct message; `wait_for_claude` for an explicit follow-up wait.
 - `deliberate_with_claude` for a bounded live debate/convergence pass on an open decision.
-- `headless_run` for a one-shot, read-only reviewer through a contained adapter. Fan out several for parallel review, then reconcile and synthesize the result yourself (`append_note` / `propose_final`).
+- `contained_run` for a one-shot, read-only reviewer through a contained adapter. Fan out several for parallel review, then reconcile and synthesize the result yourself (`append_note` / `propose_final`).
 - `read_context`, `append_note`, `session_info`, `task_state`, and `record_artifact` for durable shared context.
 - `propose_final` when work appears complete.
 
