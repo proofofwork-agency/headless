@@ -61,7 +61,10 @@ describe("native authentication capsules", () => {
       [".codex/auth.json", "codex-secret"],
       [".claude/.credentials.json", "claude-secret"],
       [".local/share/opencode/auth.json", "opencode-secret"],
-      [".grok/auth.json", "grok-secret"],
+      // Grok's real auth.json is a JSON credential map, and the capsule must
+      // parse it to remove the refresh token before isolation. A placeholder
+      // string would be refused, which is the intended fail-closed behavior.
+      [".grok/auth.json", JSON.stringify({ "https://auth.x.ai::account": { key: "grok-secret", auth_mode: "oidc", user_id: "u", email: null, create_time: "2026-07-16T21:00:00.000Z", expires_at: "2099-01-01T00:00:00.000Z" } })],
       [".config/grok/auth.json", "grok-config-secret"],
       [".ssh/id_ed25519", "ssh-secret"],
       [".git-credentials", "git-secret"],
@@ -113,6 +116,86 @@ describe("native authentication capsules", () => {
       } finally {
         worker.cleanup();
       }
+    }
+  });
+
+  /**
+   * The bug this guards: a refresh token is single-use and the IdP revokes the
+   * old one on rotation. A disposable worker that refreshed spent the
+   * operator's token and wrote the replacement into a capsule that was then
+   * deleted, leaving the real ~/.grok/auth.json holding a revoked credential.
+   * Every later worker copied that dead token, so the operator was logged out
+   * without having done anything.
+   */
+  test("installs a Grok capsule that cannot refresh, and never touches the source", () => {
+    const home = fixtureRoot("headless-native-grok-strip-home-");
+    const base = fixtureRoot("headless-native-grok-strip-worker-");
+    mkdirSync(join(home, ".grok"), { recursive: true });
+    const source = join(home, ".grok", "auth.json");
+    const nowMs = Date.parse("2026-07-16T22:00:00.000Z");
+    writeFileSync(source, JSON.stringify({
+      "https://auth.x.ai::account": {
+        key: "access-token",
+        auth_mode: "oidc",
+        create_time: "2026-07-16T21:00:00.000Z",
+        user_id: "user-1",
+        email: null,
+        oidc_issuer: "https://auth.x.ai",
+        oidc_client_id: "account",
+        refresh_token: "refresh-token-that-must-not-travel",
+        expires_at: "2026-07-16T23:00:00.000Z",
+      },
+    }, null, 2));
+    const before = readFileSync(source);
+
+    const worker = createWorkerEnvironment({ baseDir: base });
+    try {
+      expect(installNativeAuthCapsule(worker, "grok-build", { homeDir: home, nowMs, minimumValidityMs: 60_000 }))
+        .toMatchObject({ available: true, reason: null });
+
+      const installed = JSON.parse(readFileSync(join(worker.home, ".grok", "auth.json"), "utf8"));
+      const entry = installed["https://auth.x.ai::account"];
+      // No refresh token means grok classifies the entry as a legacy session,
+      // reports it non-refreshable, and never calls the IdP or rewrites it.
+      expect(entry.refresh_token).toBeUndefined();
+      expect(readFileSync(join(worker.home, ".grok", "auth.json"), "utf8")).not.toContain("refresh-token-that-must-not-travel");
+      // Everything grok requires must survive, or the capsule is unusable.
+      expect(entry).toMatchObject({
+        key: "access-token",
+        auth_mode: "oidc",
+        create_time: "2026-07-16T21:00:00.000Z",
+        user_id: "user-1",
+        oidc_issuer: "https://auth.x.ai",
+        oidc_client_id: "account",
+        expires_at: "2026-07-16T23:00:00.000Z",
+      });
+      expect("email" in entry).toBe(true);
+
+      // The invariant that was actually broken.
+      expect(readFileSync(source)).toEqual(before);
+    } finally {
+      worker.cleanup();
+    }
+  });
+
+  test("refuses a Grok capsule whose credential cannot be proven non-refreshable", () => {
+    const home = fixtureRoot("headless-native-grok-unparsable-home-");
+    const base = fixtureRoot("headless-native-grok-unparsable-worker-");
+    mkdirSync(join(home, ".grok"), { recursive: true });
+    // Parses as JSON but is not a credential object, so no refresh token can be
+    // removed from it. Fail closed: a refused run is recoverable, a revoked
+    // operator login is not.
+    writeFileSync(join(home, ".grok", "auth.json"), JSON.stringify(["not", "a", "credential"]));
+    const worker = createWorkerEnvironment({ baseDir: base });
+    try {
+      expect(installNativeAuthCapsule(worker, "grok-build", { homeDir: home })).toMatchObject({
+        available: false,
+        manifest: null,
+        reason: expect.stringContaining("refresh token cannot be removed"),
+      });
+      expect(existsSync(join(worker.home, ".grok", "auth.json"))).toBe(false);
+    } finally {
+      worker.cleanup();
     }
   });
 

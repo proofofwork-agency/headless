@@ -213,14 +213,17 @@ export function installGrokIsolation(worker: WorkerEnvironment, options: { homeD
     GROK_DISABLE_AUTOUPDATER: "1",
     GROK_TELEMETRY_ENABLED: "0",
     GROK_FEEDBACK_ENABLED: "0",
-    // The capsule credential is a disposable copy. Grok proactively refreshes
-    // OAuth tokens ~5 minutes before expiry and rewrites auth.json in the
-    // background; inside a short-lived worker that rotation would silently
-    // diverge the capsule from the operator's real ~/.grok/auth.json. Zero
-    // disables proactive refresh as defense in depth. The capsule readiness
-    // gate separately requires recognized OIDC state to remain valid through
-    // the bounded turn, so a disposable worker is never expected to rotate
-    // the host refresh token (grok-build / GROK_AUTH_EARLY_INVALIDATION_SECS).
+    // Grok treats a token as expired this many seconds BEFORE its real expiry.
+    // Zero therefore widens the usable window of the capsule's copied access
+    // token to its full lifetime — it does not disable refreshing, which this
+    // comment previously claimed. Grok still refreshes at expiry and on any
+    // 401, so the buffer alone never protected the operator's credential.
+    //
+    // What actually protects it is that the capsule copy carries no refresh
+    // token at all (see stripGrokRefreshTokens in native-auth-capsule.ts),
+    // which makes the entry non-refreshable in Grok's own auth model. The
+    // readiness gate then guarantees the access token outlives the bounded
+    // turn, so the worker never needs to refresh.
     GROK_AUTH_EARLY_INVALIDATION_SECS: "0",
   });
   const executable = installManagedGrokPath(worker, options.homeDir);
