@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadlessDaemonClient } from "../src/daemon/client";
-import { schedulingAttempts } from "./support/timing";
+import { schedulingAttempts, schedulingWindow } from "./support/timing";
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const children = new Set<ReturnType<typeof Bun.spawn>>();
@@ -117,7 +117,7 @@ async function stopDaemon(child: ReturnType<typeof Bun.spawn>) {
   if (child.exitCode === null) child.kill("SIGTERM");
   await Promise.race([
     child.exited,
-    Bun.sleep(10_000).then(() => { throw new Error("daemon did not stop within 10 seconds"); }),
+    Bun.sleep(schedulingWindow(10_000)).then(() => { throw new Error("daemon did not stop within its bounded window"); }),
   ]);
   children.delete(child);
 }

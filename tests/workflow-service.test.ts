@@ -8,7 +8,7 @@ import { WorkflowService, type WorkflowSubmitOptions } from "../src/daemon/workf
 import { FinalityStore } from "../src/runtime/finality-store";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import type { AuthenticatedCredential } from "../src/runtime/credential-store";
-import { schedulingWindow } from "./support/timing";
+import { schedulingDeadline, schedulingWindow } from "./support/timing";
 
 const roots: string[] = [];
 
@@ -228,7 +228,9 @@ function createHarness(
     getJob: (jobId) => jobs.get(jobId),
     getJobRequest: (jobId) => jobs.request(jobId),
     waitJob: async (jobId, timeoutMs) => {
-      const deadline = Date.now() + timeoutMs;
+      // The caller's timeout is a product deadline; this harness only observes
+      // it, so the observation ceiling scales with the machine.
+      const deadline = schedulingDeadline(timeoutMs);
       for (;;) {
         const job = jobs.get(jobId);
         if (!job) throw new Error(`Unknown test job: ${jobId}`);

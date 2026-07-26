@@ -29,7 +29,7 @@ import { registerBackendDefinition, unregisterBackendDefinition, type BackendDef
 import { parseGrokJsonl } from "../src/backends/grok";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
 import { exec as headlessExec } from "../src/index";
-import { schedulingAttempts, schedulingWindow } from "./support/timing";
+import { schedulingAttempts, schedulingDeadline, schedulingWindow } from "./support/timing";
 
 setDefaultTimeout(20_000);
 
@@ -1003,7 +1003,7 @@ console.log(JSON.stringify({type:"text",text}));`);
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
     let resumed = await client.call<CouncilRecord>("council.status", { councilId: persisted.council.id });
-    const deadline = Date.now() + 30_000;
+    const deadline = schedulingDeadline(30_000);
     while (!resumed.decision && Date.now() < deadline) {
       await Bun.sleep(25);
       resumed = await client.call<CouncilRecord>("council.status", { councilId: persisted.council.id });
@@ -1108,7 +1108,7 @@ console.log(JSON.stringify({type:"text",text}));`);
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
     let resumed = await client.call<CouncilRecord>("council.status", { councilId: persisted.council.id });
-    const deadline = Date.now() + 30_000;
+    const deadline = schedulingDeadline(30_000);
     while (!resumed.decision && Date.now() < deadline) {
       await Bun.sleep(25);
       resumed = await client.call<CouncilRecord>("council.status", { councilId: persisted.council.id });
@@ -1669,7 +1669,7 @@ function rawDaemonExchange(path: string, payload: string, allowReset = false) {
     const socket = createConnection(path);
     let output = "";
     let settled = false;
-    const timer = setTimeout(() => finish(new Error("Timed out waiting for raw daemon socket.")), 5_000);
+    const timer = setTimeout(() => finish(new Error("Timed out waiting for raw daemon socket.")), schedulingWindow(5_000));
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;

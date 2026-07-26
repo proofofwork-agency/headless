@@ -12,6 +12,7 @@ import {
 import { GoalStore } from "../src/runtime/goal-store";
 import { HeadlessError } from "../src/runtime/headless-error";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
+import { schedulingAttempts } from "./support/timing";
 
 const roots: string[] = [];
 
@@ -314,7 +315,7 @@ function deferredAttempt() {
 }
 
 async function settleUntil(predicate: () => boolean) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < schedulingAttempts(50); attempt += 1) {
     if (predicate()) return;
     await Promise.resolve();
   }
