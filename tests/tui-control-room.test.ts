@@ -18,6 +18,7 @@ import {
   OverviewView,
 } from "../src/tui/views";
 import { TuiFrame } from "../src/tui/App";
+import { footerLayout } from "../src/tui/components";
 import {
   TuiController,
   restoreControlRoom,
@@ -336,24 +337,28 @@ describe("Headless read-only TUI", () => {
   test("renders compact chrome within 60x20 and adds the roomy content inset", () => {
     const state = { ...initialControlRoomState("/project"), connection: "connected" as const, status: "Observer snapshot refreshed." };
     const compact = renderFrame(state, 60, 20);
+    // A compact terminal spends every row on content: the first section starts
+    // immediately under the tabs, with no inset and no gaps between groups.
     expect(compact).toHaveLength(20);
-    expect(compact[3]).toContain("OBSERVER OVERVIEW");
-    expect(compact[7]).toContain("HEALTH");
+    expect(compact[3]).toContain("TOPOLOGY");
+    expect(compact[5]).toContain("HEALTH");
     expect(compact.at(-2)).toContain("ready");
     expect(compact.at(-1)).toContain("views");
 
+    // One row below the inset threshold: still no leading blank, but tall
+    // enough to separate the groups.
     const preThreshold = renderFrame(state, 100, 23);
-    expect(preThreshold[3]).toContain("OBSERVER OVERVIEW");
-    expect(preThreshold[4]).toContain("TOPOLOGY");
-    expect(preThreshold[7]).toBe("");
-    expect(preThreshold[8]).toContain("HEALTH");
+    expect(preThreshold[3]).toContain("TOPOLOGY");
+    expect(preThreshold[5]).toBe("");
+    expect(preThreshold[6]).toContain("HEALTH");
 
+    // At the threshold the view spends its first row on breathing room.
     const threshold = renderFrame(state, 100, 24);
     expect(threshold).toHaveLength(24);
     expect(threshold[3]).toBe("");
-    expect(threshold[4]).toContain("OBSERVER OVERVIEW");
-    expect(threshold[8]).toBe("");
-    expect(threshold[11]).toBe("");
+    expect(threshold[4]).toContain("TOPOLOGY");
+    expect(threshold[6]).toBe("");
+    expect(threshold[9]).toBe("");
 
     const views = [
       React.createElement(OverviewView, { state, width: 120, height: 24 }),
@@ -367,6 +372,37 @@ describe("Headless read-only TUI", () => {
     for (const component of views) {
       expect(plainText(renderToString(component, { columns: 120 })).startsWith("\n")).toBe(true);
     }
+  });
+
+  /**
+   * The footer used to put two `space-between` children in a fixed-width row,
+   * each truncating on its own. Once they stopped fitting they overlapped:
+   * at 100 columns the hints were cut mid-word and the caption ran straight
+   * into them ("q quv0.2.0-beta.4"). The hints are how the operator drives the
+   * TUI, so they win; the caption is decoration and yields whole.
+   */
+  test("never lets the footer caption collide with the key hints", () => {
+    const hints: Array<[string, string]> = [
+      ["\u21e5", "views"], ["1-7", "jump"], ["\u2191\u2193", "select"], ["r", "refresh"], ["q", "quit"],
+    ];
+    const caption = "v0.2.0-beta.4 \u00b7 \u00a9 2026 proofofwork.agency \u00b7 MIT";
+
+    for (const width of [60, 72, 80, 100, 120, 140, 200]) {
+      const { visibleHints, right } = footerLayout(hints, caption, width);
+      const hintsWidth = visibleHints.reduce(
+        (total, [key, action], index) => total + key.length + 1 + action.length + (index > 0 ? 3 : 0),
+        0,
+      );
+      const used = hintsWidth + (right ? 3 + right.length : 0);
+      expect(used, `width ${width} must not overflow the row`).toBeLessThanOrEqual(width - 4);
+      // Hints are dropped whole, never sliced into a partial key binding.
+      expect(visibleHints).toEqual(hints.slice(0, visibleHints.length));
+    }
+
+    // Wide terminals keep everything; the reported-broken width keeps every hint.
+    expect(footerLayout(hints, caption, 140).right).toBe(caption);
+    expect(footerLayout(hints, caption, 100).visibleHints).toHaveLength(hints.length);
+    expect(footerLayout(hints, caption, 100).right).toBe("");
   });
 
   test("retains compact keyboard and mouse navigation geometry", () => {

@@ -128,11 +128,43 @@ export function StatusStrip({ state, working, width }: { state: TuiControlRoomSt
   );
 }
 
+/** Columns consumed by `paddingX={2}` on both sides of the footer row. */
+const FOOTER_PADDING_COLUMNS = 4;
+/** Minimum gap kept between the key hints and the right-hand caption. */
+const FOOTER_GAP_COLUMNS = 3;
+
+/**
+ * Two `space-between` children each truncating independently will overlap once
+ * their natural widths exceed the row: the hints get cut mid-word and the
+ * caption is jammed against them with no separator. Budget the row instead —
+ * the hints are load-bearing (they are how the operator drives the TUI), the
+ * caption is decoration, so the caption yields first and is dropped entirely
+ * rather than shown as a fragment.
+ */
+export function footerLayout(hints: Array<[string, string]>, right: string, width: number) {
+  const available = Math.max(0, width - FOOTER_PADDING_COLUMNS);
+  const hintWidths = hints.map(([key, action]) => key.length + 1 + action.length);
+  const hintsWidth = hintWidths.reduce((total, entry, index) => total + entry + (index > 0 ? 3 : 0), 0);
+  if (right && hintsWidth + FOOTER_GAP_COLUMNS + right.length <= available) {
+    return { visibleHints: hints, right };
+  }
+  // Drop whole hints from the end rather than slicing one in half; a partial
+  // key binding is worse than an absent one.
+  let visible = hints.length;
+  while (visible > 0) {
+    const used = hintWidths.slice(0, visible).reduce((total, entry, index) => total + entry + (index > 0 ? 3 : 0), 0);
+    if (used <= available) break;
+    visible -= 1;
+  }
+  return { visibleHints: hints.slice(0, visible), right: "" };
+}
+
 export function Footer({ hints, right, width }: { hints: Array<[string, string]>; right: string; width: number }) {
+  const { visibleHints, right: caption } = footerLayout(hints, right, width);
   return (
     <Box paddingX={2} justifyContent="space-between" width={width}>
       <Text wrap="truncate">
-        {hints.map(([key, action], index) => (
+        {visibleHints.map(([key, action], index) => (
           <React.Fragment key={`${key}-${action}`}>
             {index > 0 ? <Text color={CHROME}>   </Text> : null}
             <Text bold color={ACCENT}>{key}</Text>
@@ -140,7 +172,7 @@ export function Footer({ hints, right, width }: { hints: Array<[string, string]>
           </React.Fragment>
         ))}
       </Text>
-      <Text color={CHROME} wrap="truncate">{right}</Text>
+      {caption ? <Text color={CHROME} wrap="truncate">{caption}</Text> : null}
     </Box>
   );
 }

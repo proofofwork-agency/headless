@@ -41,8 +41,12 @@ export function OverviewView({ state, width, height }: { state: TuiControlRoomSt
   const goal = goalSummary(state);
   const actions = nextActions(state);
   const actionRows = Math.max(1, actions.length);
-  const taskRows = goal ? 4 : 2;
-  const fixedRows = 1 + 3 + 2 + taskRows + 1 + actionRows + 1;
+  // Section title plus its live rows. The goal card shows id/status and the
+  // objective; the standing "use the CLI to change this" instruction was
+  // dropped, since the empty state already says it and it never changes.
+  const taskRows = goal ? 3 : 2;
+  // topology(2) + health(2) + task + next-actions title(1) + actions + activity title(1).
+  const fixedRows = 2 + 2 + taskRows + 1 + actionRows + 1;
   const groupCount = 5;
   const groupGap = rows >= fixedRows + 1 + groupCount - 1 ? 1 : 0;
   const activityRows = Math.max(0, rows - fixedRows - groupGap * (groupCount - 1));
@@ -51,11 +55,9 @@ export function OverviewView({ state, width, height }: { state: TuiControlRoomSt
 
   return (
     <Box flexDirection="column" paddingX={2} paddingTop={inset} height={frameRows} overflow="hidden">
-      <Text bold color={ACCENT} wrap="truncate">OBSERVER OVERVIEW · durable projected state</Text>
       <Box flexDirection="column" marginBottom={groupGap}>
         <SectionTitle title="Topology" tone={ACCENT} width={contentWidth} />
         <Text color={MUTED} wrap="truncate">  {control.connection} · project {control.project} · orchestrator {control.orchestrator} · fleet {control.fleet} · lead {control.lead}</Text>
-        <Text color={CHROME} wrap="truncate">  external lead → authenticated daemon → contained workers · this TUI only observes</Text>
       </Box>
       <Box flexDirection="column" marginBottom={groupGap}>
         <SectionTitle title="Health" tone={health.blocked + health.loginRequired || health.trust !== "native ready" ? WARN : OK} width={contentWidth} />
@@ -79,7 +81,6 @@ export function OverviewView({ state, width, height }: { state: TuiControlRoomSt
         {goal ? <>
           <Text color="white" wrap="truncate">  {goal.id} · {goal.status} · {goal.mode} · lead {goal.lead} · stage {goal.stage}</Text>
           <Text color={MUTED} wrap="truncate">  {truncateDisplay(goal.objective, contentWidth - 4)}</Text>
-          <Text color={CHROME} wrap="truncate">  use the CLI or attached foreground lead to change this goal</Text>
         </> : <EmptyHint text="No active goal. Start work with the CLI or attached foreground lead." />}
       </Box>
       <Box flexDirection="column" marginBottom={groupGap}>
