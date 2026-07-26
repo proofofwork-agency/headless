@@ -143,7 +143,7 @@ const inputSchemas = {
     timeoutMs: z.number().int().positive().max(300_000).default(90_000),
     sessionId: z.string().optional(),
   }).strict(),
-  get_messages: z.object({
+  headless_get_messages: z.object({
     limit: z.number().int().positive().max(50).default(20),
     sessionId: z.string().optional(),
   }).strict(),
@@ -189,7 +189,7 @@ const descriptions = {
   headless_get_cooperation_instructions: "Return the fleet cooperation contract.",
   send_message: "Send an attributable direct message through the daemon ledger.",
   wait_for_handoff: "Wait for a daemon-ledger event that handles a handoff.",
-  get_messages: "Pull durable session-scoped messages addressed through Headless.",
+  headless_get_messages: "Pull durable session-scoped messages addressed through Headless.",
   council_deliberate: "Run daemon-owned proposal, execution, review, vote, and decision phases over actual candidate outputs.",
   headless_workflow_run: "Start a durable required-containment workflow DAG from a v0.2 JSON definition.",
   headless_workflow_status: "List, inspect, wait for, or cancel an authenticated principal's durable workflow.",

@@ -43,7 +43,7 @@ const MCP_EXPECTED_TOOLS = [
   "headless_get_cooperation_instructions",
   "send_message",
   "wait_for_handoff",
-  "get_messages",
+  "headless_get_messages",
   "council_deliberate",
   "headless_workflow_run",
   "headless_workflow_status",
@@ -53,6 +53,30 @@ describe("MCP server surface", () => {
   test("exports a deferred stdio server", () => {
     expect(typeof startMcpServer).toBe("function");
     expect(server).toBeDefined();
+  });
+
+  /**
+   * Headless shares an MCP session with other servers, and a client picks a
+   * tool by name. An unprefixed name is therefore a collision waiting to
+   * happen: `get_messages` was exposed by three servers at once, and
+   * `headless_run` collided with a ContextRelay tool of the same name, so an
+   * agent told to "use headless" reached for the wrong product.
+   *
+   * Every tool must claim the product namespace unless it is listed here as a
+   * deliberate exception. Adding a new unprefixed tool fails this test.
+   */
+  test("keeps every tool inside the headless namespace or declares the exception", () => {
+    const acknowledgedUnprefixed = new Set([
+      "ask_for_backup",
+      "send_message",
+      "wait_for_handoff",
+      "council_deliberate",
+    ]);
+    const names = mcpToolDefinitions.map((tool) => tool.name);
+    const unprefixed = names.filter((name) => !name.startsWith("headless_") && !acknowledgedUnprefixed.has(name));
+    expect(unprefixed, "new MCP tools must be headless_-prefixed or acknowledged").toEqual([]);
+    // The exception list must not rot: every entry still has to be a real tool.
+    expect([...acknowledgedUnprefixed].filter((name) => !names.includes(name))).toEqual([]);
   });
 
   test("matches the OpenCode plugin tool names, schemas, and defaults", async () => {
@@ -175,13 +199,13 @@ describe("MCP authenticated daemon integration", () => {
       content: `durable message ${secret}`,
     });
 
-    const pulled = await callTool("get_messages", { sessionId: chatId, limit: 10 });
+    const pulled = await callTool("headless_get_messages", { sessionId: chatId, limit: 10 });
     const pulledText = pulled.content[0]?.text ?? "";
     expect(pulled.isError).not.toBe(true);
     expect(pulledText).toContain("REDACTED");
     expect(pulledText).not.toContain(secret);
 
-    const drained = await callTool("get_messages", { sessionId: chatId, limit: 10 });
+    const drained = await callTool("headless_get_messages", { sessionId: chatId, limit: 10 });
     expect(drained.content[0]?.text).toBe("no messages");
 
     const context = await fixture.rootClient.call<RawContext>("ledger.context", {

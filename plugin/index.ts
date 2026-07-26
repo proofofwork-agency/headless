@@ -83,13 +83,13 @@ export const server: Plugin = async () => ({
     wait_for_handoff: registryTool("wait_for_handoff", async (args, context) => {
         return result("wait_for_handoff", await waitForHandoff(context, args.handoffId, args.timeoutMs ?? 90_000, args.sessionId));
     }),
-    get_messages: registryTool("get_messages", async (args, context) => {
+    headless_get_messages: registryTool("headless_get_messages", async (args, context) => {
         const { messages } = await call<{ messages: Array<{ id: string; chatId: string; content: string; createdAt: number }> }>(
           context,
           "messages.pull",
           { chatId: runtimeSessionId(context, args.sessionId), limit: Math.min(args.limit ?? 20, 50) },
         );
-        return result("get_messages", { messages });
+        return result("headless_get_messages", { messages });
       }),
     council_deliberate: registryTool("council_deliberate", async (args, context) => {
         return result("council_deliberate", await call(context, "council.run", { question: args.question, agents: splitList(args.agents), mode: args.mode, containment: "required", authMode: args.authMode, approvalPolicy: args.approvalPolicy, timeoutMs: args.timeoutMs, sessionId: runtimeSessionId(context, args.sessionId) }, boundedTransportTimeout((args.timeoutMs ?? 180_000) * 4 + 90_000)));
