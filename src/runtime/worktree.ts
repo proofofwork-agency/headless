@@ -52,6 +52,14 @@ export interface PlanWriteWorktreeInput {
   primaryRoot?: string;
   tempBase?: string;
   label?: string;
+  /**
+   * Base the candidate on this commit instead of the primary's HEAD, so a
+   * repair loop can chain each attempt onto the previous one's candidate and
+   * gate the accumulated result. Restricted to descendants of primary HEAD:
+   * a candidate rooted anywhere else could never integrate, and accepting one
+   * would let a caller build work against an arbitrary point in history.
+   */
+  baseSha?: string;
 }
 
 export interface WriteDiff {
@@ -97,10 +105,11 @@ export function planWriteWorktree(input: PlanWriteWorktreeInput = {}): WriteWork
     throw new Error(`planWriteWorktree: primary path is not a git worktree root: ${primary}`);
   }
   assertSafeDaemonGitRepository(primary);
-  const baseSha = getHeadSha(primary);
-  if (!baseSha) {
+  const headSha = getHeadSha(primary);
+  if (!headSha) {
     throw new Error(`planWriteWorktree: could not resolve HEAD for primary tree: ${primary}`);
   }
+  const baseSha = input.baseSha ? assertChainableBase(primary, headSha, input.baseSha) : headSha;
 
   const id = randomUUID().slice(0, 8);
   const slug = sanitizeLabel(input.label);
@@ -115,6 +124,30 @@ export function planWriteWorktree(input: PlanWriteWorktreeInput = {}): WriteWork
   assertNoCrossHardlink(targetResolved, primary);
 
   return { primaryRoot: primary, branch, worktreePath, baseSha, ephemeral: true };
+}
+
+/**
+ * A chained base must be a real commit in this repository that descends from
+ * primary HEAD. Descending is what keeps the resulting candidate integrable:
+ * `CandidateIntegrationService` requires the candidate's base to be an ancestor
+ * of primary, so a base taken from anywhere else produces work that can never
+ * be merged. Verifying it here also stops a caller from steering a contained
+ * write at an arbitrary point in history.
+ */
+function assertChainableBase(primary: string, headSha: string, requested: string) {
+  if (!/^[0-9a-f]{40}$/.test(requested)) {
+    throw new Error(`planWriteWorktree: chained base must be a full commit sha: ${requested}`);
+  }
+  if (requested === headSha) return requested;
+  const resolved = runGitStrict(["rev-parse", "--verify", `${requested}^{commit}`], primary);
+  if (!resolved.ok) {
+    throw new Error(`planWriteWorktree: chained base is not a commit in this repository: ${requested}`);
+  }
+  const descends = runGitStrict(["merge-base", "--is-ancestor", headSha, requested], primary);
+  if (!descends.ok) {
+    throw new Error(`planWriteWorktree: chained base must descend from primary HEAD: ${requested}`);
+  }
+  return requested;
 }
 
 export function createWriteWorktree(plan: WriteWorktreePlan): WriteWorktreePlan {

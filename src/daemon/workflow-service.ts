@@ -23,6 +23,7 @@ import {
 
 export type WorkflowSubmitOptions = {
   mergePolicy: Job["mergePolicy"];
+  candidateBase: string | null;
   workflowId: string;
   retryNumber: number;
 };
@@ -296,6 +297,10 @@ export class WorkflowService {
       // Write steps honor the workflow's declared policy, which defaults to
       // candidate isolation. Read-only steps never merge, so the value is moot.
       mergePolicy: queued.mode === "write" ? workflow.mergePolicy : "authorized",
+      // Chain onto the newest candidate this step depends on, so a serial
+      // chain accumulates instead of every step re-basing on primary HEAD and
+      // the last one silently winning.
+      candidateBase: queued.mode === "write" ? latestDependencyCandidate(workflow, queued) : null,
       workflowId,
       retryNumber: Math.max(0, queued.attempt - 1),
     });
@@ -401,6 +406,23 @@ export class WorkflowService {
     if (this.options.diagnostic) return this.options.diagnostic(message, error);
     console.error(redactAndTruncate(`${message} ${messageOf(error)}`, 2_048).text);
   }
+}
+
+/**
+ * The candidate commit of the most recently completed step this one depends on.
+ * Only required dependencies are chained: an optional dependency may have
+ * failed, and basing on a failed sibling's work is not something the graph
+ * asked for.
+ */
+function latestDependencyCandidate(workflow: Workflow, step: Workflow["steps"][number]): string | null {
+  let newest: { candidate: string; updatedAt: number } | null = null;
+  for (const id of step.dependsOn) {
+    const dependency = workflow.steps.find((candidate) => candidate.id === id);
+    const commit = dependency?.result?.commit?.candidate;
+    if (!commit) continue;
+    if (!newest || dependency!.updatedAt > newest.updatedAt) newest = { candidate: commit, updatedAt: dependency!.updatedAt };
+  }
+  return newest?.candidate ?? null;
 }
 
 function validateDependencies(steps: Array<{ id: string; dependsOn: string[]; optionalDependsOn?: string[] }>) {

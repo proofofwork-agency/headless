@@ -243,3 +243,66 @@ function worktreeList(repo: string) {
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
+
+/**
+ * Candidate chaining: a repair loop bases each attempt on the previous one's
+ * candidate so the accumulated result is what gets gated. The base is
+ * restricted to descendants of primary HEAD because CandidateIntegrationService
+ * requires the candidate's base to be an ancestor of primary — work rooted
+ * anywhere else could never be integrated.
+ */
+describe("chained candidate bases", () => {
+  gitTest("bases a plan on a descendant commit instead of primary HEAD", () => {
+    const repo = initRepo();
+    const head = headSha(repo);
+    const descendant = commitDescendant(repo, "chained.txt", "chained\n");
+    expect(descendant).not.toBe(head);
+
+    const plan = planWriteWorktree({ primaryRoot: repo, baseSha: descendant });
+    expect(plan.baseSha).toBe(descendant);
+
+    const created = createWriteWorktree(plan);
+    try {
+      expect(readFileSync(join(created.worktreePath, "chained.txt"), "utf8")).toBe("chained\n");
+    } finally {
+      removeWriteWorktree(created, { force: true });
+    }
+  });
+
+  gitTest("refuses a base that does not descend from primary HEAD", () => {
+    const repo = initRepo();
+    commitDescendant(repo, "second.txt", "second\n");
+    // The root commit is an ancestor of HEAD, never a descendant of it.
+    const root = runGitStrict(["rev-list", "--max-parents=0", "HEAD"], repo).stdout.trim();
+    expect(root).toMatch(/^[0-9a-f]{40}$/);
+    expect(() => planWriteWorktree({ primaryRoot: repo, baseSha: root }))
+      .toThrow("must descend from primary HEAD");
+  });
+
+  gitTest("refuses an unknown commit and a short sha", () => {
+    const repo = initRepo();
+    expect(() => planWriteWorktree({ primaryRoot: repo, baseSha: "f".repeat(40) }))
+      .toThrow("not a commit in this repository");
+    expect(() => planWriteWorktree({ primaryRoot: repo, baseSha: headSha(repo).slice(0, 8) }))
+      .toThrow("full commit sha");
+  });
+
+  gitTest("still uses primary HEAD when no base is requested", () => {
+    const repo = initRepo();
+    expect(planWriteWorktree({ primaryRoot: repo }).baseSha).toBe(headSha(repo));
+  });
+});
+
+function headSha(repo: string) {
+  const result = runGitStrict(["rev-parse", "HEAD"], repo);
+  expect(result.ok).toBe(true);
+  return result.stdout.trim();
+}
+
+/** Advance the repo by one commit and return the new sha. */
+function commitDescendant(repo: string, file: string, contents: string) {
+  writeFileSync(join(repo, file), contents, "utf8");
+  expect(runGitStrict(["add", file], repo).ok).toBe(true);
+  expect(runGitStrict(["-c", "user.email=headless@example.test", "-c", "user.name=Headless Test", "commit", "-m", `add ${file}`], repo).ok).toBe(true);
+  return headSha(repo);
+}

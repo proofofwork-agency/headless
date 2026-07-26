@@ -75,6 +75,8 @@ export type InternalRunOptions = ExecOptions & {
   writeIntegration?: WriteIntegrationPolicy;
   /** Daemon-owned durable checkout manifests. */
   worktreeLease?: WorktreeLeaseHooks;
+  /** Chain this write onto an earlier candidate commit instead of primary HEAD. */
+  candidateBase?: string | null;
   /** Short-lived daemon cooperation capability; absent from public ExecOptions. */
   runTool?: RunToolWorkerAccess;
 };
@@ -293,6 +295,7 @@ async function runContainedWrite(
       primaryRoot: cwd,
       label: options.backend,
       tempBase: options.worktreeLease?.tempBase,
+      baseSha: options.candidateBase ?? undefined,
     });
     options.worktreeLease?.onPlanned(plan, "candidate");
     leasePrepared = !!options.worktreeLease;
