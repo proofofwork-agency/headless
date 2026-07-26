@@ -93,6 +93,14 @@ export function installNativeAuthCapsule(
         read.contents.fill(0);
         return { available: false, manifest: null, reason, model: model?.model ?? null };
       }
+      // The copy must not be able to refresh: a disposable worker that
+      // refreshes revokes the operator's own login. See stripGrokRefreshTokens.
+      const stripped = stripGrokRefreshTokens(read.contents);
+      read.contents.fill(0);
+      if ("reason" in stripped) {
+        return { available: false, manifest: null, reason: stripped.reason, model: model?.model ?? null };
+      }
+      read.contents = stripped.contents;
     }
     const destination = file.destination(worker);
     assertWithinWorker(worker.root, destination);
@@ -146,6 +154,52 @@ export function installNativeAuthCapsule(
  * recognized OIDC capsule before it can expire during the bounded turn. Keep
  * unknown future/auth-file formats forward compatible and let the CLI decide.
  */
+/**
+ * Remove the refresh token from a Grok capsule copy.
+ *
+ * A refresh token is single-use: the IdP rotates it and revokes the old one.
+ * A disposable worker that refreshes therefore spends the operator's token and
+ * writes the replacement into a capsule that is about to be deleted, leaving
+ * the real `~/.grok/auth.json` holding a credential the server has already
+ * revoked. Every later worker then copies that dead token, and the operator is
+ * logged out without ever having done anything.
+ *
+ * `GROK_AUTH_EARLY_INVALIDATION_SECS=0` cannot prevent this. It only removes
+ * the *proactive* refresh buffer; a 401 still triggers a refresh.
+ *
+ * Removing the token is what actually closes the hole, and it is load-bearing
+ * rather than advisory: an `oidc` entry with no `refresh_token` classifies as a
+ * legacy session in grok's own auth model, which reports itself as
+ * non-refreshable, so the CLI never calls the IdP and never rewrites the file.
+ * The capsule simply uses its access token until it expires — which is exactly
+ * what `grokOidcReadinessReason` already guarantees outlives the bounded turn.
+ *
+ * Every other field is preserved. The entry still has to satisfy grok's own
+ * required-field set, so this deliberately removes one key rather than
+ * rebuilding the record from an allowlist that could drift.
+ */
+export function stripGrokRefreshTokens(contents: Buffer): { contents: Buffer } | { reason: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents.toString("utf8"));
+  } catch {
+    // The readiness gate keeps unknown formats forward compatible, but an
+    // unparsable file cannot be proven non-refreshable. Fail closed: a refused
+    // run is recoverable, a revoked operator login is not.
+    return { reason: "Grok native login state could not be parsed, so its refresh token cannot be removed before isolation." };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { reason: "Grok native login state was not a credential object, so its refresh token cannot be removed before isolation." };
+  }
+  for (const entry of Object.values(parsed as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    delete (entry as Record<string, unknown>).refresh_token;
+  }
+  // Always a fresh buffer, never the caller's. The caller zeroes the source
+  // right after this returns, and aliasing it would wipe the capsule too.
+  return { contents: Buffer.from(`${JSON.stringify(parsed)}\n`, "utf8") };
+}
+
 function grokOidcReadinessReason(contents: Buffer, nowMs: number, minimumValidityMs: number) {
   let parsed: unknown;
   try {
