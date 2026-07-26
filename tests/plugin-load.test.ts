@@ -34,7 +34,7 @@ const EXPECTED_TOOLS = [
   "headless_get_cooperation_instructions",
   "send_message",
   "wait_for_handoff",
-  "get_messages",
+  "headless_get_messages",
   "council_deliberate",
   "headless_workflow_run",
   "headless_workflow_status",
@@ -58,7 +58,7 @@ describe("OpenCode plugin loadability", () => {
       expect(jsonSchema.type).toBe("object");
       expect(jsonSchema.properties).toBeDefined();
       expect(jsonSchema).not.toHaveProperty("$defs");
-      const isFleetTool = ["ask_for_backup", "send_message", "wait_for_handoff", "get_messages", "council_deliberate"].includes(name);
+      const isFleetTool = ["ask_for_backup", "send_message", "wait_for_handoff", "headless_get_messages", "council_deliberate"].includes(name);
       if (!isFleetTool) expect(name).toStartWith("headless_");
     }
 
@@ -123,7 +123,7 @@ describe("OpenCode plugin authenticated daemon integration", () => {
     const context = pluginContext(fixture.project, "plugin-queue");
     const hooks = await server({} as never);
     const append = hooks.tool?.headless_append_note;
-    const getMessages = hooks.tool?.get_messages;
+    const getMessages = hooks.tool?.headless_get_messages;
     expect(append).toBeDefined();
     expect(getMessages).toBeDefined();
 

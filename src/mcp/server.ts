@@ -134,7 +134,7 @@ const TOOL_REQUIRED_SCOPES: Partial<Record<typeof TOOL_DEFINITIONS[number]["name
   headless_gate: ["gate"],
   send_message: ["ledger:write"],
   wait_for_handoff: ["ledger:read"],
-  get_messages: ["messages"],
+  headless_get_messages: ["messages"],
   council_deliberate: ["council"],
   headless_workflow_run: ["run"],
   headless_workflow_status: ["run"],
@@ -285,7 +285,7 @@ async function handleCallTool(req: { params: { name: string; arguments?: Record<
       const res = await waitForDaemonHandoff(client, s(a.handoffId) || "", n(a.timeoutMs, 90_000)!, s(a.sessionId));
       return toolText(JSON.stringify(res));
     }
-    if (name === "get_messages") {
+    if (name === "headless_get_messages") {
       const limit = Math.min(50, n(a.limit, 20)!);
       const chatId = s(a.sessionId, "headless_default")!;
       const client = await daemonClient(safeCwd);

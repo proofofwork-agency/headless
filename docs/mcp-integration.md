@@ -89,7 +89,7 @@ Read and communication tools:
 - `headless_approval` lists visible approvals.
 - `headless_candidate` inspects a candidate.
 - `headless_append_note`, `headless_record_artifact`, `headless_read_context`, `headless_task_state`, and finality/task/vote helpers use the existing verified ledger and stores.
-- `send_message`, `wait_for_handoff`, and `get_messages` use Headless’s durable, redacted, principal-isolated communication paths.
+- `send_message`, `wait_for_handoff`, and `headless_get_messages` use Headless’s durable, redacted, principal-isolated communication paths.
 
 There is no generic `claude/channel` fallback and no process-local queue or ledger. Host-specific channel adaptation belongs in the host integration layer.
 
