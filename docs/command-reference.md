@@ -8,7 +8,7 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | --- | --- | --- | --- |
 | `lead` | Beta 1 | — | `lead <use <host>|status|release> [--cwd dir]   Configure the externally launched foreground lead.` |
 | `exec` | Beta 1 | run | `exec | run [--backend id] [--mode read-only|write] [--model m] [--agent a] [--session-id id] [--timeout-ms n] [--cwd dir] [--extension-config /absolute/trusted.json] [--json] [--stream] [--require-sandbox|--unsafe-no-sandbox] "prompt"` |
-| `daemon` | Beta 1 | — | `daemon <serve|status|stop> [--cwd dir] [--extension-config /absolute/trusted.json]` |
+| `daemon` | Beta 1 | — | `daemon <serve|status|stop|reap> [--cwd dir] [--extension-config /absolute/trusted.json] [--idle-timeout-ms ms | --no-idle-timeout] [reap: --confirm] [reap: --all]` |
 | `project` | Beta 1 | — | `project trust <status|grant|revoke> [--allow-native-direct-unrestricted] [--allow-bypass] [--cwd dir]` |
 | `fleet` | Experimental | — | `experimental fleet <health|profile get|list|remove> [--profile-id id] | fleet profile create --profile-id id --agent backend [--agent backend ...] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate] | fleet profile upsert [--file profile.json | [--profile-id id] --auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate]` |
 | `goal` | Experimental | — | `experimental goal <start|run|send|follow|status|list|cancel|result> [--goal-id id] [--mode read-only|write] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--detach] [--timeout-ms n]` |
@@ -29,7 +29,7 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | `mcp` | Beta 1 | — | `mcp <serve|install|remove|status> [codex|grok|claude|opencode] [--cwd dir]` |
 | `launch` | Experimental | — | `experimental launch <backend> [options]        Compatibility one-shot routed through the daemon.` |
 | `skill` | Experimental | skills | `experimental skill | skills <list|inspect|import|enable|use|revoke> [options]` |
-| `loop` | Experimental | — | `experimental loop <start|list|status|pause|resume|cancel> --confirm [finite policy options]` |
+| `loop` | Experimental | — | `experimental loop <start|list|status|pause|resume|cancel> --confirm [--repair --check name] [finite policy options]` |
 | `verify` | Beta 1 | — | `verify [--evidence] [--json] [--cwd dir]   Verify the tamper-evident ledger and optional evidence files.` |
 | `ledger` | Experimental | — | `experimental ledger <verify [--evidence] [--json] | repair-tail --confirm> [--cwd dir]` |
 | `receipt` | Experimental | — | `experimental receipt <show <runId> | list | export <runId> [--out file] | verify <runId> | verify --file export.json [--ledger ledger.jsonl] | diff <runIdA> <runIdB>> [--json] [--cwd dir]   Inspect, export, compare, and verify execution receipts.` |

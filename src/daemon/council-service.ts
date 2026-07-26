@@ -65,6 +65,10 @@ export class CouncilService {
 
   constructor(private readonly options: CouncilServiceOptions) {}
 
+  get activeCount() {
+    return this.active.size;
+  }
+
   async run(params: Record<string, unknown>, principal: string) {
     const input = CouncilRunParamsSchema.parse(params);
     const agents = input.agents ?? ["opencode", "claude-code", "codex"];

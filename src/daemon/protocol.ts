@@ -427,6 +427,8 @@ export const WorkflowStepParamsSchema = z.object({
   agent: z.string().trim().min(1).max(256).nullable().default(null),
   timeoutMs: PositiveTimeoutSchema.default(180_000),
   dependsOn: z.array(IdentifierSchema).max(32).default([]),
+  /** Dependencies that must settle but need not succeed; see WorkflowStepSchema. */
+  optionalDependsOn: z.array(IdentifierSchema).max(32).default([]),
   maxAttempts: z.number().int().positive().max(8).default(1),
 }).strict();
 
@@ -435,6 +437,8 @@ export const WorkflowRunParamsSchema = z.object({
   sessionId: IdentifierSchema.nullable().default(null),
   authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
+  /** Write steps stay in an isolated candidate unless explicitly authorized. */
+  mergePolicy: z.enum(["authorized", "preserve"]).default("preserve"),
   steps: z.array(WorkflowStepParamsSchema).min(1).max(64),
   requirements: z.object({
     policy: z.boolean().default(true),

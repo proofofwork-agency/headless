@@ -64,6 +64,7 @@
     "lint": "bun scripts/source-hygiene.ts lint",
     "format:check": "bun scripts/source-hygiene.ts format",
     "check:docs": "bun scripts/docs-check.ts",
+    "check:daemons": "bun scripts/daemon-hygiene.ts",
     "generate:docs": "bun scripts/generate-command-reference.ts",
     "check": "bun run typecheck && bun run typecheck:plugin && bun run lint && bun run format:check && bun run check:docs && bun run test",
     "smoke:pack": "bun scripts/pack-smoke.ts",

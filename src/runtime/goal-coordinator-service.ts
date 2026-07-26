@@ -288,6 +288,10 @@ export class GoalCoordinatorService {
     return this.active.get(goalId) ?? Promise.resolve();
   }
 
+  get activeCount() {
+    return this.active.size;
+  }
+
   async waitForIdle() {
     await Promise.allSettled([...this.active.values()]);
   }

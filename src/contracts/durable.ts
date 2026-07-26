@@ -184,6 +184,14 @@ export const WorkflowStepSchema = z.object({
   agent: z.string().trim().min(1).max(256).nullable(),
   timeoutMs: PositiveTimeoutSchema,
   dependsOn: z.array(IdentifierSchema).max(32),
+  /**
+   * Dependencies that must *settle* but need not succeed. A step waits for
+   * these to reach a terminal state and then runs regardless of the outcome,
+   * receiving the failure as evidence. This is what lets one node die without
+   * failing the whole run: a verifier can still report on the work that landed
+   * when a sibling repair failed, instead of being blocked into silence.
+   */
+  optionalDependsOn: z.array(IdentifierSchema).max(32).default([]),
   maxAttempts: z.number().int().positive().max(8),
   attempt: z.number().int().nonnegative().max(8),
   state: WorkflowStepStateSchema,
@@ -194,7 +202,10 @@ export const WorkflowStepSchema = z.object({
   updatedAt: TimestampSchema,
 }).strict().superRefine((step, context) => {
   if (step.attempt > step.maxAttempts) context.addIssue({ code: z.ZodIssueCode.custom, message: "Workflow step attempts exceed maxAttempts." });
-  if (step.dependsOn.includes(step.id)) context.addIssue({ code: z.ZodIssueCode.custom, message: "Workflow step cannot depend on itself." });
+  if (step.dependsOn.includes(step.id) || step.optionalDependsOn.includes(step.id)) context.addIssue({ code: z.ZodIssueCode.custom, message: "Workflow step cannot depend on itself." });
+  for (const dependency of step.optionalDependsOn) {
+    if (step.dependsOn.includes(dependency)) context.addIssue({ code: z.ZodIssueCode.custom, message: `Workflow dependency ${dependency} cannot be both required and optional.` });
+  }
   if (step.lastJobId !== null && !step.jobIds.includes(step.lastJobId)) context.addIssue({ code: z.ZodIssueCode.custom, message: "Workflow step lastJobId must be present in jobIds." });
 });
 
@@ -213,6 +224,13 @@ export const WorkflowSchema = z.object({
   sessionId: IdentifierSchema.nullable(),
   authMode: AuthModeSchema.default("broker"),
   approvalPolicy: ApprovalPolicySchema.default("ask"),
+  /**
+   * Whether write steps may integrate into the primary checkout. Defaults to
+   * "preserve": edits stay in an isolated candidate and a human decides. Only
+   * an explicit policy may raise this, and the daemon's write gates still
+   * apply on top.
+   */
+  mergePolicy: z.enum(["authorized", "preserve"]).default("preserve"),
   state: z.enum(["queued", "running", "paused", "cancelling", "succeeded", "failed", "blocked", "cancelled"]),
   steps: z.array(WorkflowStepSchema).min(1).max(64),
   requirements: WorkflowFinalityRequirementsSchema,
@@ -227,10 +245,13 @@ export const WorkflowSchema = z.object({
     ids.add(step.id);
   }
   for (const [index, step] of workflow.steps.entries()) {
-    for (const dependency of step.dependsOn) {
-      if (!ids.has(dependency)) context.addIssue({ code: z.ZodIssueCode.custom, message: `Unknown workflow dependency: ${dependency}`, path: ["steps", index, "dependsOn"] });
+    for (const field of ["dependsOn", "optionalDependsOn"] as const) {
+      for (const dependency of step[field]) {
+        if (!ids.has(dependency)) context.addIssue({ code: z.ZodIssueCode.custom, message: `Unknown workflow dependency: ${dependency}`, path: ["steps", index, field] });
+      }
     }
   }
+  // Optional edges still order execution, so they must be acyclic too.
   if (hasWorkflowCycle(workflow.steps)) context.addIssue({ code: z.ZodIssueCode.custom, message: "Workflow dependencies must form an acyclic graph.", path: ["steps"] });
 });
 
@@ -259,8 +280,8 @@ export type WorkflowStep = z.infer<typeof WorkflowStepSchema>;
 export type Workflow = z.infer<typeof WorkflowSchema>;
 export type FinalityDecision = z.infer<typeof FinalityDecisionSchema>;
 
-function hasWorkflowCycle(steps: Array<{ id: string; dependsOn: string[] }>) {
-  const dependencies = new Map(steps.map((step) => [step.id, step.dependsOn]));
+function hasWorkflowCycle(steps: Array<{ id: string; dependsOn: string[]; optionalDependsOn?: string[] }>) {
+  const dependencies = new Map(steps.map((step) => [step.id, [...step.dependsOn, ...step.optionalDependsOn ?? []]]));
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const visit = (id: string): boolean => {

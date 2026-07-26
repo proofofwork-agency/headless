@@ -24,8 +24,8 @@ export const COMMAND_SPECS = [
   },
   {
     name: "daemon",
-    valueFlags: ["--cwd", "--extension-config", "--extension-module"],
-    help: "daemon <serve|status|stop> [--cwd dir] [--extension-config /absolute/trusted.json]",
+    valueFlags: ["--cwd", "--extension-config", "--extension-module", "--idle-timeout-ms"],
+    help: "daemon <serve|status|stop|reap> [--cwd dir] [--extension-config /absolute/trusted.json] [--idle-timeout-ms ms | --no-idle-timeout] [reap: --confirm] [reap: --all]",
   },
   {
     name: "project",
@@ -125,7 +125,7 @@ export const COMMAND_SPECS = [
   },
   { name: "coop-proof", aliases: ["autonomy-coop-proof"], valueFlags: ["--cwd", "--extension-config", "--extension-module"], internal: true },
   { name: "skill", aliases: ["skills"], valueFlags: ["--source", "--backend", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"], help: "skill | skills <list|inspect|import|enable|use|revoke> [options]" },
-  { name: "loop", valueFlags: ["--loop-id", "--file", "--mode", "--deadline-ms", "--max-iterations", "--per-iteration-cost-usd", "--total-cost-usd", "--cwd", "--extension-config", "--extension-module"], help: "loop <start|list|status|pause|resume|cancel> --confirm [finite policy options]" },
+  { name: "loop", valueFlags: ["--loop-id", "--file", "--mode", "--deadline-ms", "--max-iterations", "--per-iteration-cost-usd", "--total-cost-usd", "--check", "--backend", "--verify-backend", "--auth-mode", "--approval-policy", "--model", "--max-repair-nodes", "--stagnation-limit", "--gate-timeout-ms", "--step-timeout-ms", "--cwd", "--extension-config", "--extension-module"], help: "loop <start|list|status|pause|resume|cancel> --confirm [--repair --check name] [finite policy options]" },
   { name: "verify", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "verify [--evidence] [--json] [--cwd dir]   Verify the tamper-evident ledger and optional evidence files." },
   { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "ledger <verify [--evidence] [--json] | repair-tail --confirm> [--cwd dir]" },
   {
