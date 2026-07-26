@@ -21,7 +21,14 @@ export type LoopServiceOptions = {
   cancelGoal: (id: string, principal: string) => unknown;
   cancelWorkflow: (id: string) => unknown;
   /** Runs the named gate checks. This report is the repair loop's only oracle. */
-  runGate?: (target: RepairTarget) => Promise<ReleaseGateReport>;
+  /**
+   * Runs the named checks. `candidate` gates that accumulated commit in a
+   * throwaway worktree instead of the primary checkout — without it a loop
+   * that never touches primary can only ever re-measure an unchanged tree.
+   */
+  runGate?: (target: RepairTarget, candidate: string | null) => Promise<ReleaseGateReport>;
+  /** Newest candidate commit produced by a finished repair graph, if any. */
+  repairCandidate?: (workId: string) => string | null;
   /**
    * Admits a compiled repair graph through the durable workflow engine.
    * `integrationPolicy` comes from the loop policy and decides whether repairs
@@ -116,7 +123,7 @@ export class LoopService {
       this.store.update(id, (item) => {
         item.state = "running"; item.nextRunAt = null; item.lastObservedAt = now;
         item.usedRequests += item.policy.perIteration.maxRequests; item.usedCostUsd += item.policy.perIteration.maxCostUsd;
-        item.iterations.push({ id: `${item.id}-iteration-${number}`, number, state: "admitted", workKind: item.policy.target.kind, workId: null, admittedAt: now, completedAt: null, reservedCostUsd: item.policy.perIteration.maxCostUsd, requests: item.policy.perIteration.maxRequests, error: null, evidence: null });
+        item.iterations.push({ id: `${item.id}-iteration-${number}`, number, state: "admitted", workKind: item.policy.target.kind, workId: null, admittedAt: now, completedAt: null, reservedCostUsd: item.policy.perIteration.maxCostUsd, requests: item.policy.perIteration.maxRequests, error: null, evidence: null, candidate: null });
       });
       await this.admitWork(this.require(id), number);
     }
@@ -145,7 +152,7 @@ export class LoopService {
 
     const carried = this.carriedGateReport.get(loop.id);
     this.carriedGateReport.delete(loop.id);
-    const report = carried ?? await runGate(target);
+    const report = carried ?? await runGate(target, candidateTip(loop));
     const prior = priorEvidence(loop);
     const graph = compileRepairGraph(report, prior, { maxRepairNodes: target.maxRepairNodes });
 
@@ -195,25 +202,17 @@ export class LoopService {
     const target = loop.policy.target;
     if (target.kind !== "repair" || !this.options.runGate) return;
 
-    // Repairs run as write jobs, which land in an isolated candidate and are
-    // gated there. The loop's own gate measures the primary checkout, so under
-    // any policy short of "authorized" the repair can never move it. Iterating
-    // would re-diagnose an unchanged project until the stagnation guard fired
-    // and report it as agent failure, which would be untrue. Stop and say what
-    // is actually blocking: a human has to integrate the candidate.
-    if (loop.policy.integrationPolicy !== "authorized") {
+    // Repairs land in an isolated candidate, so record what this iteration
+    // produced before gating. The gate then measures that accumulated commit
+    // rather than the primary checkout, which the loop may never touch.
+    const produced = this.options.repairCandidate?.(loop.iterations.find((entry) => entry.number === number)?.workId ?? "") ?? null;
+    if (produced) {
       this.store.update(id, (item) => {
-        const iteration = item.iterations.find((candidate) => candidate.number === number)!;
-        iteration.state = "succeeded";
-        iteration.completedAt = Date.now();
-        item.state = "awaiting_integration";
-        item.nextRunAt = null;
-        item.lastObservedAt = Math.max(Date.now(), item.lastObservedAt);
+        item.iterations.find((entry) => entry.number === number)!.candidate = produced;
       });
-      return;
     }
 
-    const report = await this.options.runGate(target);
+    const report = await this.options.runGate(target, produced ?? candidateTip(this.require(id)));
     const green = report.ok;
     // Hand this observation to the next iteration instead of re-gating an
     // unchanged project.
@@ -229,7 +228,15 @@ export class LoopService {
       iteration.state = green ? "succeeded" : "failed";
       iteration.completedAt = Date.now();
       item.lastObservedAt = Math.max(Date.now(), item.lastObservedAt);
-      if (green) { item.state = "succeeded"; return; }
+      if (green) {
+        // Green on the accumulated candidate. With integration authority the
+        // work has already reached the primary checkout, so the loop is done.
+        // Without it the repairs are correct but still isolated, and a human
+        // owns the last step — say that rather than claiming success.
+        item.state = item.policy.integrationPolicy === "authorized" ? "succeeded" : "awaiting_integration";
+        item.nextRunAt = null;
+        return;
+      }
       iteration.error = `Gate still failing after the repair graph completed: ${report.checks.filter((check) => !check.ok).map((check) => check.name).join(", ")}.`;
       item.state = "backoff";
       item.nextRunAt = item.lastObservedAt + backoff(item.policy.backoff, number);
@@ -237,6 +244,20 @@ export class LoopService {
   }
   private require(id: string) { const loop = this.store.get(id); if (!loop) throw new HeadlessError("INVALID_REQUEST", `Unknown loop: ${id}`); return loop; }
   private mutateOwned(id: string, principal: string, fn: (loop: LoopRecord) => void) { const loop = this.require(id); if (loop.principal !== principal) throw new HeadlessError("POLICY_DENIED", "Loop belongs to another principal."); return this.store.update(id, fn); }
+}
+
+/**
+ * The newest candidate commit this loop has accumulated, or null before the
+ * first repair lands. This is what the gate must measure: repairs live in
+ * candidates, so gating the primary would report on a tree the loop never
+ * touched.
+ */
+function candidateTip(loop: LoopRecord): string | null {
+  for (let index = loop.iterations.length - 1; index >= 0; index -= 1) {
+    const candidate = loop.iterations[index]?.candidate;
+    if (candidate) return candidate;
+  }
+  return null;
 }
 
 /** Every iteration's observation, oldest first — the loop's memory. */

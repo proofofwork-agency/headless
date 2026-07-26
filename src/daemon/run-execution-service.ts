@@ -287,6 +287,7 @@ export class RunExecutionService {
                   operations: runToolEndpoint.operations,
                 } : undefined,
                 worktreeLease: request.mode === "write" ? this.options.worktreeLeases.createHooks(jobId) : undefined,
+                candidateBase: request.mode === "write" ? this.options.jobs.get(jobId)?.candidateBase ?? null : null,
                 writeIntegration: request.mode === "write" ? {
                   actor: principal,
                   grantId: writeAuthorization?.grantId ?? null,

@@ -34,6 +34,7 @@ export class JobStore {
     maxAttempts?: number;
     retryNumber?: number;
     mergePolicy?: Job["mergePolicy"];
+    candidateBase?: string | null;
     workflowId?: string | null;
     councilId?: string | null;
     councilSlot?: string | null;
@@ -56,6 +57,7 @@ export class JobStore {
       authMode: input.request.authMode,
       approvalPolicy: input.request.approvalPolicy,
       mergePolicy: input.mergePolicy ?? "authorized",
+      candidateBase: input.candidateBase ?? null,
       state: "queued",
       attempt: 1,
       maxAttempts: input.maxAttempts ?? 1,

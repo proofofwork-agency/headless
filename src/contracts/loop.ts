@@ -90,6 +90,12 @@ export const LoopIterationSchema = z.object({
   workKind: z.enum(["goal", "workflow", "repair"]), workId: IdentifierSchema.nullable(), admittedAt: TimestampSchema, completedAt: TimestampSchema.nullable(),
   reservedCostUsd: z.number().nonnegative(), requests: z.number().int().nonnegative(), error: z.string().max(4_096).nullable(),
   evidence: RepairEvidenceSchema.nullable().default(null),
+  /**
+   * Newest candidate commit this iteration produced. Repairs land in isolated
+   * candidates, so this — not the primary checkout — is what the next gate
+   * measures and what an operator ultimately integrates.
+   */
+  candidate: z.string().regex(/^[0-9a-f]{40}$/).nullable().default(null),
 }).strict();
 
 export const LoopRecordSchema = z.object({

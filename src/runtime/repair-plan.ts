@@ -84,11 +84,16 @@ export function compileRepairGraph(
   const dropped = failures.length - selected.length;
   const history = priorContext(prior, signature);
 
+  // Repairs run in series, each depending on the one before it. They used to
+  // fan out, which is faster but cannot accumulate: every write job would base
+  // on primary HEAD and only the last candidate would survive, so the gate
+  // would never measure the combined result. Serialising also means a later
+  // repair sees the earlier fix rather than working from a stale tree.
   const steps: RepairStep[] = selected.map((check, index) => ({
     id: repairStepId(check.name, index),
     kind: "execution",
     prompt: repairPrompt(check, history, dropped),
-    dependsOn: [],
+    dependsOn: index === 0 ? [] : [repairStepId(selected[index - 1]!.name, index - 1)],
     optionalDependsOn: [],
   }));
 

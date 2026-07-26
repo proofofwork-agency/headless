@@ -56,6 +56,13 @@ export const JobSchema = z.object({
   approvalPolicy: ApprovalPolicySchema.default("ask"),
   /** Durable daemon policy: council candidates are never merged before vote. */
   mergePolicy: z.enum(["authorized", "preserve"]).default("authorized"),
+  /**
+   * Base this write on an earlier candidate commit instead of primary HEAD, so
+   * a repair loop can chain attempts and gate the accumulated result. Daemon
+   * assigned; never accepted from RPC input, and verified to descend from
+   * primary HEAD before a worktree is created.
+   */
+  candidateBase: z.string().regex(/^[0-9a-f]{40}$/).nullable().default(null),
   state: JobStateSchema,
   attempt: z.number().int().positive(),
   maxAttempts: z.number().int().positive(),

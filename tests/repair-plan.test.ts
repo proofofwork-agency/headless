@@ -85,8 +85,11 @@ describe("repair graph compilation", () => {
     expect(graph.resolved).toBe(false);
     const repairs = graph.steps.filter((step) => step.id !== REPAIR_VERIFY_STEP_ID);
     expect(repairs).toHaveLength(2);
-    // Independent failures must be able to run concurrently.
-    expect(repairs.every((step) => step.dependsOn.length === 0)).toBe(true);
+    // Repairs run in series so each write chains onto the previous candidate;
+    // fanning out would leave every step based on primary HEAD, with only the
+    // last candidate surviving for the gate to measure.
+    expect(repairs[0]!.dependsOn).toEqual([]);
+    expect(repairs[1]!.dependsOn).toEqual([repairs[0]!.id]);
     const verify = graph.steps.find((step) => step.id === REPAIR_VERIFY_STEP_ID)!;
     expect(verify.kind).toBe("test");
     // Optional, not required: a dead repair must not block the verifier.
@@ -100,7 +103,12 @@ describe("repair graph compilation", () => {
       checkResult("build", { output: "b" }),
       checkResult("test", { output: "c" }),
     ]));
-    for (const step of graph.steps) expect(step.dependsOn).toEqual([]);
+    const verify = graph.steps.find((step) => step.id === REPAIR_VERIFY_STEP_ID)!;
+    expect(verify.dependsOn).toEqual([]);
+    const repairs = graph.steps.filter((step) => step.id !== REPAIR_VERIFY_STEP_ID);
+    expect(verify.optionalDependsOn).toEqual(repairs.map((step) => step.id));
+    // The chain is strictly linear: each repair requires only its predecessor.
+    expect(repairs.map((step) => step.dependsOn.length)).toEqual([0, 1, 1]);
   });
 
   test("produces an acyclic graph with unique ids even for colliding check names", () => {

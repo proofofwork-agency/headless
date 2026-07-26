@@ -23,6 +23,7 @@ import type { RunExecutionControls } from "./run-execution-service";
 
 export type JobAdmissionSubmitOptions = {
   mergePolicy?: Job["mergePolicy"];
+  candidateBase?: string | null;
   workflowId?: string | null;
   retryNumber?: number;
   maxAttempts?: number;
@@ -662,6 +663,7 @@ export class JobAdmissionService {
       principal,
       request,
       mergePolicy: options.mergePolicy ?? "authorized",
+      candidateBase: options.candidateBase ?? null,
       workflowId: options.workflowId ?? null,
       maxAttempts: options.maxAttempts,
       retryNumber: options.retryNumber ?? 0,

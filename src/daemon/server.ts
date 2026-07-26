@@ -47,6 +47,8 @@ import { appendEvent, getOrCreateSession } from "../runtime/session";
 import { CouncilStore } from "../runtime/council-store";
 import { CouncilService } from "./council-service";
 import { DEFAULT_GATES, runReleaseGate, type GateCheck } from "../runtime/release-gate";
+import { createWriteWorktree, planWriteWorktree, removeWriteWorktree } from "../runtime/worktree";
+import type { RepairTarget } from "../contracts/loop";
 import { OrchestrationStateStore } from "../runtime/orchestration-state";
 import { SkillRegistry } from "../runtime/skill-registry";
 import { LoopStore } from "../runtime/loop-store";
@@ -1365,13 +1367,18 @@ export class HeadlessDaemon {
       // The gate is the repair loop's oracle. It runs against the daemon's own
       // project root through the same contained runner every other gate uses,
       // so a loop can never grade itself.
-      runGate: (target) => runReleaseGate({
-        checks: parseGateChecks(target.checks),
-        cwd: this.state.canonicalProjectRoot,
-        state: this.stateOptions,
-        timeoutMs: target.gateTimeoutMs,
-        authenticatedPrincipal: this.principal,
-      }),
+      runGate: (target, candidate) => this.runRepairGate(target, candidate),
+      repairCandidate: (workId) => {
+        const workflow = workId ? this.workflowService.store.get(workId) : null;
+        if (!workflow) return null;
+        let newest: { candidate: string; updatedAt: number } | null = null;
+        for (const step of workflow.steps) {
+          const commit = step.result?.commit?.candidate;
+          if (!commit) continue;
+          if (!newest || step.updatedAt > newest.updatedAt) newest = { candidate: commit, updatedAt: step.updatedAt };
+        }
+        return newest?.candidate ?? null;
+      },
       startRepairWorkflow: (steps, target, principal, workId, integrationPolicy) => {
         const existing = this.workflowService.store.get(workId);
         if (existing) return { id: existing.id };
@@ -1420,6 +1427,50 @@ export class HeadlessDaemon {
     const registered = new Set(listBackendDefinitions().map((definition) => definition.id));
     const preferred = ["codex", "claude-code", "opencode", "grok-build"];
     return preferred.find((candidate) => candidate !== repairBackend && registered.has(candidate)) ?? repairBackend;
+  }
+
+  /**
+   * Gate a repair loop against its accumulated candidate rather than the
+   * primary checkout. Repairs live in candidates, so measuring primary would
+   * report on a tree the loop never touched — the reason a preserved loop
+   * previously could not converge.
+   *
+   * The worktree exists only for this gate and is removed immediately, so a
+   * loop never holds one across iterations: no lease to adopt after a restart,
+   * no branch to sweep, no unbounded disk.
+   */
+  private async runRepairGate(target: RepairTarget, candidate: string | null) {
+    const checks = parseGateChecks(target.checks);
+    if (!candidate) {
+      return runReleaseGate({
+        checks,
+        cwd: this.state.canonicalProjectRoot,
+        state: this.stateOptions,
+        timeoutMs: target.gateTimeoutMs,
+        authenticatedPrincipal: this.principal,
+      });
+    }
+    const plan = createWriteWorktree(planWriteWorktree({
+      primaryRoot: this.state.canonicalProjectRoot,
+      label: "repair-gate",
+      baseSha: candidate,
+    }));
+    try {
+      // primaryRoot makes the sandbox writable at cwd, which gate commands
+      // such as `bun run build` require.
+      return await runReleaseGate({
+        checks,
+        cwd: plan.worktreePath,
+        primaryRoot: this.state.canonicalProjectRoot,
+        state: this.stateOptions,
+        timeoutMs: target.gateTimeoutMs,
+        authenticatedPrincipal: this.principal,
+      });
+    } finally {
+      await cleanupWithDiagnostic("repair-gate.worktree", () => {
+        removeWriteWorktree(plan, { force: true, pruneBranch: true });
+      });
+    }
   }
 
   private reconcileManualLinkedRecoveries() {

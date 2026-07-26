@@ -140,20 +140,22 @@ describe("gate-driven repair loop", () => {
   });
 
   /**
-   * Repairs land in a candidate; the loop's gate measures the primary. Without
-   * integration authority the primary cannot move, so iterating again would
-   * re-diagnose an unchanged project and blame the agent for it. Stopping with
-   * an accurate reason beats spinning.
+   * Repairs land in a candidate, so the gate measures that candidate rather
+   * than the primary checkout. A preserved loop therefore converges like any
+   * other — it just stops short of merging, because a human owns that step.
    */
-  test("stops after one iteration instead of re-gating a checkout it cannot change", async () => {
+  test("converges under preserve by gating the accumulated candidate", async () => {
     const harness = createHarness([red("check", "boom"), green()]);
     const loop = harness.service.start({ ...repairPolicy(), integrationPolicy: "preserve" }, "operator");
     await harness.settle(loop.id, "awaiting_integration");
 
     const completed = harness.service.store.get(loop.id)!;
     expect(completed.iterations).toHaveLength(1);
-    // Only the opening observation. No pointless re-gate of an unchanged tree.
-    expect(harness.gateCalls).toBe(1);
+    // It really re-gated after the repair, and did so against the candidate.
+    expect(harness.gateCalls).toBe(2);
+    expect(harness.gatedCandidates.at(-1)).toBe(harness.producedCandidate);
+    expect(completed.iterations[0]?.candidate).toBe(harness.producedCandidate);
+    expect(completed.iterations[0]?.state).toBe("succeeded");
   });
 
   test("passes explicit authorization through and keeps converging on the gate", async () => {
@@ -223,6 +225,8 @@ function createHarness(reports: ReleaseGateReport[]) {
   const startedWorkflows: RepairStep[][] = [];
   const workIds: string[] = [];
   const integrationPolicies: string[] = [];
+  const gatedCandidates: Array<string | null> = [];
+  const producedCandidate = "a".repeat(40);
   const targets: Array<Record<string, unknown>> = [];
   let gateCalls = 0;
 
@@ -235,11 +239,14 @@ function createHarness(reports: ReleaseGateReport[]) {
     workflowStatus: () => ({ state: "succeeded", terminal: true, succeeded: true }),
     cancelGoal: () => undefined,
     cancelWorkflow: () => undefined,
-    runGate: async () => {
+    runGate: async (_target, candidate) => {
+      gatedCandidates.push(candidate ?? null);
       const next = reports[Math.min(gateCalls, reports.length - 1)]!;
       gateCalls += 1;
       return next;
     },
+    // Every repair graph here produces one candidate commit.
+    repairCandidate: () => producedCandidate,
     startRepairWorkflow: (steps, target, _principal, workId, integrationPolicy) => {
       startedWorkflows.push(steps);
       targets.push(target as unknown as Record<string, unknown>);
@@ -255,6 +262,8 @@ function createHarness(reports: ReleaseGateReport[]) {
     workIds,
     integrationPolicies,
     targets,
+    gatedCandidates,
+    producedCandidate,
     get gateCalls() { return gateCalls; },
     async settle(loopId: string, state: string) {
       await waitUntil(() => service.store.get(loopId)?.state === state);
