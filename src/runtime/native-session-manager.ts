@@ -4,7 +4,7 @@ import type { ExecOptions } from "../index";
 import { getBackendDefinition, requiredContainmentSecurityGaps, type BackendDefinition } from "../backends/registry";
 import { executableReadRoots, maybeWrapWithSandbox } from "../runner/simple";
 import { installNativeAuthCapsule, nativeAuthMinimumValidityMs, supportsNativeAuthCapsule } from "./native-auth-capsule";
-import { installGrokIsolation, validateGrokIsolationInspection } from "./grok-isolation";
+import { runIsolationAttestation } from "./isolation-attestation";
 import { createWorkerEnvironment, type WorkerEnvironment } from "./worker-environment";
 import type { PersistentSessionStore } from "./persistent-sessions";
 import {
@@ -280,7 +280,10 @@ export class NativeSessionManager {
         throw new SessionDriverError("NATIVE_AUTH_UNAVAILABLE", capsule.reason ?? "Native authentication is unavailable.");
       }
       const selectedModel = capsule.model ?? session.model;
-      if (session.backend === "grok-build") installGrokIsolation(worker, { homeDir: this.options.authHomeDir });
+      // Adapter-driven, like the runner. Naming the backend here would let a
+      // future adapter declare an attestation while missing the very worker
+      // configuration that attestation assumes.
+      adapter.configureWorker?.(worker, { authHomeDir: this.options.authHomeDir });
       const options = {
         backend: session.backend,
         prompt: "",
@@ -317,19 +320,31 @@ export class NativeSessionManager {
         },
       });
       const executor = executorWithInitializationSignal(processExecutor, signal);
-      if (session.backend === "grok-build") {
-        const attestation = await executor.execute({
-          argv: ["grok", "inspect", "--json"],
-          cwd: this.projectRoot,
-          env,
-          stdin: null,
-          timeoutMs: Math.min(timeoutMs, 30_000),
-          signal,
-          protocol: "text",
-          purpose: "capability-probe",
+      if (adapter.isolationAttestation) {
+        const spec = adapter.isolationAttestation;
+        const failure = await runIsolationAttestation({
+          spec,
+          primaryCwd: this.projectRoot,
+          worker,
+          // `prepare` builds the Seatbelt profile from `request.cwd`, so the
+          // canary inspection is contained against the canary directory.
+          inspect: (cwd) => executor.execute({
+            argv: [...spec.command],
+            cwd,
+            env,
+            stdin: null,
+            timeoutMs: Math.min(timeoutMs, spec.timeoutMs),
+            signal,
+            protocol: "text",
+            purpose: "capability-probe",
+          }),
         });
-        const failure = grokSessionAttestationFailure(attestation);
-        if (failure) throw new SessionDriverError("BACKEND_UNSUPPORTED", `Grok isolation attestation failed before provider access: ${failure}`);
+        if (failure) {
+          throw new SessionDriverError(
+            "BACKEND_UNSUPPORTED",
+            `${adapter.id} isolation attestation failed before provider access: ${failure}`,
+          );
+        }
       }
       const factory = new SessionDriverFactory({ executor });
       const selected = await factory.select(session.backend, {
@@ -539,17 +554,6 @@ export class NativeSessionManager {
     runtime.restoringNative = false;
     this.persistInspection(session.id, await runtime.driver.inspect(runtime.handle));
     return runtime.driver.send(runtime.handle, prompt, { timeoutMs });
-  }
-}
-
-function grokSessionAttestationFailure(result: Awaited<ReturnType<SessionExecutor["execute"]>>) {
-  if (result.timedOut) return "inspect timed out";
-  if (result.overflowed) return "inspect output exceeded its bound";
-  if (result.exitCode !== 0) return result.stderr || `inspect exited ${result.exitCode}`;
-  try {
-    return validateGrokIsolationInspection(JSON.parse(result.stdout ?? ""));
-  } catch {
-    return "inspect returned malformed JSON";
   }
 }
 
