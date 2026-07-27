@@ -2,10 +2,37 @@
 
 ## Unreleased
 
+## 0.2.0-beta.5 — 2026-07-27
+
+Package publication remains blocked. Both package manifests are private at `0.2.0-beta.5`; npm publication and repository visibility remain separate human-authority decisions.
+
+All four advertised backends now complete a real native-subscription turn. Grok was previously refused for every ordinary project.
+
+### Added
+
+- A gate-driven repair loop that treats the release gate as the oracle: it compiles a repair graph from the failing checks, runs the repairs, and re-gates until the project is green, its cost or deadline cap is spent, or it stops making progress. Repair steps chain serially so each one sees the previous one's work, and the verifier runs on a contrasting backend.
+- Convergence for a repair loop under `preserve`. Each iteration bases its candidate on the previous candidate commit rather than primary HEAD, so a loop accumulates work and re-gates the accumulated tip while the operator's checkout stays byte-identical. The final candidate is a single integrable commit.
+- `optionalDependsOn` on workflow steps: dependencies that must settle but need not succeed, so one failed node no longer silences a verifier that could still report on the work that landed.
+- Process-table daemon discovery (`runtime/daemon-inventory.ts`) and `headless experimental daemon reap`, which reclaim daemons whose own state homes have been discarded. Metadata-based discovery cannot find these, because a leaked daemon carries its metadata inside the home that went away.
+
 ### Fixed
 
+- Attest isolation once. `native-session-manager.ts` carried a strict-only reimplementation of the trust attestation, so the two-phase canary fallback added in `0.2.0-beta.4` reached only the runner and never the path that Grok subscription logins use. A project with no trust-gated control surface reports a vacuous `projectTrusted: true` that the strict validator must reject, so Grok failed closed on every ordinary project. Both the policy and the bounded-result normalization now live in `runtime/isolation-attestation.ts`; a launch path supplies only how to run an inspection, never when to accept it.
+- Stopped a Grok worker revoking the operator's own login. The capsule copy carries no refresh token, which makes the entry non-refreshable in Grok's own auth model, so a disposable worker can no longer rotate a credential it cannot persist. `GROK_AUTH_EARLY_INVALIDATION_SECS` only ever removed the proactive buffer; it never prevented a refresh on 401.
+- Stopped a torn-down goal store failing the process. Delegations execute fire-and-forget, so a store discarded while an attempt was in flight let the persistence error escape an unobserved promise and left the awaiting caller unsettled. Settlement, the deadline timer, and disposal are now guarded.
+- Corrected the secret scanner's call lookahead so a member expression assigned to an auth-named field is no longer redacted as a credential. The scanner is fail-closed, so this false positive rejected valid agent writes outright.
+- Stopped the TUI footer colliding: key hints now win the available width, the caption yields whole rather than truncating, and hints are dropped intact instead of being clipped mid-token. Overview chrome is trimmed.
+- Moved `get_messages` into the `headless_` tool namespace, so an agent told to use Headless no longer reaches a similarly named tool from an unrelated MCP server.
 - Bound Codex's `CODEX_HOME` to the isolated worker capsule and pinned project discovery to the requested working root for one-shot and persistent native sessions, preventing unrelated ancestor markers from exposing the operator's real `~/.codex/config.toml` to the contained CLI.
 - Made Grok OIDC readiness expiry-aware for each bounded turn. Headless now requests a fresh login before a disposable capsule can rotate a refresh token that cannot be persisted, and classifies the CLI's `Not signed in` response as native authentication loss instead of a generic process failure.
+- Wired `check:daemons` into `bun run check`. The hygiene gate existed but sat outside the release check, so a gate could pass on a machine the gate itself would reject — and, worse, fail on one and blame the code. It now runs first, before three minutes of work.
+- Scaled the per-test ceiling for the deterministic redaction boundary test. It re-scans every secret at every split offset, so a loaded suite pushed it past Bun's 5s default and reported a timeout that read exactly like a redaction regression.
+
+### Verification
+
+- Full release gate: 857 tests, 11 documented platform skips, zero failures, on macOS and Linux CI.
+- Native subscription smoke run against installed CLIs: `grok-build` now **passes** through the `grok-resume` driver under required native-direct-unrestricted containment, alongside `opencode`. `claude-code` and `codex` reported structured `RATE_LIMITED` from repeated same-day runs, which the gate classifies as transient. Evidence regenerated from that run; Grok is no longer recorded as an accepted limitation.
+- The repair loop was verified end to end with real agents on a project with two seeded defects: the gate went green on the accumulated candidate while primary HEAD stayed unmoved.
 
 ## 0.2.0-beta.4 — 2026-07-16
 

@@ -6,7 +6,7 @@ sidebar_position: 1
 
 # Installation
 
-Headless is an unpublished private beta (`0.2.0-beta.4`). The packages are private and not on npm, so you build from source.
+Headless is an unpublished private beta (`0.2.0-beta.5`). The packages are private and not on npm, so you build from source.
 
 ## Requirements
 
