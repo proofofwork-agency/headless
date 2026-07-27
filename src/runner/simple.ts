@@ -6,6 +6,7 @@ import type { ExperimentalExecResult as ExecResult } from "../experimental/exec-
 import { assertModeAllowed, getBackendDefinition, requiredContainmentSecurityGaps, type BackendDefinition } from "../backends/registry";
 import { appendAdapterDiagnostic, classifyAdapterFailure, normalizeAdapterResult } from "../backends/result-normalization";
 import { executeBoundedProbe, probeBackendDefinition, type ProbeExecutor } from "../backends/probe";
+import { runIsolationAttestation } from "../runtime/isolation-attestation";
 import {
   buildLinuxReadOnlyArgs,
   buildLinuxWriteSandboxArgs,
@@ -219,31 +220,15 @@ async function executeSupervisedRun(
     if (adapter.isolationAttestation) {
       const inspection = adapter.isolationAttestation;
       const limits = { timeoutMs: inspection.timeoutMs, maxOutputBytes: inspection.maxOutputBytes };
-      const attestation = await containedProbeExecutor(options, adapter, cwd, worker, supervisor)(inspection.command, limits);
-      let failure = isolationAttestationFailure(attestation, inspection.validate);
-      const fallback = inspection.vacuousTrustFallback;
-      const vacuous = failure && fallback
-        ? isolationAttestationFailure(attestation, (value) => fallback.validateVacuousPrimary(value, cwd))
-        : null;
-      if (failure && fallback && !vacuous) {
-        // The target project exposes no trust-gated control surface, so the
-        // backend's trust decision is vacuous there. Prove the trust gate
-        // itself on a worker-owned canary project that always contains a
-        // gated control file; a leaked grant or disabled gate fails closed.
-        try {
-          const canaryCwd = fallback.prepareCanaryCwd(worker);
-          const canary = await containedProbeExecutor(options, adapter, canaryCwd, worker, supervisor)(inspection.command, limits);
-          const canaryFailure = isolationAttestationFailure(canary, inspection.validate);
-          failure = canaryFailure ? `trust-gate canary attestation failed: ${canaryFailure}` : null;
-        } catch (error) {
-          failure = `trust-gate canary attestation could not run: ${messageOf(error)}`;
-        }
-      } else if (failure && vacuous) {
-        // Reporting only the strict error here hides why the fallback was
-        // declined, which reads as a trust failure when the real cause may be
-        // an unrelated surface. Name both so the diagnosis is possible.
-        failure = `${failure} (vacuous-trust fallback declined it: ${vacuous})`;
-      }
+      const failure = await runIsolationAttestation({
+        spec: inspection,
+        primaryCwd: cwd,
+        worker,
+        // Each cwd needs its own sandbox profile, so the executor is rebuilt per
+        // inspection rather than bound once.
+        inspect: (inspectCwd) =>
+          containedProbeExecutor(options, adapter, inspectCwd, worker, supervisor)(inspection.command, limits),
+      });
       if (failure) {
         return failedResult(
           options.backend,
@@ -267,21 +252,6 @@ async function executeSupervisedRun(
     return await runBackendProcess(prepared, adapter, cwd, env, worker, started, timeoutMs, containment, undefined, supervisor);
   } finally {
     await cleanupWithDiagnostic("runner.worker-environment", worker.cleanup);
-  }
-}
-
-function isolationAttestationFailure(
-  attestation: Awaited<ReturnType<ProbeExecutor>>,
-  validate: (value: unknown) => string | null,
-) {
-  if (attestation.error) return attestation.error;
-  if (attestation.timedOut) return "inspect timed out";
-  if (attestation.overflowed) return "inspect output exceeded its bound";
-  if (attestation.exitCode !== 0) return attestation.stderr || `inspect exited ${attestation.exitCode}`;
-  try {
-    return validate(JSON.parse(attestation.stdout));
-  } catch {
-    return "inspect returned malformed JSON";
   }
 }
 
