@@ -44,3 +44,15 @@ export function schedulingAttempts(localAttempts: number) {
 export function schedulingDeadline(localMs: number) {
   return Date.now() + schedulingWindow(localMs);
 }
+
+/**
+ * A per-test ceiling for a body that is deterministic but CPU-heavy. Bun's 5s
+ * default is a local-speed budget, and such a test does not get slower — the
+ * machine does. Left on the default it passes alone and reports a timeout as a
+ * product failure inside the full suite, which is indistinguishable from a real
+ * regression in the log. Pass a bound generous enough that only a genuine hang
+ * can reach it.
+ */
+export function cpuBoundTimeout(localMs: number) {
+  return schedulingWindow(localMs);
+}

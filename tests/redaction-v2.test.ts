@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { redactAndTruncate, StreamingRedactor } from "../src/runtime/redaction";
+import { cpuBoundTimeout } from "./support/timing";
 
 describe("stream-safe redaction", () => {
   test("redacts daemon broker leases without redacting non-secret hls UUID ids", () => {
@@ -137,7 +138,10 @@ describe("stream-safe redaction", () => {
         expect(output).toContain("plain suffix");
       }
     }
-  });
+    // ~1.3s unloaded, but every secret is re-scanned at every split offset, so a
+    // loaded suite pushes it past Bun's 5s default and reports a timeout that
+    // reads exactly like a redaction regression.
+  }, cpuBoundTimeout(30_000));
 
   test("preserves non-secret stream text and fails closed when redaction fails", () => {
     const normal: string[] = [];
