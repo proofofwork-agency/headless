@@ -222,7 +222,10 @@ async function executeSupervisedRun(
       const attestation = await containedProbeExecutor(options, adapter, cwd, worker, supervisor)(inspection.command, limits);
       let failure = isolationAttestationFailure(attestation, inspection.validate);
       const fallback = inspection.vacuousTrustFallback;
-      if (failure && fallback && !isolationAttestationFailure(attestation, (value) => fallback.validateVacuousPrimary(value, cwd))) {
+      const vacuous = failure && fallback
+        ? isolationAttestationFailure(attestation, (value) => fallback.validateVacuousPrimary(value, cwd))
+        : null;
+      if (failure && fallback && !vacuous) {
         // The target project exposes no trust-gated control surface, so the
         // backend's trust decision is vacuous there. Prove the trust gate
         // itself on a worker-owned canary project that always contains a
@@ -235,6 +238,11 @@ async function executeSupervisedRun(
         } catch (error) {
           failure = `trust-gate canary attestation could not run: ${messageOf(error)}`;
         }
+      } else if (failure && vacuous) {
+        // Reporting only the strict error here hides why the fallback was
+        // declined, which reads as a trust failure when the real cause may be
+        // an unrelated surface. Name both so the diagnosis is possible.
+        failure = `${failure} (vacuous-trust fallback declined it: ${vacuous})`;
       }
       if (failure) {
         return failedResult(

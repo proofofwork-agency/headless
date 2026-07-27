@@ -240,6 +240,49 @@ describe("durable goal delegation runtime", () => {
       "succeeded",
     ]);
   });
+
+  /**
+   * Delegations are executed fire-and-forget from `pump`, so a store torn down
+   * mid-flight used to throw out of an unobserved promise. Bun charges such a
+   * rejection to whichever file is running, which made unrelated suites fail at
+   * random. The outcome belongs to the caller that is awaiting it.
+   */
+  test("fails the awaiting caller, not the process, when an outcome cannot be recorded", async () => {
+    const fixture = createFixture({ maxActive: 1, maxQueued: 2 });
+    const goal = fixture.createGoal("torn-down");
+    const attempt = deferredAttempt();
+    const pending = fixture.run(goal, () => attempt.promise);
+    await settleUntil(() => fixture.scheduler.activeCount() === 1);
+
+    rmSync(join(fixture.goals.directory, `${goal.id}.json`), { force: true });
+    attempt.resolve(succeeded("unrecordable", "turn-torn-down"));
+
+    await expect(pending).rejects.toMatchObject({ code: "PROCESS_ERROR" });
+    expect(fixture.diagnostics.join("\n")).toContain("Unable to record the outcome of delegation");
+  });
+
+  /**
+   * A graceful stop awaits idle first, so anything still pending at disposal is
+   * work against a state home that is going away. It must become a no-op rather
+   * than a late write.
+   */
+  test("drops in-flight work at disposal instead of settling into a discarded store", async () => {
+    const fixture = createFixture({ maxActive: 1, maxQueued: 2 });
+    const goal = fixture.createGoal("disposed");
+    const attempt = deferredAttempt();
+    const settled: string[] = [];
+    const pending = fixture.run(goal, () => attempt.promise);
+    void pending.then(() => settled.push("resolved"), () => settled.push("rejected"));
+    await settleUntil(() => fixture.scheduler.activeCount() === 1);
+
+    fixture.runtime.dispose();
+    rmSync(join(fixture.goals.directory, `${goal.id}.json`), { force: true });
+    attempt.resolve(succeeded("after-disposal", "turn-disposed"));
+    for (let tick = 0; tick < schedulingAttempts(20); tick += 1) await Promise.resolve();
+
+    expect(settled).toEqual([]);
+    expect(fixture.diagnostics).toEqual([]);
+  });
 });
 
 function createFixture(options: { maxActive: number; maxQueued: number }) {
@@ -262,12 +305,14 @@ function createFixture(options: { maxActive: number; maxQueued: number }) {
     clock: () => clock.now,
   });
   const events: GoalDelegationEvent[] = [];
+  const diagnostics: string[] = [];
   const runtime = new GoalDelegationRuntime({
     goals,
     scheduler,
     now: () => clock.now,
     id: () => String(++delegationId),
     onEvent: (event) => events.push(event),
+    diagnostic: (message) => diagnostics.push(message),
   });
   const createGoal = (name: string, deadlineAt = 1_000) => goals.create({
     id: `goal-${name}-${++goalId}`,
@@ -297,7 +342,7 @@ function createFixture(options: { maxActive: number; maxQueued: number }) {
     cancel: overrides.cancel,
     execute,
   }) as Promise<T>;
-  return { clock, goals, scheduler, runtime, events, createGoal, run };
+  return { clock, goals, scheduler, runtime, events, diagnostics, createGoal, run };
 }
 
 function succeeded(value: string, resultTurnId: string): GoalDelegationAttempt<string> {

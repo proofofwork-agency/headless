@@ -187,6 +187,12 @@ export class GoalDelegationRuntime {
   dispose() {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    // A graceful stop awaits idle before disposing, so anything still here is
+    // mid-flight against a store that is going away. Dropping the entries makes
+    // the late settlement a no-op rather than a write into a torn-down home.
+    // They are not rejected: these promises may already be unobserved, and
+    // rejecting them would recreate the escaping-rejection this guards against.
+    this.tasks.clear();
   }
 
   private async execute(delegation: Delegation) {
@@ -201,6 +207,19 @@ export class GoalDelegationRuntime {
       attempt = { kind: "failed", error: error instanceof Error ? error.message : String(error) };
     }
     if (!this.tasks.has(delegation.id)) return;
+    try {
+      this.settle(delegation, attempt);
+    } catch (error) {
+      // Nothing awaits this call, so an escaping rejection lands on the process
+      // rather than on a caller. The realistic cause is a store torn down while
+      // the attempt was in flight, which must not take the process with it.
+      this.abandon(delegation, error);
+    }
+  }
+
+  private settle(delegation: Delegation, attempt: GoalDelegationAttempt<unknown>) {
+    const task = this.tasks.get(delegation.id);
+    if (!task) return;
 
     if (attempt.kind === "rate_limited") {
       const recovery = this.scheduler.requeueRateLimited(
@@ -292,6 +311,23 @@ export class GoalDelegationRuntime {
     task.reject(error);
   }
 
+  /**
+   * Fail a delegation whose outcome could not be recorded. The caller is still
+   * awaiting `run`, so rejecting is what reaches a human; silently dropping the
+   * task would hang it instead.
+   */
+  private abandon(delegation: Delegation, error: unknown) {
+    this.diagnostic(`Unable to record the outcome of delegation ${delegation.id}.`, error);
+    const task = this.tasks.get(delegation.id);
+    if (!task) return;
+    this.tasks.delete(delegation.id);
+    task.reject(new HeadlessError(
+      "PROCESS_ERROR",
+      `Delegation ${delegation.id} finished but its outcome could not be recorded.`,
+      { retryable: false, cause: error },
+    ));
+  }
+
   private persist(delegation: Delegation) {
     this.options.goals.putDelegation(delegation.goalId, delegation);
   }
@@ -320,7 +356,15 @@ export class GoalDelegationRuntime {
       .filter((value) => value > now)
       .sort((left, right) => left - right)[0];
     if (wakeAt === undefined) return;
-    this.timer = setTimeout(() => this.pump(), Math.max(1, Math.min(wakeAt - now, 2_147_483_647)));
+    // A timer callback has no caller either, and `pump` persists as it drains
+    // deadlines, so the same teardown race would throw straight to the process.
+    this.timer = setTimeout(() => {
+      try {
+        this.pump();
+      } catch (error) {
+        this.diagnostic("Delegation deadline pump failed.", error);
+      }
+    }, Math.max(1, Math.min(wakeAt - now, 2_147_483_647)));
     this.timer.unref?.();
   }
 
