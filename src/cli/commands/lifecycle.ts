@@ -1,4 +1,5 @@
 import type { Job } from "../../contracts/durable";
+import type { BrokerEnvReadiness } from "../../runtime/broker-env";
 import {
   daemonClient,
   ensureSupportedPlatform,
@@ -118,7 +119,12 @@ export async function runDoctorCommand(args: string[]) {
   const cwd = getArg(flags, "--cwd") || process.cwd();
   const client = await daemonClient(cwd, flags);
   const [ping, snapshot, trust] = await Promise.all([
-    client.call<{ projectId: string; projectRoot: string; principal: string }>("ping"),
+    client.call<{
+      projectId: string;
+      projectRoot: string;
+      principal: string;
+      brokerEnv?: BrokerEnvReadiness[];
+    }>("ping"),
     client.call<{ jobs: Job[]; events: unknown[] }>("events.snapshot", { limit: 10 }),
     client.call<{
       trusted: boolean;
@@ -140,6 +146,8 @@ export async function runDoctorCommand(args: string[]) {
     },
     durableJobs: snapshot.jobs.length,
     recentEvents: snapshot.events.length,
+    brokerEnv: ping.brokerEnv ?? [],
+    brokerEnvSource: ping.brokerEnv ? "daemon" : "unavailable",
   });
   if (flags.includes("--json") || flags.includes("-j")) {
     printJson(report);

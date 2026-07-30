@@ -146,12 +146,19 @@ describe("MCP server surface", () => {
     expect(full.map((tool) => tool.name).sort()).toEqual(HEADLESS_TOOL_REGISTRY.map((tool) => tool.name).sort());
 
     expect(() => assertMcpToolAllowed("headless_run", "core")).not.toThrow();
-    expect(() => assertMcpToolAllowed("headless_append_note", "core")).toThrow(/HEADLESS_MCP_TOOLSET=full/);
+    expect(() => assertMcpToolAllowed("headless_append_note", "core")).not.toThrow();
+    expect(() => assertMcpToolAllowed("send_message", "core")).not.toThrow();
+    expect(() => assertMcpToolAllowed("headless_propose_final", "core")).not.toThrow();
+    expect(() => assertMcpToolAllowed("headless_fleet_health", "core")).toThrow(/HEADLESS_MCP_TOOLSET=full/);
     expect(() => assertMcpToolAllowed("headless_append_note", "full")).not.toThrow();
 
-    const scopedCore = mcpToolsForScopes(["run", "ledger:read", "task", "messages"], "core");
+    const scopedCore = mcpToolsForScopes(["run", "ledger:read", "ledger:write", "task", "messages"], "core");
     expect(scopedCore.length).toBeLessThanOrEqual(10);
     expect(scopedCore.map((tool) => tool.name)).toContain("headless_run");
+    expect(scopedCore.map((tool) => tool.name)).toContain("headless_append_note");
+    expect(scopedCore.map((tool) => tool.name)).toContain("send_message");
+    expect(scopedCore.map((tool) => tool.name)).toContain("headless_get_messages");
+    expect(scopedCore.map((tool) => tool.name)).toContain("headless_propose_final");
     expect(scopedCore.map((tool) => tool.name)).not.toContain("headless_workflow_run");
 
     const previous = process.env[HEADLESS_MCP_TOOLSET_ENV];
@@ -169,7 +176,7 @@ describe("MCP server surface", () => {
     process.env[HEADLESS_MCP_TOOLSET_ENV] = "core";
     try {
       const response = await __handleCallToolForTest({
-        params: { name: "headless_append_note", arguments: { text: "blocked" } },
+        params: { name: "headless_fleet_health", arguments: {} },
       });
       expect(response.isError).toBe(true);
       expect(response.content[0]?.text).toContain("HEADLESS_MCP_TOOLSET=full");

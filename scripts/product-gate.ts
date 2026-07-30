@@ -5,13 +5,45 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { z } from "zod";
 import { STABLE_COMMAND_NAMES, stableHelpCommandCount, renderHelp } from "../src/cli/command-specs";
 import { PRODUCT_GATE_REMEDY_CODES, remedyForCode } from "../src/cli/remedy";
 import { EXEC_PROFILES } from "../src/cli/profile";
 import { printRunResult } from "../src/cli/shared";
 import type { RunResult } from "../src/contracts/run";
+import { ReleaseEvidenceProvenanceSchema } from "../src/runtime/release-evidence-anchor";
+import { HEADLESS_VERSION } from "../src/version";
 
 const root = resolve(import.meta.dir, "..");
+const MAX_LIVE_TTFV_MS = 5 * 60_000;
+const EXPECTED_LIVE_STEPS = ["setup", "doctor", "exec", "verify"] as const;
+const TtfvEvidenceSchema = z.object({
+  version: z.literal(1),
+  gate: z.literal("product-P.TTFV"),
+  mode: z.enum(["live", "ceremony"]),
+  ok: z.boolean(),
+  releaseGatePassed: z.boolean(),
+  totalMs: z.number().int().nonnegative(),
+  ceremonyMs: z.number().int().nonnegative(),
+  budgetMs: z.number().int().positive(),
+  project: z.string().min(1),
+  recommendedBackend: z.string().nullable(),
+  readyForNativeExec: z.boolean(),
+  doctorNextActions: z.number().int().nonnegative(),
+  modelOutputVerified: z.boolean(),
+  containmentVerified: z.boolean(),
+  expectedOutput: z.string().nullable(),
+  failure: z.string().nullable(),
+  steps: z.array(z.object({
+    name: z.string(),
+    durationMs: z.number().int().nonnegative(),
+    exitCode: z.number().int(),
+    timedOut: z.boolean(),
+  }).strict()).max(8),
+  completedAt: z.string().datetime(),
+  provenance: ReleaseEvidenceProvenanceSchema,
+}).strict();
 
 type CheckStatus = "pass" | "fail" | "manual";
 type Check = { id: string; status: CheckStatus; detail: string };
@@ -53,12 +85,15 @@ function record(id: string, status: CheckStatus, detail: string) {
 {
   const chunks: string[] = [];
   const originalErr = console.error;
+  const originalOut = console.log;
   console.error = (...args: unknown[]) => { chunks.push(args.map(String).join(" ")); };
+  console.log = () => {};
   try {
     const result = sampleSucceededResult();
     printRunResult(result, false, false, { cwd: "/tmp/demo" });
   } finally {
     console.error = originalErr;
+    console.log = originalOut;
   }
   const text = chunks.join("\n");
   if (!text.includes("headless verify") || !text.includes("receipt show")) {
@@ -107,23 +142,47 @@ function record(id: string, status: CheckStatus, detail: string) {
   } else record("P.STEPS", "pass", "setup wizard prints ≤ 4 decision native-login golden path");
 }
 
-// P.TTFV — ceremony evidence from scripts/ttfv-smoke.ts; live optional
+// P.TTFV — only current-commit live evidence with exact output can pass.
 {
   const evidencePath = resolve(root, "docs/internal/release-evidence/ttfv-smoke.json");
   if (!existsSync(evidencePath)) {
-    record("P.TTFV", "manual", "No ttfv-smoke.json yet — run bun scripts/ttfv-smoke.ts (or HEADLESS_TTFV_LIVE=1)");
+    record("P.TTFV", "manual", "No live evidence — run bun run smoke:ttfv:live on an explicitly authorized host");
   } else {
     try {
-      const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as {
-        ok?: boolean;
-        mode?: string;
-        totalMs?: number;
-        budgetMs?: number;
-      };
-      if (evidence.ok && typeof evidence.totalMs === "number" && evidence.totalMs <= (evidence.budgetMs ?? 300_000)) {
-        record("P.TTFV", "pass", `${evidence.mode ?? "smoke"} evidence totalMs=${evidence.totalMs} ≤ ${evidence.budgetMs}`);
+      const raw = JSON.parse(readFileSync(evidencePath, "utf8")) as Record<string, unknown>;
+      if (raw.version === undefined) {
+        record("P.TTFV", "manual", "Legacy evidence lacks strict provenance/output fields; rerun bun run smoke:ttfv:live");
       } else {
-        record("P.TTFV", "fail", `ttfv-smoke evidence not ok: ${JSON.stringify(evidence)}`);
+        const parsed = TtfvEvidenceSchema.safeParse(raw);
+        if (!parsed.success) {
+          record("P.TTFV", "fail", `strict TTFV evidence is malformed: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+        } else {
+          const evidence = parsed.data;
+          const currentCommit = repositoryCommit();
+          const stepNames = evidence.steps.map((step) => step.name);
+          const stepsValid = stepNames.join("\0") === EXPECTED_LIVE_STEPS.join("\0")
+            && evidence.steps.every((step) => step.exitCode === 0 && !step.timedOut);
+          if (evidence.mode !== "live") {
+            record("P.TTFV", "manual", "Ceremony evidence measures the warm path only; run bun run smoke:ttfv:live");
+          } else if (!currentCommit || evidence.provenance.commit !== currentCommit) {
+            record("P.TTFV", "manual", `Live evidence is stale for HEAD ${currentCommit ?? "unknown"}; rerun the live smoke`);
+          } else if (
+            !evidence.ok
+            || !evidence.releaseGatePassed
+            || evidence.failure !== null
+            || evidence.totalMs > MAX_LIVE_TTFV_MS
+            || evidence.budgetMs !== MAX_LIVE_TTFV_MS
+            || evidence.expectedOutput !== "TTFV_OK"
+            || !evidence.modelOutputVerified
+            || !evidence.containmentVerified
+            || !stepsValid
+            || evidence.provenance.headlessVersion !== HEADLESS_VERSION
+          ) {
+            record("P.TTFV", "fail", "Live evidence failed its fixed budget, exact-output, containment, step, or provenance contract");
+          } else {
+            record("P.TTFV", "pass", `current live evidence totalMs=${evidence.totalMs} ≤ ${MAX_LIVE_TTFV_MS}`);
+          }
+        }
       }
     } catch (error) {
       record("P.TTFV", "fail", `invalid ttfv-smoke.json: ${error instanceof Error ? error.message : String(error)}`);
@@ -131,11 +190,13 @@ function record(id: string, status: CheckStatus, detail: string) {
   }
 }
 
-// P.KERNEL — existence of check script; full suite is CI's job
+// P.KERNEL — only the outer aggregate check may assert that its prior stages passed.
 {
-  const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
-  if (!pkg.scripts?.check) record("P.KERNEL", "fail", "package.json missing check script");
-  else record("P.KERNEL", "pass", "check script present (run bun run check for full kernel gate)");
+  if (process.env.HEADLESS_PRODUCT_KERNEL_VERIFIED === "1") {
+    record("P.KERNEL", "pass", "outer bun run check completed daemon hygiene, static checks, docs, and tests before Product Gate");
+  } else {
+    record("P.KERNEL", "manual", "This script cannot self-certify the aggregate kernel gate; run bun run check");
+  }
 }
 
 const failed = checks.filter((check) => check.status === "fail");
@@ -186,4 +247,15 @@ function sampleSucceededResult(): RunResult {
     diff: null,
     commit: null,
   } as RunResult;
+}
+
+function repositoryCommit() {
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+    timeout: 2_000,
+    maxBuffer: 16_384,
+  });
+  const value = result.status === 0 ? result.stdout.trim().toLowerCase() : "";
+  return /^[a-f0-9]{40,64}$/.test(value) ? value : null;
 }

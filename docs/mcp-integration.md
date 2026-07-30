@@ -72,7 +72,7 @@ Automatic worker and synthesizer selection excludes the active lead backend. An 
 
 ### Lead-core vs full toolset
 
-By default the MCP server and OpenCode plugin advertise a **lead-core** toolset (≤ 8 tools) so a foreground lead is not buried under orchestration surface:
+By default the MCP server and OpenCode plugin advertise a **lead-core** toolset (10 tools) so a foreground lead is not buried under orchestration surface while retaining a complete read/write collaboration round trip:
 
 | Core tool | Role |
 | --- | --- |
@@ -80,12 +80,14 @@ By default the MCP server and OpenCode plugin advertise a **lead-core** toolset 
 | `headless_deliberate` | Read-only multi-backend fan-out |
 | `headless_project_trust` | Trust status (inspect only) |
 | `headless_read_context` | Ledger projection |
+| `headless_append_note` | Append shared context |
 | `headless_task_state` | Durable tasks |
-| `headless_fleet_health` | Backend readiness |
+| `headless_propose_final` | Submit a completion proposal |
+| `send_message` | Send an attributable session message |
 | `headless_get_messages` | Session messages |
 | `headless_get_cooperation_instructions` | Cooperation contract |
 
-Set **`HEADLESS_MCP_TOOLSET=full`** in the MCP/plugin process environment to restore the complete registry (goals, councils, workflows, ledger helpers, …). Non-core `tools/call` under the default `core` toolset fails closed with a message that names the env override. Daemon credential scopes are unchanged: core is a **subset**, not a privilege elevation.
+Set **`HEADLESS_MCP_TOOLSET=full`** in the MCP/plugin process environment to restore the complete registry (fleet health, goals, councils, workflows, release gates, …). Non-core `tools/call` under the default `core` toolset fails closed with a message that names the env override. Daemon credential scopes are unchanged: core is a **subset**, not a privilege elevation.
 
 ### Execution and orchestration (full set)
 

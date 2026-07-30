@@ -226,14 +226,16 @@ export function headlessToolDefinition<Name extends HeadlessToolName>(name: Name
 export const HEADLESS_MCP_TOOLSET_ENV = "HEADLESS_MCP_TOOLSET";
 export type HeadlessMcpToolset = "core" | "full";
 
-/** Hard-capped lead-facing core surface (must stay ≤ 10). */
+/** Hard-capped lead-facing core surface (must stay ≤ 10 and support round trips). */
 export const CORE_MCP_TOOL_NAMES = Object.freeze([
   "headless_run",
   "headless_deliberate",
   "headless_project_trust",
   "headless_read_context",
+  "headless_append_note",
   "headless_task_state",
-  "headless_fleet_health",
+  "headless_propose_final",
+  "send_message",
   "headless_get_messages",
   "headless_get_cooperation_instructions",
 ] as const satisfies readonly HeadlessToolName[]);

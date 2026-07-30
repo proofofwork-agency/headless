@@ -2,169 +2,182 @@
 /**
  * Golden-path TTFV smoke: setup → trust → doctor --json → exec --profile → verify.
  *
- * Default: dry ceremony (no provider exec) measuring setup+doctor+trust.
+ * Default: warm ceremony (no provider exec) measuring setup+doctor+trust.
  * Opt-in live turn: HEADLESS_TTFV_LIVE=1 runs a real read-only native exec.
- * Soft max wall clock for the full live path: 5 minutes (Product Gate P.TTFV).
+ * Only a live, exact-output result can satisfy Product Gate P.TTFV.
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  releaseEvidenceProvenance,
+  writeReleaseEvidenceFile,
+} from "./native-smoke-evidence";
+import {
+  type LiveValidationFixture,
+  type ValidationCommandResult,
+  withLiveValidationFixture,
+} from "./live-validation-fixture";
 
 const LIVE = process.env.HEADLESS_TTFV_LIVE === "1";
 const MAX_LIVE_MS = 5 * 60_000;
 const MAX_CEREMONY_MS = 90_000;
-const root = resolve(import.meta.dir, "..");
-const cli = resolve(root, "dist/cli.js");
-const work = mkdtempSync(join(tmpdir(), "headless-ttfv-"));
-const project = join(work, "project");
-const stateHome = join(work, "state");
-const runtimeHome = mkdtempSync(join("/tmp", "httfv-"));
+const EVIDENCE_PATH = resolve(import.meta.dir, "../docs/internal/release-evidence/ttfv-smoke.json");
+const EXPECTED_OUTPUT = "TTFV_OK";
 
-mkdirSync(project, { recursive: true });
-mkdirSync(stateHome, { recursive: true });
-writeFileSync(join(project, "README.md"), "# TTFV disposable project\n");
+type Step = ValidationCommandResult & { name: string; durationMs: number };
 
-const env = {
-  ...process.env,
-  HEADLESS_STATE_HOME: stateHome,
-  HEADLESS_RUNTIME_HOME: runtimeHome,
-  XDG_RUNTIME_DIR: runtimeHome,
-  // Keep host logins for native; strip broker keys so profile is unambiguous.
-  OPENAI_API_KEY: "",
-  ANTHROPIC_API_KEY: "",
-  GEMINI_API_KEY: "",
-  GOOGLE_API_KEY: "",
-  XAI_API_KEY: "",
-};
-
-type Step = { name: string; durationMs: number; exitCode: number; stdout: string; stderr: string };
-
-const steps: Step[] = [];
-const started = Date.now();
-
-async function run(name: string, args: string[], timeoutMs: number) {
-  const t0 = Date.now();
-  const child = Bun.spawn(["bun", cli, ...args], {
-    cwd: project,
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const timer = setTimeout(() => child.kill(), timeoutMs);
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  clearTimeout(timer);
-  const step = { name, durationMs: Date.now() - t0, exitCode: exitCode ?? 1, stdout, stderr };
-  steps.push(step);
-  return step;
-}
-
-function fail(message: string): never {
-  console.error(JSON.stringify({ ok: false, error: message, steps }, null, 2));
-  process.exit(1);
-}
-
-if (!(await Bun.file(cli).exists())) {
-  fail(`Missing ${cli}; run bun run build first.`);
-}
-
-const setup = await run("setup", ["setup", "--yes", "--allow-native-direct-unrestricted", "--cwd", project], 60_000);
-if (setup.exitCode !== 0) fail(`setup failed: ${setup.stderr || setup.stdout}`);
-
-const doctor = await run("doctor", ["doctor", "--json", "--cwd", project], 30_000);
-if (doctor.exitCode !== 0) fail(`doctor --json failed: ${doctor.stderr || doctor.stdout}`);
-let report: {
-  readyForNativeExec?: boolean;
-  recommendedBackend?: string | null;
-  nextActions?: Array<{ command: string }>;
-  trust?: { nativeReady?: boolean };
-};
 try {
-  report = JSON.parse(doctor.stdout);
-} catch {
-  fail(`doctor --json did not emit JSON: ${doctor.stdout.slice(0, 400)}`);
-}
-if (!report.trust || typeof report.readyForNativeExec !== "boolean") {
-  fail("doctor report missing readiness fields");
-}
-if (!Array.isArray(report.nextActions) || report.nextActions.length === 0) {
-  fail("doctor report missing nextActions panel");
+  const evidence = await withLiveValidationFixture("headless-ttfv", runSmoke);
+  console.log(JSON.stringify({ ...evidence, evidencePath: EVIDENCE_PATH }, null, 2));
+  console.error(`ttfv-smoke passed (${LIVE ? "live" : "ceremony"}) in ${evidence.totalMs}ms`);
+} catch (error) {
+  console.error(`ttfv-smoke failed: ${diagnostic(error)}`);
+  if (!process.exitCode) process.exitCode = 1;
 }
 
-const backend = report.recommendedBackend || "codex";
-let execStep: Step | null = null;
-let verifyStep: Step | null = null;
-
-if (LIVE) {
-  if (!report.readyForNativeExec) {
-    fail(`LIVE mode requires readyForNativeExec; doctor said no (backend=${backend})`);
+async function runSmoke(fixture: LiveValidationFixture) {
+  if (!(await Bun.file(fixture.cli).exists())) {
+    throw new Error(`Missing ${fixture.cli}; run bun run build first.`);
   }
-  execStep = await run("exec", [
-    "exec",
-    "--backend", String(backend),
-    "--auth-mode", "native-login",
-    "--mode", "read-only",
-    "--profile", "read-only-native",
-    "--timeout-ms", "120000",
-    "--json",
-    "--cwd", project,
-    "--",
-    "Reply with exactly: TTFV_OK",
-  ], 180_000);
-  if (execStep.exitCode !== 0) fail(`exec failed: ${execStep.stderr || execStep.stdout.slice(0, 800)}`);
-  let result: {
-    status?: string;
-    next?: { verify?: string; receipt?: string };
-    jobId?: string | null;
-    containment?: { network?: string; credentialAccess?: string; enforced?: boolean };
+  writeFileSync(resolve(fixture.project, "README.md"), "# TTFV disposable project\n");
+
+  const steps: Step[] = [];
+  const started = Date.now();
+  let failure: string | null = null;
+  let recommendedBackend: string | null = null;
+  let readyForNativeExec = false;
+  let doctorNextActions = 0;
+  let modelOutputVerified = false;
+  let containmentVerified = false;
+
+  const run = async (name: string, args: string[], timeoutMs: number) => {
+    const stepStarted = Date.now();
+    const result = await fixture.run(args, timeoutMs);
+    const step = { ...result, name, durationMs: Date.now() - stepStarted };
+    steps.push(step);
+    return step;
   };
+
   try {
-    result = JSON.parse(execStep.stdout);
-  } catch {
-    fail(`exec --json not parseable: ${execStep.stdout.slice(0, 400)}`);
+    const setup = await run(
+      "setup",
+      ["setup", "--yes", "--allow-native-direct-unrestricted", "--cwd", fixture.project],
+      60_000,
+    );
+    assertStep(setup, "setup");
+
+    const doctor = await run("doctor", ["doctor", "--json", "--cwd", fixture.project], 30_000);
+    assertStep(doctor, "doctor --json");
+    const report = JSON.parse(doctor.stdout) as {
+      readyForNativeExec?: boolean;
+      recommendedBackend?: string | null;
+      nextActions?: Array<{ command: string }>;
+      trust?: { nativeReady?: boolean };
+    };
+    if (!report.trust || typeof report.readyForNativeExec !== "boolean") {
+      throw new Error("doctor report missing readiness fields");
+    }
+    if (!Array.isArray(report.nextActions) || report.nextActions.length === 0) {
+      throw new Error("doctor report missing nextActions panel");
+    }
+    recommendedBackend = report.recommendedBackend ?? "codex";
+    readyForNativeExec = report.readyForNativeExec;
+    doctorNextActions = report.nextActions.length;
+
+    if (LIVE) {
+      if (!readyForNativeExec) {
+        throw new Error(`LIVE mode requires readyForNativeExec; doctor said no (backend=${recommendedBackend})`);
+      }
+      const exec = await run("exec", [
+        "exec",
+        "--backend", recommendedBackend,
+        "--auth-mode", "native-login",
+        "--mode", "read-only",
+        "--profile", "read-only-native",
+        "--timeout-ms", "120000",
+        "--json",
+        "--cwd", fixture.project,
+        "--",
+        `Reply with exactly: ${EXPECTED_OUTPUT}`,
+      ], 180_000);
+      assertStep(exec, "exec");
+      const result = JSON.parse(exec.stdout) as {
+        status?: string;
+        output?: string;
+        next?: { verify?: string; receipt?: string };
+        containment?: {
+          network?: string;
+          credentialAccess?: string;
+          enforced?: boolean;
+          unsafe?: boolean;
+        };
+      };
+      if (result.status !== "succeeded") throw new Error(`exec status ${String(result.status)}`);
+      if (!result.next?.verify || !result.next?.receipt) throw new Error("exec JSON missing next.verify/next.receipt");
+      modelOutputVerified = result.output?.trim() === EXPECTED_OUTPUT;
+      if (!modelOutputVerified) {
+        throw new Error(`exec output did not equal ${EXPECTED_OUTPUT}: ${JSON.stringify(result.output?.slice(0, 200))}`);
+      }
+      containmentVerified = result.containment?.network === "native-direct-unrestricted"
+        && result.containment.credentialAccess === "backend-native"
+        && result.containment.enforced === true
+        && result.containment.unsafe === false;
+      if (!containmentVerified) throw new Error(`native containment evidence was incomplete: ${JSON.stringify(result.containment)}`);
+
+      const verify = await run("verify", ["verify", "--json", "--cwd", fixture.project], 30_000);
+      assertStep(verify, "verify");
+    }
+  } catch (error) {
+    failure = diagnostic(error);
   }
-  if (result.status !== "succeeded") fail(`exec status ${result.status}`);
-  if (!result.next?.verify || !result.next?.receipt) fail("exec JSON missing next.verify/next.receipt");
-  if (result.containment?.network !== "native-direct-unrestricted") {
-    fail(`expected native-direct-unrestricted network, got ${result.containment?.network}`);
+
+  const totalMs = Date.now() - started;
+  const ceremonyMs = steps
+    .filter((step) => step.name === "setup" || step.name === "doctor")
+    .reduce((total, step) => total + step.durationMs, 0);
+  const budgetMs = LIVE ? MAX_LIVE_MS : MAX_CEREMONY_MS;
+  const ok = failure === null && totalMs <= budgetMs;
+  const evidence = {
+    version: 1,
+    gate: "product-P.TTFV",
+    mode: LIVE ? "live" as const : "ceremony" as const,
+    ok,
+    releaseGatePassed: LIVE && ok && modelOutputVerified && containmentVerified,
+    totalMs,
+    ceremonyMs,
+    budgetMs,
+    project: fixture.project,
+    recommendedBackend,
+    readyForNativeExec,
+    doctorNextActions,
+    modelOutputVerified,
+    containmentVerified,
+    expectedOutput: LIVE ? EXPECTED_OUTPUT : null,
+    failure,
+    steps: steps.map(({ name, durationMs, exitCode, timedOut }) => ({
+      name,
+      durationMs,
+      exitCode,
+      timedOut,
+    })),
+    completedAt: new Date().toISOString(),
+  };
+  const written = writeReleaseEvidenceFile({
+    path: EVIDENCE_PATH,
+    evidence,
+    provenance: releaseEvidenceProvenance(),
+  });
+  if (!ok) {
+    throw new Error(failure ?? `TTFV smoke exceeded budget ${budgetMs}ms (total ${totalMs}ms)`);
   }
-  if (result.containment?.credentialAccess !== "backend-native") {
-    fail(`expected backend-native credentialAccess, got ${result.containment?.credentialAccess}`);
-  }
-  verifyStep = await run("verify", ["verify", "--json", "--cwd", project], 30_000);
-  if (verifyStep.exitCode !== 0) fail(`verify failed: ${verifyStep.stderr || verifyStep.stdout}`);
+  return written.document;
 }
 
-const totalMs = Date.now() - started;
-const ceremonyMs = steps.filter((s) => s.name === "setup" || s.name === "doctor").reduce((a, s) => a + s.durationMs, 0);
-const budget = LIVE ? MAX_LIVE_MS : MAX_CEREMONY_MS;
-const passed = totalMs <= budget;
-
-const evidence = {
-  gate: "product-P.TTFV",
-  mode: LIVE ? "live" : "ceremony",
-  ok: passed,
-  totalMs,
-  ceremonyMs,
-  budgetMs: budget,
-  project,
-  recommendedBackend: backend,
-  readyForNativeExec: report.readyForNativeExec,
-  doctorNextActions: report.nextActions?.length ?? 0,
-  steps: steps.map((s) => ({ name: s.name, durationMs: s.durationMs, exitCode: s.exitCode })),
-  completedAt: new Date().toISOString(),
-};
-
-const outPath = resolve(root, "docs/internal/release-evidence/ttfv-smoke.json");
-mkdirSync(resolve(root, "docs/internal/release-evidence"), { recursive: true });
-writeFileSync(outPath, `${JSON.stringify(evidence, null, 2)}\n`);
-console.log(JSON.stringify({ ...evidence, evidencePath: outPath }, null, 2));
-
-if (!passed) {
-  console.error(`ttfv-smoke exceeded budget ${budget}ms (total ${totalMs}ms)`);
-  process.exit(1);
+function assertStep(step: Step, label: string) {
+  if (step.timedOut) throw new Error(`${label} timed out`);
+  if (step.exitCode !== 0) throw new Error(`${label} failed: ${step.stderr || step.stdout.slice(0, 800)}`);
 }
-console.error(`ttfv-smoke passed (${LIVE ? "live" : "ceremony"}) in ${totalMs}ms`);
+
+function diagnostic(error: unknown) {
+  return (error instanceof Error ? error.message : String(error)).replaceAll(/\s+/g, " ").slice(0, 2_000);
+}

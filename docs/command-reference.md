@@ -25,7 +25,7 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | `init` | Beta 1 | — | `init [--lead codex|grok|claude|opencode] [--cwd dir]   Initialize external per-project state and optionally configure its foreground lead.` |
 | `setup` | Beta 1 | — | `setup [--lead host] [--yes] [--allow-native-direct-unrestricted] [--cwd dir]   Golden-path wizard: init, inventory CLIs, print next commands.` |
 | `status` | Beta 1 | — | `status [--cwd dir]              Show project and daemon status.` |
-| `doctor` | Beta 1 | — | `doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, broker env, next commands.` |
+| `doctor` | Beta 1 | — | `doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, daemon broker env, next commands.` |
 | `tui` | Beta 1 | — | `tui [--cwd dir]                 Open the read-only observer log and configuration pane.` |
 | `mcp` | Beta 1 | — | `mcp <serve|install|remove|status> [codex|grok|claude|opencode] [--cwd dir]` |
 | `launch` | Experimental | — | `experimental launch <backend> [options]        Compatibility one-shot routed through the daemon.` |

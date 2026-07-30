@@ -5,6 +5,10 @@
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  brokerEnvReadiness,
+  type BrokerEnvReadiness,
+} from "../runtime/broker-env";
 import { CLAUDE_SETUP_TOKEN_REMEDY } from "../runtime/native-auth-capsule";
 import { formatRemedyLines, remedyForCode } from "./remedy";
 
@@ -30,11 +34,6 @@ export type TrustReadiness = {
   nativeReady: boolean;
 };
 
-export type BrokerEnvReadiness = {
-  variable: string;
-  present: boolean;
-};
-
 export type DoctorReport = {
   version: "product-readiness-1";
   bunVersion: string;
@@ -46,6 +45,7 @@ export type DoctorReport = {
   trust: TrustReadiness;
   backends: BackendReadiness[];
   brokerEnv: BrokerEnvReadiness[];
+  brokerEnvSource: "daemon" | "caller" | "unavailable";
   durableJobs: number;
   recentEvents: number;
   readyForNativeExec: boolean;
@@ -60,8 +60,6 @@ export const BACKEND_INVENTORY = [
   { id: "claude-code" as const, binary: "claude" },
   { id: "grok-build" as const, binary: "grok" },
 ];
-
-const BROKER_ENV_VARS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "XAI_API_KEY"] as const;
 
 export function inventoryBackends(options: {
   which?: (name: string) => string | null;
@@ -95,10 +93,7 @@ export function inventoryBackends(options: {
 }
 
 export function inventoryBrokerEnv(env: NodeJS.ProcessEnv = process.env): BrokerEnvReadiness[] {
-  return BROKER_ENV_VARS.map((variable) => ({
-    variable,
-    present: Boolean(env[variable]?.trim()),
-  }));
+  return brokerEnvReadiness(env);
 }
 
 export function buildDoctorReport(input: {
@@ -116,11 +111,13 @@ export function buildDoctorReport(input: {
   recentEvents: number;
   backends?: BackendReadiness[];
   brokerEnv?: BrokerEnvReadiness[];
+  brokerEnvSource?: DoctorReport["brokerEnvSource"];
   which?: (name: string) => string | null;
   home?: string;
 }): DoctorReport {
   const backends = input.backends ?? inventoryBackends({ which: input.which, home: input.home });
   const brokerEnv = input.brokerEnv ?? inventoryBrokerEnv();
+  const brokerEnvSource = input.brokerEnvSource ?? "caller";
   const nativeReady = input.trust.trusted
     && input.trust.nativeLoginAllowed
     && input.trust.nativeDirectUnrestrictedAcknowledged;
@@ -164,7 +161,7 @@ export function buildDoctorReport(input: {
       command: `headless verify --cwd ${cwd}`,
       reason: "Verify the tamper-evident ledger after runs.",
     });
-  } else if (!brokerEnv.some((entry) => entry.present)) {
+  } else if (brokerEnvSource !== "unavailable" && !brokerEnv.some((entry) => entry.present)) {
     nextActions.push({
       id: "broker-keys",
       command: `headless exec --backend ${recommendedBackend ?? "opencode"} --profile broker-readonly --cwd ${cwd} -- "…"`,
@@ -194,6 +191,7 @@ export function buildDoctorReport(input: {
     },
     backends,
     brokerEnv,
+    brokerEnvSource,
     durableJobs: input.durableJobs,
     recentEvents: input.recentEvents,
     readyForNativeExec: nativeReady && usable.length > 0,
@@ -224,9 +222,16 @@ export function printDoctorHuman(report: DoctorReport) {
     console.log(`  ${backend.id}: ${path} · ${capsule} — ${backend.nativeDetail}`);
     if (backend.remedy) console.log(`    Next: ${backend.remedy}`);
   }
-  console.log("Broker env (daemon process):");
-  for (const entry of report.brokerEnv) {
-    console.log(`  ${entry.variable}: ${entry.present ? "set" : "unset"}`);
+  const brokerEnvLabel = report.brokerEnvSource === "unavailable"
+    ? "connected daemon unavailable"
+    : `${report.brokerEnvSource} process`;
+  console.log(`Broker env (${brokerEnvLabel}, presence only):`);
+  if (report.brokerEnvSource === "unavailable") {
+    console.log("  unavailable from the connected daemon; restart it with the current Headless build");
+  } else {
+    for (const entry of report.brokerEnv) {
+      console.log(`  ${entry.variable}: ${entry.present ? "set" : "unset"}`);
+    }
   }
   console.log(`Durable jobs: ${report.durableJobs}; recent events: ${report.recentEvents}`);
   console.log(`Ready for native exec: ${report.readyForNativeExec ? "yes" : "no"}`

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { STABLE_COMMAND_NAMES, renderHelp, stableHelpCommandCount } from "../src/cli/command-specs";
 import { parseExecProfile, EXEC_PROFILES } from "../src/cli/profile";
 import { PRODUCT_GATE_REMEDY_CODES, formatRemedyLines, remedyForCode, remedyForMessage } from "../src/cli/remedy";
@@ -7,6 +9,8 @@ import { runSetupCommand } from "../src/cli/commands/lifecycle";
 import { buildDoctorReport, inventoryBackends } from "../src/cli/readiness";
 import type { RunResult } from "../src/contracts/run";
 import { authorityLadder, initialControlRoomState, nextActions } from "../src/tui/model";
+import { brokerEnvReadiness } from "../src/runtime/broker-env";
+import { withLiveValidationFixture } from "../scripts/live-validation-fixture";
 
 describe("Product Gate P contracts", () => {
   test("P.HELP keeps stable help within the progressive-disclosure budget", () => {
@@ -98,10 +102,55 @@ describe("Product Gate P contracts", () => {
       recentEvents: 0,
       backends,
       brokerEnv: [{ variable: "OPENAI_API_KEY", present: false }],
+      brokerEnvSource: "daemon",
     });
     expect(report.readyForNativeExec).toBe(false);
+    expect(report.brokerEnvSource).toBe("daemon");
     expect(report.nextActions.some((a) => a.id === "grant-native-trust")).toBe(true);
     expect(report.version).toBe("product-readiness-1");
+  });
+
+  test("doctor broker readiness contains only daemon-safe presence flags", () => {
+    const inventory = brokerEnvReadiness({
+      OPENAI_API_KEY: "present-but-never-returned",
+      ANTHROPIC_API_KEY: "",
+    });
+    expect(inventory.find((entry) => entry.variable === "OPENAI_API_KEY")?.present).toBe(true);
+    expect(inventory.find((entry) => entry.variable === "ANTHROPIC_API_KEY")?.present).toBe(false);
+    expect(JSON.stringify(inventory)).not.toContain("present-but-never-returned");
+  });
+
+  test("live validation fixtures remove both state and short runtime roots", async () => {
+    let roots: { root: string; runtimeHome: string } | null = null;
+    await withLiveValidationFixture("headless-fixture-test", async (fixture) => {
+      roots = { root: fixture.root, runtimeHome: fixture.runtimeHome };
+      expect(existsSync(fixture.root)).toBe(true);
+      expect(existsSync(fixture.runtimeHome)).toBe(true);
+    });
+    expect(roots).not.toBeNull();
+    expect(existsSync(roots!.root)).toBe(false);
+    expect(existsSync(roots!.runtimeHome)).toBe(false);
+  });
+
+  test("standalone Product Gate is machine-readable and does not self-certify the kernel", () => {
+    const root = resolve(import.meta.dir, "..");
+    const result = Bun.spawnSync(["bun", "scripts/product-gate.ts"], {
+      cwd: root,
+      env: { ...process.env, HEADLESS_PRODUCT_KERNEL_VERIFIED: "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    const report = JSON.parse(result.stdout.toString()) as {
+      checks: Array<{ id: string; status: string }>;
+    };
+    expect(report.checks.find((check) => check.id === "P.KERNEL")?.status).toBe("manual");
+
+    const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts.check).toContain("bun run check:kernel &&");
+    expect(pkg.scripts.check).toContain("HEADLESS_PRODUCT_KERNEL_VERIFIED=1");
   });
 
   test("P.GOLDEN setup wizard inventories backends and prints next commands", async () => {

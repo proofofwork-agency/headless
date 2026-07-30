@@ -109,7 +109,7 @@ export const COMMAND_SPECS = [
     valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"],
     help: "status [--cwd dir]              Show project and daemon status.",
   },
-  { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, broker env, next commands." },
+  { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, daemon broker env, next commands." },
   { name: "tui", valueFlags: ["--cwd"], help: "tui [--cwd dir]                 Open the read-only observer log and configuration pane." },
   { name: "pair", valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"], internal: true },
   {

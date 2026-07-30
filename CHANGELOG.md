@@ -5,7 +5,7 @@
 ### Added
 
 - Product Gate P and opportunity solution tree (`docs/product-gate.md`, `docs/product-ost.md`) with `bun scripts/product-gate.ts` / `bun run check:product` wired into `check`.
-- MCP **lead-core toolset** (default): only eight tools are advertised/callable unless `HEADLESS_MCP_TOOLSET=full` restores the complete registry. Core is a subset of existing scopes, never a privilege elevation. Enforced on both `tools/list` and `tools/call` (and the OpenCode plugin).
+- MCP **lead-core toolset** (default): ten round-trip tools are advertised/callable unless `HEADLESS_MCP_TOOLSET=full` restores the complete registry. Core includes context read/note, message receive/send, and completion proposal pairs while remaining a subset of existing scopes. Enforced on both `tools/list` and `tools/call` (and the OpenCode plugin).
 - Dual native-login validator: `bun run validate:dual-native` (codex + opencode).
 - Golden-path `headless setup` wizard: init, CLI inventory, optional native trust grant, printed next commands.
 - Exec `--profile read-only-native|broker-readonly` presets that collapse auth/mode/containment flags without weakening required containment.
@@ -16,11 +16,13 @@
 - Setup/doctor surface Claude setup-token remedy on macOS when the capsule is missing.
 - `exec --json` embeds `next.verify` / `next.receipt` for scripted golden paths.
 - TTFV smoke: `bun run smoke:ttfv` (ceremony) and `bun run smoke:ttfv:live` (real native turn), evidence at `docs/internal/release-evidence/ttfv-smoke.json`.
+- Live validators now own bounded daemon shutdown, interrupt handling, and temporary-root cleanup; exact requested model output is required for live TTFV and dual-native success.
 
 ### Changed
 
 - Default help banner documents the golden path; `setup` joins the Beta 1 stable command set.
 - README and website quickstart lead with one path instead of multi-flag ceremony.
+- Product Gate treats kernel verification and stale/ceremony TTFV evidence as manual instead of self-certifying them green.
 
 
 ## 0.2.0-beta.5 — 2026-07-27
