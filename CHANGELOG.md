@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Added
+
+- Product Gate P and opportunity solution tree (`docs/product-gate.md`, `docs/product-ost.md`) with `bun scripts/product-gate.ts` / `bun run check:product` wired into `check`.
+- MCP **lead-core toolset** (default): only eight tools are advertised/callable unless `HEADLESS_MCP_TOOLSET=full` restores the complete registry. Core is a subset of existing scopes, never a privilege elevation. Enforced on both `tools/list` and `tools/call` (and the OpenCode plugin).
+- Dual native-login validator: `bun run validate:dual-native` (codex + opencode).
+- Golden-path `headless setup` wizard: init, CLI inventory, optional native trust grant, printed next commands.
+- Exec `--profile read-only-native|broker-readonly` presets that collapse auth/mode/containment flags without weakening required containment.
+- CLI remedy matrix (`src/cli/remedy.ts`) so top structured failures print a copy-paste next command.
+- Artifact-first `exec` footer: job id plus `verify` and experimental `receipt show` one-liners.
+- TUI authority ladder and richer Overview next-actions (trust, native consent, lead, first exec).
+- `headless doctor --json` readiness panel: trust, backend PATH + native capsule presence (no secret reads), broker env flags, copy-paste next actions.
+- Setup/doctor surface Claude setup-token remedy on macOS when the capsule is missing.
+- `exec --json` embeds `next.verify` / `next.receipt` for scripted golden paths.
+- TTFV smoke: `bun run smoke:ttfv` (ceremony) and `bun run smoke:ttfv:live` (real native turn), evidence at `docs/internal/release-evidence/ttfv-smoke.json`.
+
+### Changed
+
+- Default help banner documents the golden path; `setup` joins the Beta 1 stable command set.
+- README and website quickstart lead with one path instead of multi-flag ceremony.
+
+
 ## 0.2.0-beta.5 — 2026-07-27
 
 Package publication remains blocked. Both package manifests are private at `0.2.0-beta.5`; npm publication and repository visibility remain separate human-authority decisions.

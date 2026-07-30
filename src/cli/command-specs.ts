@@ -19,8 +19,8 @@ export const COMMAND_SPECS = [
   {
     name: "exec",
     aliases: ["run"],
-    valueFlags: ["--backend", "--model", "--agent", "--session-id", "--timeout-ms", "--cwd", "--extension-config", "--extension-module", "--mode", "--auth-mode", "--approval-policy"],
-    help: 'exec | run [--backend id] [--mode read-only|write] [--model m] [--agent a] [--session-id id] [--timeout-ms n] [--cwd dir] [--extension-config /absolute/trusted.json] [--json] [--stream] [--require-sandbox|--unsafe-no-sandbox] "prompt"',
+    valueFlags: ["--backend", "--model", "--agent", "--session-id", "--timeout-ms", "--cwd", "--extension-config", "--extension-module", "--mode", "--auth-mode", "--approval-policy", "--profile"],
+    help: 'exec | run [--backend id] [--profile read-only-native|broker-readonly] [--mode read-only|write] [--model m] [--agent a] [--session-id id] [--timeout-ms n] [--cwd dir] [--json] [--stream] "prompt"',
   },
   {
     name: "daemon",
@@ -100,11 +100,16 @@ export const COMMAND_SPECS = [
     help: "init [--lead codex|grok|claude|opencode] [--cwd dir]   Initialize external per-project state and optionally configure its foreground lead.",
   },
   {
+    name: "setup",
+    valueFlags: ["--lead", "--cwd", "--extension-config", "--extension-module"],
+    help: "setup [--lead host] [--yes] [--allow-native-direct-unrestricted] [--cwd dir]   Golden-path wizard: init, inventory CLIs, print next commands.",
+  },
+  {
     name: "status",
     valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"],
     help: "status [--cwd dir]              Show project and daemon status.",
   },
-  { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "doctor [--cwd dir]              Show runtime, backend inventory, daemon state, and containment defaults." },
+  { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], help: "doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, broker env, next commands." },
   { name: "tui", valueFlags: ["--cwd"], help: "tui [--cwd dir]                 Open the read-only observer log and configuration pane." },
   { name: "pair", valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"], internal: true },
   {
@@ -174,11 +179,30 @@ export function parseCliInvocation(args: string[]): CliInvocation {
     : { kind: "unknown", name };
 }
 
-export const STABLE_COMMAND_NAMES = new Set(["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp", "tui", "verify"]);
+/** Beta 1 public surface. Adding a name requires Product Gate owner ack (docs/product-gate.md). */
+export const STABLE_COMMAND_NAMES = new Set([
+  "exec",
+  "lead",
+  "daemon",
+  "project",
+  "init",
+  "setup",
+  "status",
+  "doctor",
+  "mcp",
+  "tui",
+  "verify",
+]);
+
+export function stableHelpCommandCount() {
+  return COMMAND_SPECS.filter((spec) => "help" in spec && STABLE_COMMAND_NAMES.has(spec.name)).length;
+}
 
 export function renderHelp(includeExperimental = false) {
   return [
     "headless (hless) — Beta 1 contained execution runner",
+    "",
+    "Golden path: headless setup → project trust grant (native) → exec --auth-mode native-login --profile read-only-native → verify",
     "",
     "Commands:",
     ...COMMAND_SPECS.flatMap((spec) => {

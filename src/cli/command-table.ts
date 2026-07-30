@@ -8,7 +8,7 @@ import { runExecCommand } from "./commands/exec";
 import { runFleetCommand } from "./commands/fleet";
 import { runGoalCommand } from "./commands/goal";
 import { runLaunchCommand } from "./commands/launch";
-import { runDoctorCommand, runInitCommand, runStatusCommand, runTuiCommand } from "./commands/lifecycle";
+import { runDoctorCommand, runInitCommand, runSetupCommand, runStatusCommand, runTuiCommand } from "./commands/lifecycle";
 import { runMcpCommand } from "./commands/mcp";
 import { runProjectCommand } from "./commands/project";
 import { runCouncilCommand, runGateCommand } from "./commands/quality";
@@ -42,6 +42,7 @@ const handlers = {
   council: runCouncilCommand,
   gate: runGateCommand,
   init: runInitCommand,
+  setup: runSetupCommand,
   status: runStatusCommand,
   doctor: runDoctorCommand,
   tui: runTuiCommand,

@@ -3,7 +3,8 @@
 import { join } from "node:path";
 import { resolveCommand } from "./cli/command-table";
 import { parseCliInvocation, renderHelp } from "./cli/command-specs";
-import { CliUsageError, handleSignal } from "./cli/shared";
+import { printRemedy } from "./cli/remedy";
+import { CliUsageError, getArg, handleSignal } from "./cli/shared";
 import { toStructuredError } from "./runtime/headless-error";
 import { isValidationError, validationErrorDetails, validationErrorMessage } from "./runtime/validation-error";
 
@@ -68,6 +69,8 @@ if (import.meta.main) {
         : error instanceof Error
           ? error.message
           : structured.message);
+      const cwd = getArg(flagArgs, "--cwd") || process.cwd();
+      printRemedy(structured.code, structured.message, cwd);
     }
     process.exitCode = 1;
   });

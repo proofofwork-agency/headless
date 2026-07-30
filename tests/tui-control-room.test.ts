@@ -213,7 +213,9 @@ describe("Headless read-only TUI", () => {
     const state = { ...initialControlRoomState("/project"), connection: "connected" as const };
     expect(controlSummary(state)).toMatchObject({ interface: "observer", core: "external", lead: "not configured" });
     expect(healthSummary(state).daemon).toBe("Ready");
-    expect(nextActions(state).map((action) => action.command)).toEqual(expect.arrayContaining(["headless lead use <host>", "headless project trust status"]));
+    const commands = nextActions(state).map((action) => action.command);
+    expect(commands.some((command) => command.includes("project trust grant"))).toBe(true);
+    expect(commands.some((command) => command.includes("lead use"))).toBe(true);
   });
 
   test("keeps trust acknowledgement distinct from provider login failures", () => {

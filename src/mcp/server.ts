@@ -35,6 +35,10 @@ import {
   DEFAULT_TOOL_APPROVAL_POLICY,
   DEFAULT_TOOL_AUTH_MODE,
   HEADLESS_TOOL_REGISTRY,
+  assertMcpToolAllowed,
+  filterToolsByMcpToolset,
+  resolveMcpToolset,
+  type HeadlessMcpToolset,
 } from "../contracts/tool-registry";
 
 export const MCP_VERSION = HEADLESS_VERSION;
@@ -140,9 +144,15 @@ const TOOL_REQUIRED_SCOPES: Partial<Record<typeof TOOL_DEFINITIONS[number]["name
   headless_workflow_status: ["run"],
 };
 
-export function mcpToolsForScopes(scopes: readonly CredentialScope[]) {
-  if (scopes.includes("admin")) return [...TOOL_DEFINITIONS];
-  return TOOL_DEFINITIONS.filter((tool) => (TOOL_REQUIRED_SCOPES[tool.name] ?? []).every((scope) => scopes.includes(scope)));
+export function mcpToolsForScopes(
+  scopes: readonly CredentialScope[],
+  toolset: HeadlessMcpToolset = resolveMcpToolset(),
+) {
+  const scoped = scopes.includes("admin")
+    ? [...TOOL_DEFINITIONS]
+    : TOOL_DEFINITIONS.filter((tool) => (TOOL_REQUIRED_SCOPES[tool.name] ?? []).every((scope) => scopes.includes(scope)));
+  // Admin scopes still respect the lead-core toolset advertisement unless full.
+  return filterToolsByMcpToolset(scoped, toolset);
 }
 
 async function handleListTools() {
@@ -162,6 +172,8 @@ async function handleCallTool(req: { params: { name: string; arguments?: Record<
   const n = (v: unknown, d?: number) => (v == null ? d : (typeof v === "number" ? v : Number(v)));
   const arr = (v: unknown): string[] | undefined => splitList(typeof v === "string" ? v : (Array.isArray(v) ? v.join(",") : undefined));
   try {
+    // Advertise and call both gated: non-core tools fail closed under toolset=core.
+    assertMcpToolAllowed(name);
     if (name === "headless_run") {
       const parsed = McpRunSchema.parse({
         backend: a.backend ?? "opencode",

@@ -70,9 +70,26 @@ Automatic worker and synthesizer selection excludes the active lead backend. An 
 
 ## Tool surface
 
-Execution and orchestration:
+### Lead-core vs full toolset
 
-- MCP and the OpenCode plugin advertise one shared schema/default registry. Direct run, deliberation, and council tools default to `native-login` plus `ask`; goal-level auth remains unset so it can inherit the selected fleet profile.
+By default the MCP server and OpenCode plugin advertise a **lead-core** toolset (≤ 8 tools) so a foreground lead is not buried under orchestration surface:
+
+| Core tool | Role |
+| --- | --- |
+| `headless_run` | One contained job |
+| `headless_deliberate` | Read-only multi-backend fan-out |
+| `headless_project_trust` | Trust status (inspect only) |
+| `headless_read_context` | Ledger projection |
+| `headless_task_state` | Durable tasks |
+| `headless_fleet_health` | Backend readiness |
+| `headless_get_messages` | Session messages |
+| `headless_get_cooperation_instructions` | Cooperation contract |
+
+Set **`HEADLESS_MCP_TOOLSET=full`** in the MCP/plugin process environment to restore the complete registry (goals, councils, workflows, ledger helpers, …). Non-core `tools/call` under the default `core` toolset fails closed with a message that names the env override. Daemon credential scopes are unchanged: core is a **subset**, not a privilege elevation.
+
+### Execution and orchestration (full set)
+
+- MCP and the OpenCode plugin share one schema/default registry. Direct run, deliberation, and council tools default to `native-login` plus `ask`; goal-level auth remains unset so it can inherit the selected fleet profile.
 - `headless_run` submits one contained daemon job and returns its full structured result.
 - `headless_deliberate` fans out a bounded read-only question. Its default backends are OpenCode and Codex.
 - `council_deliberate` runs daemon-owned proposal, execution, review, vote, and decision phases.

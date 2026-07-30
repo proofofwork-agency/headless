@@ -54,7 +54,7 @@ export const CLI_AUDIT_MANIFEST: readonly CliAuditCase[] = COMMAND_SPECS.flatMap
 
 function commandRisk(command: CliCommandName): CliAuditCase["risk"] {
   if (["exec", "launch", "council"].includes(command)) return "cost";
-  if (["init", "daemon", "project", "fleet", "candidate", "gate", "mcp"].includes(command)) return "destructive";
+  if (["init", "setup", "daemon", "project", "fleet", "candidate", "gate", "mcp"].includes(command)) return "destructive";
   if (command === "session" || command === "goal" || command === "workflow" || command === "orchestrate" || command === "autonomy") return "cost";
   if (command === "skill") return "destructive";
   if (command === "budget") return "destructive";

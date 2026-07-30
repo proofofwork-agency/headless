@@ -55,10 +55,11 @@ the per-coder guides for
 - Leased write worktrees with secret scanning, project gates, finality, and
   authorized integration instead of direct primary-checkout mutation.
 
-## Five-minute native-login quickstart
+## Golden path (≤ 5 minutes)
 
-Native login is the primary real-run path. It uses each official CLI's existing
-subscription login and does not require a separate provider API key.
+One path from cold start to a verified contained run. Use a **disposable** project
+while Headless is private beta. Sign in to at least one coder CLI first
+(`codex login`, `opencode auth login`, `claude setup-token` on macOS, etc.).
 
 ```bash
 bun install --frozen-lockfile --ignore-scripts
@@ -67,25 +68,38 @@ bun run build
 HEADLESS="$PWD/dist/cli.js"
 PROJECT="/absolute/path/to/a/disposable/project"
 
-"$HEADLESS" init --lead codex --cwd "$PROJECT"
+# 1) Wizard: init external state, inventory CLIs, print next commands
+"$HEADLESS" setup --cwd "$PROJECT"
+
+# 2) Intentional friction: native login needs unrestricted-egress acknowledgement
 "$HEADLESS" project trust grant \
   --allow-native-direct-unrestricted \
   --cwd "$PROJECT"
 
+# 3) Native subscription login (not broker API keys) + read-only + required containment
 "$HEADLESS" exec \
-  --backend opencode \
+  --backend codex \
   --auth-mode native-login \
-  --mode read-only \
-  --timeout-ms 120000 \
-  --json \
+  --profile read-only-native \
   --cwd "$PROJECT" \
   -- "Inspect the public entry points."
+
+# 4) Artifact-first: verify the ledger (exec also prints receipt/verify hints)
+"$HEADLESS" verify --cwd "$PROJECT"
+
+# Readiness panel (human or --json for scripts)
+"$HEADLESS" doctor --cwd "$PROJECT"
+"$HEADLESS" doctor --json --cwd "$PROJECT"
 ```
 
-Use `claude`, `opencode`, or `grok` instead of `codex` in `init --lead`.
-Initialization creates external state, installs the host's MCP registration,
-and binds the lead. It does **not** grant project trust, native egress, write
-authority, or approval bypass.
+Noninteractive grant+setup:
+`"$HEADLESS" setup --yes --allow-native-direct-unrestricted --cwd "$PROJECT"`.
+
+Optional lead binding: `setup --lead codex` (or `init --lead …`). Lead install does
+**not** grant trust, write authority, or approval bypass.
+
+Profiles: `read-only-native` | `broker-readonly`. Advanced orchestration
+(`fleet`, `goal`, `council`, …) lives under `headless experimental`.
 
 Native results report `network: "native-direct-unrestricted"`. This is truthful
 egress evidence, not a provider destination allowlist. Revoke consent with:

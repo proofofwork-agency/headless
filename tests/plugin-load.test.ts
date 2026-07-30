@@ -48,6 +48,9 @@ describe("OpenCode plugin loadability", () => {
   });
 
   test("returns exactly the Headless tools with registry-accepted schemas", async () => {
+    const previous = process.env.HEADLESS_MCP_TOOLSET;
+    process.env.HEADLESS_MCP_TOOLSET = "full";
+    try {
     const hooks = await server({} as never);
     const tools = hooks.tool ?? {};
 
@@ -69,6 +72,10 @@ describe("OpenCode plugin loadability", () => {
     const goalProperties = goalSchema.properties as Record<string, Record<string, unknown>>;
     expect(goalProperties.authMode).not.toHaveProperty("default");
     expect(goalProperties.approvalPolicy).not.toHaveProperty("default");
+    } finally {
+      if (previous === undefined) delete process.env.HEADLESS_MCP_TOOLSET;
+      else process.env.HEADLESS_MCP_TOOLSET = previous;
+    }
   });
 });
 
@@ -221,9 +228,11 @@ async function startDaemonFixture(): Promise<DaemonFixture> {
   const previousEnv = {
     HEADLESS_STATE_HOME: process.env.HEADLESS_STATE_HOME,
     HEADLESS_RUNTIME_HOME: process.env.HEADLESS_RUNTIME_HOME,
+    HEADLESS_MCP_TOOLSET: process.env.HEADLESS_MCP_TOOLSET,
   };
   process.env.HEADLESS_STATE_HOME = join(root, "state");
   process.env.HEADLESS_RUNTIME_HOME = runtime;
+  process.env.HEADLESS_MCP_TOOLSET = "full";
 
   const daemon = new HeadlessDaemon({ projectRoot: project, principal: "owner" });
   await daemon.start();

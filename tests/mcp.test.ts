@@ -8,6 +8,14 @@ import { HeadlessDaemonClient } from "../src/daemon/client";
 import { connectOrStartDaemon } from "../src/daemon/connect";
 import { HeadlessDaemon } from "../src/daemon/server";
 import {
+  CORE_MCP_TOOL_NAMES,
+  HEADLESS_MCP_TOOLSET_ENV,
+  HEADLESS_TOOL_REGISTRY,
+  assertMcpToolAllowed,
+  filterToolsByMcpToolset,
+  resolveMcpToolset,
+} from "../src/contracts/tool-registry";
+import {
   __handleCallToolForTest,
   __handleListToolsForTest,
   __normalizeMcpInputSchemaForTest,
@@ -80,6 +88,9 @@ describe("MCP server surface", () => {
   });
 
   test("matches the OpenCode plugin tool names, schemas, and defaults", async () => {
+    const previous = process.env[HEADLESS_MCP_TOOLSET_ENV];
+    process.env[HEADLESS_MCP_TOOLSET_ENV] = "full";
+    try {
     const names = mcpToolDefinitions.map((tool) => tool.name).sort();
     expect(names).toEqual([...MCP_EXPECTED_TOOLS].sort());
     const plugin = await openCodePluginServer({} as never);
@@ -103,10 +114,14 @@ describe("MCP server surface", () => {
       },
     });
     expect(mcpSchemas.headless_record_task_claim).toMatchObject({ properties: { leaseMs: { default: 300_000 } } });
+    } finally {
+      if (previous === undefined) delete process.env[HEADLESS_MCP_TOOLSET_ENV];
+      else process.env[HEADLESS_MCP_TOOLSET_ENV] = previous;
+    }
   });
 
   test("advertises only tools and actions available to the authenticated scope set", () => {
-    const runOnly = mcpToolsForScopes(["run"]);
+    const runOnly = mcpToolsForScopes(["run"], "full");
     expect(runOnly.map((tool) => tool.name)).toContain("headless_run");
     expect(runOnly.map((tool) => tool.name)).not.toContain("headless_append_note");
     const schemas = Object.fromEntries(mcpToolDefinitions.map((tool) => [tool.name, JSON.stringify(tool.inputSchema)]));
@@ -115,6 +130,53 @@ describe("MCP server surface", () => {
     expect(schemas.headless_approval).not.toContain("resolve");
     expect(schemas.headless_candidate).not.toContain("integrate");
     expect(schemas.headless_collaboration).not.toContain("transferSynthesizer");
+  });
+
+  test("defaults the lead MCP toolset to core and restores full on demand", () => {
+    expect(CORE_MCP_TOOL_NAMES.length).toBeLessThanOrEqual(10);
+    expect(resolveMcpToolset(undefined)).toBe("core");
+    expect(resolveMcpToolset("core")).toBe("core");
+    expect(resolveMcpToolset("full")).toBe("full");
+    expect(() => resolveMcpToolset("maybe")).toThrow(/core" or "full/);
+
+    const core = filterToolsByMcpToolset(HEADLESS_TOOL_REGISTRY, "core");
+    const full = filterToolsByMcpToolset(HEADLESS_TOOL_REGISTRY, "full");
+    expect(core.length).toBe(CORE_MCP_TOOL_NAMES.length);
+    expect(core.every((tool) => CORE_MCP_TOOL_NAMES.includes(tool.name as typeof CORE_MCP_TOOL_NAMES[number]))).toBe(true);
+    expect(full.map((tool) => tool.name).sort()).toEqual(HEADLESS_TOOL_REGISTRY.map((tool) => tool.name).sort());
+
+    expect(() => assertMcpToolAllowed("headless_run", "core")).not.toThrow();
+    expect(() => assertMcpToolAllowed("headless_append_note", "core")).toThrow(/HEADLESS_MCP_TOOLSET=full/);
+    expect(() => assertMcpToolAllowed("headless_append_note", "full")).not.toThrow();
+
+    const scopedCore = mcpToolsForScopes(["run", "ledger:read", "task", "messages"], "core");
+    expect(scopedCore.length).toBeLessThanOrEqual(10);
+    expect(scopedCore.map((tool) => tool.name)).toContain("headless_run");
+    expect(scopedCore.map((tool) => tool.name)).not.toContain("headless_workflow_run");
+
+    const previous = process.env[HEADLESS_MCP_TOOLSET_ENV];
+    process.env[HEADLESS_MCP_TOOLSET_ENV] = "core";
+    try {
+      expect(mcpToolsForScopes(["admin"]).length).toBe(CORE_MCP_TOOL_NAMES.length);
+    } finally {
+      if (previous === undefined) delete process.env[HEADLESS_MCP_TOOLSET_ENV];
+      else process.env[HEADLESS_MCP_TOOLSET_ENV] = previous;
+    }
+  });
+
+  test("rejects non-core tool calls when the lead toolset is core", async () => {
+    const previous = process.env[HEADLESS_MCP_TOOLSET_ENV];
+    process.env[HEADLESS_MCP_TOOLSET_ENV] = "core";
+    try {
+      const response = await __handleCallToolForTest({
+        params: { name: "headless_append_note", arguments: { text: "blocked" } },
+      });
+      expect(response.isError).toBe(true);
+      expect(response.content[0]?.text).toContain("HEADLESS_MCP_TOOLSET=full");
+    } finally {
+      if (previous === undefined) delete process.env[HEADLESS_MCP_TOOLSET_ENV];
+      else process.env[HEADLESS_MCP_TOOLSET_ENV] = previous;
+    }
   });
 });
 
@@ -283,7 +345,7 @@ type DaemonFixture = {
   project: string;
   daemon: HeadlessDaemon;
   rootClient: HeadlessDaemonClient;
-  previousEnv: Record<"HEADLESS_PROJECT_ROOT" | "HEADLESS_STATE_HOME" | "HEADLESS_RUNTIME_HOME" | "HEADLESS_LEAD_HOST", string | undefined>;
+  previousEnv: Record<"HEADLESS_PROJECT_ROOT" | "HEADLESS_STATE_HOME" | "HEADLESS_RUNTIME_HOME" | "HEADLESS_LEAD_HOST" | "HEADLESS_MCP_TOOLSET", string | undefined>;
 };
 
 async function startDaemonFixture(): Promise<DaemonFixture> {
@@ -296,11 +358,14 @@ async function startDaemonFixture(): Promise<DaemonFixture> {
     HEADLESS_STATE_HOME: process.env.HEADLESS_STATE_HOME,
     HEADLESS_RUNTIME_HOME: process.env.HEADLESS_RUNTIME_HOME,
     HEADLESS_LEAD_HOST: process.env.HEADLESS_LEAD_HOST,
+    HEADLESS_MCP_TOOLSET: process.env.HEADLESS_MCP_TOOLSET,
   };
   process.env.HEADLESS_PROJECT_ROOT = project;
   process.env.HEADLESS_STATE_HOME = join(root, "state");
   process.env.HEADLESS_RUNTIME_HOME = runtime;
   process.env.HEADLESS_LEAD_HOST = "codex";
+  // Integration fixtures exercise the full registry; product default remains core.
+  process.env.HEADLESS_MCP_TOOLSET = "full";
 
   const daemon = new HeadlessDaemon({ projectRoot: project, principal: "owner" });
   await daemon.start();

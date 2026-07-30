@@ -7,7 +7,7 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | Command | Stability | Aliases | Invocation |
 | --- | --- | --- | --- |
 | `lead` | Beta 1 | — | `lead <use <host>|status|release> [--cwd dir]   Configure the externally launched foreground lead.` |
-| `exec` | Beta 1 | run | `exec | run [--backend id] [--mode read-only|write] [--model m] [--agent a] [--session-id id] [--timeout-ms n] [--cwd dir] [--extension-config /absolute/trusted.json] [--json] [--stream] [--require-sandbox|--unsafe-no-sandbox] "prompt"` |
+| `exec` | Beta 1 | run | `exec | run [--backend id] [--profile read-only-native|broker-readonly] [--mode read-only|write] [--model m] [--agent a] [--session-id id] [--timeout-ms n] [--cwd dir] [--json] [--stream] "prompt"` |
 | `daemon` | Beta 1 | — | `daemon <serve|status|stop|reap> [--cwd dir] [--extension-config /absolute/trusted.json] [--idle-timeout-ms ms | --no-idle-timeout] [reap: --confirm] [reap: --all]` |
 | `project` | Beta 1 | — | `project trust <status|grant|revoke> [--allow-native-direct-unrestricted] [--allow-bypass] [--cwd dir]` |
 | `fleet` | Experimental | — | `experimental fleet <health|profile get|list|remove> [--profile-id id] | fleet profile create --profile-id id --agent backend [--agent backend ...] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate] | fleet profile upsert [--file profile.json | [--profile-id id] --auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate]` |
@@ -23,8 +23,9 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | `council` | Experimental | — | `experimental council [--agent backend ...] [--mode read-only|write] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--timeout-ms n] "question"` |
 | `gate` | Experimental | release-gate | `experimental gate [--check check|build|test|pack] [--timeout-ms n] [--cwd dir]` |
 | `init` | Beta 1 | — | `init [--lead codex|grok|claude|opencode] [--cwd dir]   Initialize external per-project state and optionally configure its foreground lead.` |
+| `setup` | Beta 1 | — | `setup [--lead host] [--yes] [--allow-native-direct-unrestricted] [--cwd dir]   Golden-path wizard: init, inventory CLIs, print next commands.` |
 | `status` | Beta 1 | — | `status [--cwd dir]              Show project and daemon status.` |
-| `doctor` | Beta 1 | — | `doctor [--cwd dir]              Show runtime, backend inventory, daemon state, and containment defaults.` |
+| `doctor` | Beta 1 | — | `doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, broker env, next commands.` |
 | `tui` | Beta 1 | — | `tui [--cwd dir]                 Open the read-only observer log and configuration pane.` |
 | `mcp` | Beta 1 | — | `mcp <serve|install|remove|status> [codex|grok|claude|opencode] [--cwd dir]` |
 | `launch` | Experimental | — | `experimental launch <backend> [options]        Compatibility one-shot routed through the daemon.` |

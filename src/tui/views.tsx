@@ -582,6 +582,16 @@ export function ConfigView({ state, width, height }: { state: TuiControlRoomStat
         <KeyValue label="trust"><Text color={state.projectTrust.trusted ? OK : WARN}>{config.trust}</Text></KeyValue>
         <KeyValue label="lead"><Text color={state.lead?.status === "connected" ? OK : state.lead ? WARN : MUTED}>{config.lead}</Text></KeyValue>
         <KeyValue label="daemon"><Text color={state.connection === "connected" ? OK : WARN}>{config.daemon}</Text></KeyValue>
+        <SectionTitle title="Authority ladder" tone={WARN} width={stateWidth} />
+        {config.authority.map((rung) => (
+          <Text key={rung.id} wrap="truncate">
+            <Text>  </Text>
+            <Dot tone={rung.ready ? OK : WARN} />
+            <Text color={MUTED}>{rung.label}</Text>
+            <Text color={CHROME}> · </Text>
+            <Text color={rung.ready ? OK : WARN}>{rung.detail}</Text>
+          </Text>
+        ))}
         <SectionTitle title="Worker delegations" tone={VIOLET} width={stateWidth} />
         {config.delegations.length === 0 ? <EmptyHint text="no worker-delegated children" /> : config.delegations.map((delegation) => (
           <Text key={delegation.id} color={MUTED} wrap="truncate">{delegation.summary}</Text>
