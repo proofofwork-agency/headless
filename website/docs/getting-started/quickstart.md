@@ -70,7 +70,7 @@ Optional observer: `headless tui --cwd "$PROJECT"` (read-only; generates CLI com
 | Claude (macOS Keychain) | `claude setup-token > ~/.claude/.headless-setup-token` (mode 600) |
 | Grok | `grok login` or `grok login --device-auth` |
 
-Details: [native-login.md](../../../docs/native-login.md) and the per-coder guides under AI coders.
+Details: per-coder native login in the [Claude](../ai-coders/claude.md), [Codex](../ai-coders/codex.md), [OpenCode](../ai-coders/opencode.md), and [Grok](../ai-coders/grok.md) guides.
 
 ## What not to do on the golden path
 
@@ -82,5 +82,6 @@ Details: [native-login.md](../../../docs/native-login.md) and the per-coder guid
 
 - [Architecture](../concepts/architecture.md)
 - [Safety model](../concepts/safety-model.md)
-- [CLI and TUI guide](../../../docs/cli-and-tui-guide.md)
-- Product improvement oracle: [product-gate.md](../../../docs/product-gate.md)
+- [CLI guide](../guides/cli.md)
+- [TUI guide](../guides/tui.md)
+- [Release evidence](../release-gates/evidence.md)

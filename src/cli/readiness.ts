@@ -239,41 +239,56 @@ export function printDoctorHuman(report: DoctorReport) {
   }
 }
 
+/** Capsule probes keyed by backend id (table dispatch, not kernel branching). */
+const NATIVE_CAPSULE_PROBES: Record<
+  BackendReadinessId,
+  (home: string, platform: NodeJS.Platform) => { present: boolean; path: string; detail: string; remedy: string | null }
+> = {
+  codex: (home) => filePresence(
+    join(home, ".codex", "auth.json"),
+    "Codex auth.json",
+    "Run `codex login` so ~/.codex/auth.json exists.",
+  ),
+  opencode: (home) => filePresence(
+    join(home, ".local", "share", "opencode", "auth.json"),
+    "OpenCode auth.json",
+    "Run `opencode auth login` so the OpenCode auth store exists.",
+  ),
+  "claude-code": (home, platform) => claudeCapsuleStatus(home, platform),
+  "grok-build": (home) => filePresence(
+    join(home, ".grok", "auth.json"),
+    "Grok auth.json",
+    "Run `grok login` or `grok login --device-auth` so ~/.grok/auth.json exists.",
+  ),
+};
+
 function nativeCapsuleStatus(id: BackendReadinessId, home: string, platform: NodeJS.Platform) {
-  if (id === "codex") {
-    const path = join(home, ".codex", "auth.json");
-    return filePresence(path, "Codex auth.json", "Run `codex login` so ~/.codex/auth.json exists.");
+  return NATIVE_CAPSULE_PROBES[id](home, platform);
+}
+
+function claudeCapsuleStatus(home: string, platform: NodeJS.Platform) {
+  const setupToken = join(home, ".claude", ".headless-setup-token");
+  const credentials = join(home, ".claude", ".credentials.json");
+  if (regularFile(setupToken)) {
+    return { present: true, path: setupToken, detail: "setup-token present", remedy: null as string | null };
   }
-  if (id === "opencode") {
-    const path = join(home, ".local", "share", "opencode", "auth.json");
-    return filePresence(path, "OpenCode auth.json", "Run `opencode auth login` so the OpenCode auth store exists.");
+  if (platform !== "darwin" && regularFile(credentials)) {
+    return { present: true, path: credentials, detail: "credentials.json present", remedy: null };
   }
-  if (id === "claude-code") {
-    const setupToken = join(home, ".claude", ".headless-setup-token");
-    const credentials = join(home, ".claude", ".credentials.json");
-    if (regularFile(setupToken)) {
-      return { present: true, path: setupToken, detail: "setup-token present", remedy: null as string | null };
-    }
-    if (platform !== "darwin" && regularFile(credentials)) {
-      return { present: true, path: credentials, detail: "credentials.json present", remedy: null };
-    }
-    if (platform === "darwin") {
-      return {
-        present: false,
-        path: setupToken,
-        detail: "macOS Keychain login is not importable; setup-token required",
-        remedy: CLAUDE_SETUP_TOKEN_REMEDY,
-      };
-    }
+  if (platform === "darwin") {
     return {
       present: false,
-      path: credentials,
-      detail: "no Claude credentials file",
-      remedy: "Run `claude auth login`, or mint a setup-token at ~/.claude/.headless-setup-token.",
+      path: setupToken,
+      detail: "macOS Keychain login is not importable; setup-token required",
+      remedy: CLAUDE_SETUP_TOKEN_REMEDY,
     };
   }
-  const path = join(home, ".grok", "auth.json");
-  return filePresence(path, "Grok auth.json", "Run `grok login` or `grok login --device-auth` so ~/.grok/auth.json exists.");
+  return {
+    present: false,
+    path: credentials,
+    detail: "no Claude credentials file",
+    remedy: "Run `claude auth login`, or mint a setup-token at ~/.claude/.headless-setup-token.",
+  };
 }
 
 function filePresence(path: string, label: string, remedy: string) {

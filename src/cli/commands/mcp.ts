@@ -21,7 +21,13 @@ export async function runMcpCommand(args: string[]) {
   if (action === "serve" || action === "server") {
     ensureSupportedPlatform();
     const host = normalizeMcpHost(args[2] && !args[2].startsWith("-") ? args[2] : "codex");
-    console.error(`Starting Headless MCP server over stdio for the configured ${host} lead.`);
+    // Prefer env so nested resolution and any residual entrypoint probes agree.
+    process.env.HEADLESS_LEAD_HOST = host;
+    if (!process.env.HEADLESS_PROJECT_ROOT) {
+      process.env.HEADLESS_PROJECT_ROOT = checkoutRoot;
+    }
+    // Stdio MCP: keep stderr free of noise that hosts might treat as protocol.
+    // Operators can still see attach status via lead status / doctor.
     await import("../../mcp/server.js").then((module) => module.startMcpServer({ host }));
     return;
   }

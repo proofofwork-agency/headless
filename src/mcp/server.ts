@@ -7,6 +7,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { sep } from "node:path";
 import { z } from "zod";
 import type { CredentialScope } from "../runtime/credential-store";
 
@@ -407,10 +408,27 @@ async function main() {
   process.once("SIGTERM", () => void shutdown());
   await startMcpServer();
 }
-if (import.meta.main) main().catch((error) => {
-  console.error(redactAndTruncate(error instanceof Error ? error.message : String(error), 16_384).text);
-  process.exit(1);
-});
+
+/**
+ * Auto-start only for the dedicated MCP entrypoint (`dist/mcp/server.js` /
+ * `headless-mcp`). The CLI bundle also embeds this module for
+ * `headless mcp serve`, where `import.meta.main` is true for the whole
+ * bundle — auto-starting there double-connects the stdio transport.
+ */
+function isDirectMcpEntrypoint() {
+  if (!import.meta.main) return false;
+  const entry = String(process.argv[1] ?? "");
+  return /(?:^|[/\\])(?:mcp[/\\]server\.(?:js|ts)|headless-mcp)$/.test(entry)
+    || entry.endsWith(`${sep}mcp${sep}server.js`)
+    || entry.endsWith(`${sep}mcp${sep}server.ts`);
+}
+
+if (isDirectMcpEntrypoint()) {
+  main().catch((error) => {
+    console.error(redactAndTruncate(error instanceof Error ? error.message : String(error), 16_384).text);
+    process.exit(1);
+  });
+}
 
 export { server, TOOL_DEFINITIONS as mcpToolDefinitions };
 
