@@ -27,6 +27,8 @@ A Headless run is described by four independent axes. “Native mode,” “writ
 
 The default split is intentional. Public CLI and daemon run contracts default to `broker`, keeping provider keys out of workers. Direct MCP tool schemas default to `native-login`, matching an attached provider CLI's subscription workflow. Goals may inherit auth from their selected fleet profile. Always inspect the durable request or fleet agent rather than assuming one surface's default applies everywhere.
 
+For `exec`, `--profile` collapses common combinations so you need not spell every axis: `read-only-native` sets native-login + read-only + required containment; `broker-readonly` sets broker + read-only + required containment. Profiles do not invent new policy — they only expand to the same independent axes above.
+
 ### Containment
 
 | Value | Meaning | Default | CLI setting | Security implication |
@@ -67,11 +69,11 @@ headless project trust grant --allow-native-direct-unrestricted
 headless exec \
   --backend codex \
   --auth-mode native-login \
-  --mode read-only \
+  --profile read-only-native \
   -- "Review the parser."
 ```
 
-Expected: the Codex capsule is installed into an isolated worker, required filesystem/process containment stays active, and the result reports `network: "native-direct-unrestricted"`.
+Expected: the Codex capsule is installed into an isolated worker, required filesystem/process containment stays active, and the result reports `network: "native-direct-unrestricted"`. The profile is equivalent to spelling `--mode read-only` (and required containment) yourself.
 
 ### Gated candidate write
 

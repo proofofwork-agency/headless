@@ -1,5 +1,7 @@
 # Depth-one worker delegation design
 
+> Design history; cross-provider linked holds are implemented in production — see SECURITY.md / plan.md.
+
 Status: Implemented experimental Phase 7 contract. The implementation and contained end-to-end tests pass on macOS and Linux; this does not promote orchestration into the Gate A stable surface.
 
 ## Objective

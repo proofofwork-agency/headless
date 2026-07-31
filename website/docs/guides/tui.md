@@ -76,6 +76,19 @@ unrestricted-egress acknowledgement is shown as `native consent required`,
 not as fully ready. When the terminal can fit every Overview group plus one
 activity row, the major groups gain one blank row of separation.
 
+**Next actions** on Overview are readiness-driven copy-paste CLI commands, not
+TUI mutations. Typical first-run suggestions include:
+
+- `headless setup --cwd …` when external project state is missing
+- `headless project trust grant --allow-native-direct-unrestricted` when native
+  consent is still required
+- `headless lead use <host>` (or `headless init --lead <host>`) when no lead is
+  bound
+- `headless exec --backend … --auth-mode native-login --profile read-only-native …`
+  for the first contained run after trust and login look ready
+
+Always run those commands from a shell; the TUI only generates them.
+
 ### 2 — Fleet
 
 A two-pane view: the agent list on the left (readiness glyph, agent name,

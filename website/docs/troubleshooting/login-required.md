@@ -60,8 +60,10 @@ headless project trust status --cwd "$PROJECT"
 headless experimental fleet health \
   --profile-id native-subscriptions \
   --cwd "$PROJECT"
-headless doctor --cwd "$PROJECT"
+headless doctor --json --cwd "$PROJECT"
 ```
+
+`doctor --json` is the structured readiness oracle for the golden path (runtime, PATH inventory, trust/native consent, recommended backend). Prefer it in scripts; the human form without `--json` is fine interactively.
 
 If Claude alone remains unavailable, install its
 [setup-token capsule](../ai-coders/claude.md#macos-mint-the-setup-token-keychain-limitation).

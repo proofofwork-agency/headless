@@ -13,6 +13,7 @@ This project uses (or will integrate with) ContextRelay for coordination when mu
 ## Headless focus
 - All new code should make it easy and safe to run coding agents headlessly.
 - Containment and auditability (ledger) are non-negotiable.
+- Product Gate P (`docs/product-gate.md`) is the UX oracle; security gates A/B/C live in `docs/plan.md`. Current tree is unpublished private beta — not alpha.
 - When in doubt, ask peer via ContextRelay handoff/deliberate before large design changes.
 
 Current coordinator: human / you decide per session.

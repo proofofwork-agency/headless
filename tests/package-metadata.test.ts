@@ -9,7 +9,7 @@ const root = join(import.meta.dir, "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const plugin = JSON.parse(readFileSync(join(root, "plugin", "package.json"), "utf8"));
 
-describe("v0.2 private-alpha package metadata", () => {
+describe("v0.2 private-beta package metadata", () => {
   test("keeps package, MCP, plugin, schema, and daemon protocol versions aligned", () => {
     expect(pkg.version).toBe(HEADLESS_VERSION);
     expect(pkg.private).toBe(true);

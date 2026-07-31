@@ -14,7 +14,7 @@ And it does one thing no plain runner does: it turns every run into an **executi
 Literally: proof of work for AI agents.
 
 :::note Private beta
-Headless is an unpublished private beta (`0.2.0-beta.5`). Packages are not on npm; build from source, use disposable projects, and do not entrust it with sensitive source, valuable credentials, or unattended spend yet.
+Headless is an unpublished private beta (`0.2.0-beta.6`). Packages are not on npm; build from source, use disposable projects, and do not entrust it with sensitive source, valuable credentials, or unattended spend yet.
 :::
 
 ## The problem: you can't trust what you can't verify
@@ -39,26 +39,40 @@ headless experimental receipt verify --file export.json  # offline, from a porta
 
 Anyone holding an exported receipt can check it offline; anyone holding the ledger too can upgrade that check to full-chain proof. See [Execution receipts](./concepts/receipts.md) for exactly what is proven at each level — and what is honestly not.
 
-## At a glance: run → receipt → anchor → verify
+## At a glance: setup → run → receipt → verify
 
-1. **Run.** Execute a coding CLI inside required OS containment, under policy and budget:
+The golden path after a coder CLI is already logged in (target: under five minutes):
+
+1. **Setup.** Initialize external project state and grant native trust when using subscription logins:
 
    ```bash
-   headless exec --backend codex --auth-mode native-login --json -- "Explain this repo."
+   headless setup --cwd "$PROJECT"
+   headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
    ```
 
-2. **Receipt.** At terminal state, Headless assembles the execution receipt — digests, authorization, containment evidence, cost, gates:
+2. **Run.** One contained job with a profile (collapses auth, mode, and containment):
+
+   ```bash
+   headless exec \
+     --backend codex \
+     --auth-mode native-login \
+     --profile read-only-native \
+     --cwd "$PROJECT" \
+     -- "Explain this repository."
+   ```
+
+3. **Receipt.** At terminal state, Headless assembles the execution receipt — digests, authorization, containment evidence, cost, gates:
 
    ```bash
    headless experimental receipt show <runId>
    ```
 
-3. **Anchor.** The receipt's self-digest is written into the hash-chained ledger automatically; `receipt list` shows each run's anchor sequence.
+4. **Anchor.** The receipt's self-digest is written into the hash-chained ledger automatically; `receipt list` shows each run's anchor sequence.
 
-4. **Verify.** Independently re-check the chain and the receipt — online, or offline from an export:
+5. **Verify.** Independently re-check the chain and the receipt — online, or offline from an export:
 
    ```bash
-   headless verify
+   headless verify --cwd "$PROJECT"
    headless experimental receipt verify <runId>
    ```
 
@@ -72,10 +86,15 @@ Anyone holding an exported receipt can check it offline; anyone holding the ledg
 
 **One visible lead, contained servants.** Your foreground coding CLI stays a normal, externally launched process that you can see. Headless binds it as the project's single [lead](./concepts/leads-and-fleet.md) over MCP, and every servant it dispatches runs contained, budgeted, and receipted.
 
+For the comparison with a single AI coding session, the competitive wedge (cross-backend containment and receipts vs same-vendor orchestration polish), and when a native CLI alone is enough, see [Why Headless](./concepts/why-headless.md).
+
 ## Where next
 
+- [Why Headless](./concepts/why-headless.md) — not a single coding session; when to use what.
 - [Installation](./getting-started/installation.md) — requirements and building from source.
-- [Quickstart](./getting-started/quickstart.md) — first contained run to first verified receipt in about ten minutes.
+- [Quickstart](./getting-started/quickstart.md) — golden path from setup to verified receipt in under five minutes once a coder CLI is logged in.
+- [Building apps](./guides/building-apps.md) — using Headless as embeddable infrastructure.
+- [Repair and recovery](./concepts/repair-and-recovery.md) — repair loops, workflow DAGs, and daemon crash recovery.
 - [Architecture and data flow](./concepts/architecture.md) — the one-owner daemon, authenticated clients, workers, broker, durable state, and recovery.
 - [Modes and policy axes](./concepts/modes.md) — read/write, broker/native, required/unsafe, and ask/auto/bypass without conflating them.
 - [Operating-system containment](./concepts/containment.md) — exact Seatbelt and bubblewrap/seccomp boundaries and probes.

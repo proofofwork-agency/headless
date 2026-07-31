@@ -19,9 +19,9 @@ Conventions used throughout:
 - Commands outside the Beta 1 kernel require the explicit
   `headless experimental` namespace and carry **no stability promise**. The
   Beta 1 commands are exactly: `exec`/`run`, `lead`, `daemon`, `project`,
-  `init`, `status`, `doctor`, `mcp`, `tui`, and `verify`. Everything else in
-  this guide is invoked as `headless experimental <command>` and is marked as
-  such.
+  `init`, `setup`, `status`, `doctor`, `mcp`, `tui`, and `verify`. Everything
+  else in this guide is invoked as `headless experimental <command>` and is
+  marked as such.
 - A prompt that begins with `-` belongs after a literal `--` separator.
 
 This cookbook does not duplicate the full flag tables. The complete command
@@ -30,6 +30,44 @@ reference is generated from `src/cli/command-specs.ts`, checked by
 [docs/command-reference.md](https://github.com/proofofwork-agency/headless/blob/main/docs/command-reference.md)
 in the repository — consult it for the authoritative surface, and
 `headless --help` / `headless experimental --help` for your build.
+
+## Golden path and profiles
+
+Prefer the short path from a fresh project to a verified run. Target: under
+five minutes once a coder CLI is already logged in.
+
+```bash
+PROJECT="${PROJECT:-$(pwd)}"
+headless setup --cwd "$PROJECT"
+headless project trust grant \
+  --allow-native-direct-unrestricted \
+  --cwd "$PROJECT"
+headless exec \
+  --backend codex \
+  --auth-mode native-login \
+  --profile read-only-native \
+  --cwd "$PROJECT" \
+  -- "Explain this repository."
+headless verify --cwd "$PROJECT"
+```
+
+`setup` initializes external per-project state (no checkout edits), inventories
+supported CLIs, recommends a backend, and prints the next commands. Pass
+`--yes --allow-native-direct-unrestricted` to fold native consent into setup.
+Pass `--lead codex` (or `claude` / `opencode` / `grok`) to also bind a
+foreground lead.
+
+`--profile` collapses common flag sets for `exec`:
+
+| Profile | Effect |
+| --- | --- |
+| `read-only-native` | `auth-mode=native-login`, `mode=read-only`, required containment |
+| `broker-readonly` | `auth-mode=broker`, `mode=read-only`, required containment |
+
+CLI defaults without a profile remain broker auth, read-only mode, and required
+containment. Spelling `--auth-mode native-login` alongside
+`--profile read-only-native` keeps the subscription path explicit. See the
+[quickstart](../getting-started/quickstart.md) for sign-in notes per coder.
 
 ## One-shot runs
 
@@ -44,7 +82,8 @@ Expected: the model's text output on stdout, a `cost / tokens / time` footer on
 stderr when known, and exit code 0 on success (1 otherwise). If `--backend` is
 omitted, `opencode` is the default. Read-only mode, broker authentication, and
 required OS containment (Seatbelt on macOS, bubblewrap/seccomp on Linux) are
-the defaults.
+the defaults. For the subscription-native path, prefer
+`--auth-mode native-login --profile read-only-native` after project trust.
 
 ### Structured JSON result
 
@@ -117,17 +156,23 @@ and `headless experimental events --session-id` can filter to it.
 
 ### Native-login runs
 
-Broker mode is the default. Native subscription login requires an explicit,
-revocable project consent first:
+Broker mode is the CLI default. Native subscription login requires an explicit,
+revocable project consent first — then use a profile so the common flag set is
+not hand-assembled:
 
 ```bash
 headless project trust grant --allow-native-direct-unrestricted
-headless exec --backend codex --auth-mode native-login --json -- "Inspect only."
+headless exec \
+  --backend codex \
+  --auth-mode native-login \
+  --profile read-only-native \
+  --json -- "Inspect only."
 ```
 
 Expected: the run uses the official CLI's existing login; the result truthfully
 reports `network: "native-direct-unrestricted"`. Revoke with
-`headless project trust revoke`.
+`headless project trust revoke`. Use `--profile broker-readonly` (or omit
+profile and leave broker default) only when the daemon holds provider API keys.
 
 ## Daemon and project health
 
@@ -156,6 +201,15 @@ daemon is running the command exits 1 with
 `No Headless daemon is running for <root>.` — `stop` never autostarts one.
 
 ```bash
+headless daemon reap --confirm
+```
+
+Expected: JSON enumerating this user's Headless daemon processes that are safe
+to reap, then stops the confirmed set. Without `--confirm` the command reports
+candidates only. Use `reap` when a daemon was orphaned or `stop` cannot reach
+the project-local control socket; prefer `stop` for the current project.
+
+```bash
 headless status
 ```
 
@@ -164,12 +218,15 @@ recent event snapshot, and orchestrator status.
 
 ```bash
 headless doctor
+headless doctor --json
 ```
 
 Expected: a human-readable self-check — Bun runtime version, project root and
 id, authenticated principal, external state directory, whether each of
-`opencode`, `codex`, `claude`, and `grok` is on `PATH`, durable job and event
-counts, and a reminder that containment defaults to required.
+`opencode`, `codex`, `claude`, and `grok` is on `PATH`, project readiness
+(trust / native consent / recommended backend), durable job and event counts,
+and a reminder that containment defaults to required. `--json` emits the same
+readiness evidence as structured JSON for scripts and CI.
 
 ## Verify the ledger and receipts
 
@@ -293,7 +350,8 @@ approved. Councils prohibit `--unsafe-no-sandbox`.
 
 A workflow is a validated, restartable DAG: each step retains its
 dependencies, backend selection, bounded retries, approval policy, terminal
-state, and actual result evidence.
+state, and actual result evidence. Dependency outputs and diffs are bound into
+downstream prompts as durable evidence — not as free-form chat history.
 
 ```bash
 headless experimental workflow validate --file workflow.json
@@ -305,6 +363,152 @@ Expected: `validate` checks the JSON definition without executing anything.
 `workflow status|wait|pause|resume|cancel --workflow-id <id>` afterwards
 (`wait` exits 0 only on `succeeded`). Workflows also prohibit
 `--unsafe-no-sandbox`.
+
+**Restart recovery.** Workflow state lives in the project daemon. After a
+daemon restart, steps that already hold a `lastJobId` resume that job rather
+than re-admitting a duplicate; pending steps wait until required and optional
+dependencies settle. Cancellation that was already in flight finishes
+terminally and is never retried. Prefer `workflow wait` or `status` after a
+restart instead of re-running the same file unless you intend a new workflow
+instance.
+
+**`dependsOn` vs `optionalDependsOn`.** Required dependencies
+(`dependsOn`) must **succeed** before a step becomes runnable; a failed
+required edge blocks the step. Optional dependencies
+(`optionalDependsOn`) must only **settle** (succeed, fail, block, or cancel).
+A verifier can therefore still run after a sibling implementation step fails
+and receive that failure (output, error, diff) as evidence — one failed node
+no longer silences a review that could report on the work that landed.
+
+```json title="workflow fragment"
+{
+  "id": "verify-after-impl",
+  "kind": "review",
+  "backend": "codex",
+  "dependsOn": [],
+  "optionalDependsOn": ["implement"],
+  "prompt": "Review whatever landed; cite dependency job ids."
+}
+```
+
+**Finality.** When every step is terminal, the workflow service evaluates typed
+finality (policy, budget, review/vote evidence as configured). Allowed finality
+marks the workflow `succeeded`; denied finality marks it `blocked` with a
+structured gate reason. Votes that claim reviews must cite real review job ids
+from other backends — empty or self-referential votes do not count.
+
+**Recovery when gates fail.** Prefer a
+[gate-driven repair loop](#experimental-repair-loops) on the candidate tip, or
+inspect and integrate/reject candidates explicitly. For ledger-chain and
+startup recovery concepts, see
+[Architecture](../concepts/architecture.md) and the
+[building-apps playbook](./building-apps.md#layer-f--repair-loops-and-workflow-dags-optional).
+
+### Experimental repair loops
+
+A **loop** is a finite, budgeted iteration policy owned by the daemon. Launch
+always requires explicit `--confirm` after you have reviewed max iterations,
+deadline, and cost caps. Loops prohibit casual infinite runaways: defaults are
+small (for example five iterations and a two-hour deadline unless overridden),
+and terminal failures include `blocked`, `cancelled`, `timed_out`, and
+`budget_exhausted`.
+
+```bash
+# Gate-driven repair: the project gates are the oracle
+headless experimental loop start \
+  --repair \
+  --check check \
+  --check test \
+  --confirm \
+  --cwd "$PROJECT"
+
+# Optional bounds (illustrative)
+headless experimental loop start \
+  --repair \
+  --check check \
+  --max-iterations 5 \
+  --deadline-ms 7200000 \
+  --per-iteration-cost-usd 2 \
+  --total-cost-usd 10 \
+  --backend opencode \
+  --verify-backend codex \
+  --confirm \
+  --cwd "$PROJECT"
+
+headless experimental loop list --cwd "$PROJECT"
+headless experimental loop status --loop-id <loopId> --cwd "$PROJECT"
+headless experimental loop pause --loop-id <loopId> --cwd "$PROJECT"
+headless experimental loop resume --loop-id <loopId> --cwd "$PROJECT"
+headless experimental loop cancel --loop-id <loopId> --cwd "$PROJECT"
+```
+
+Expected: `start` returns the durable loop record as JSON. Repair mode
+compiles a repair graph from failing checks, chains repair steps so each sees
+the previous candidate tip, re-runs gates, and stops on green, stagnation,
+budget, or deadline. The CLI default integration policy is **`preserve`**:
+work accumulates on an isolated candidate while primary HEAD stays
+byte-identical; you integrate the final candidate with
+`headless experimental candidate integrate` when ready. Auto-integration on
+green is deliberately available only through a reviewed `--file` policy, not
+the short `--repair` path.
+
+Without `--repair`, `loop start` treats the prompt as a finite **goal** loop
+(read-only by default). Either form still needs `--confirm`.
+
+```bash
+headless experimental loop start --confirm --cwd "$PROJECT" -- \
+  "Re-check the fixture risks until the synthesis is stable."
+```
+
+Use repair when `headless experimental gate` (or project CI) fails after a
+write; use a goal loop when you want bounded re-attempts of an objective
+without treating gates as the success oracle. Full application layering is in
+[Building apps with Headless](./building-apps.md).
+
+### Idle autonomy
+
+Idle autonomy is an **experimental** daemon scanner — not continuous self-host
+and not a substitute for explicit goals. When the orchestrator is enabled and
+a fleet profile sets `idleAutonomy`, the scanner waits for a short quiescence
+window (on the order of eight seconds), durably deduplicates opportunity
+fingerprints across restart, and may surface:
+
+- failed gates without follow-up
+- unverified completion
+- stalled work
+- unresolved candidates
+- idle workers without a recent model call
+
+Profile levels (fleet JSON `idleAutonomy`):
+
+| Level | Behaviour |
+| --- | --- |
+| `off` | Scanner skips the profile |
+| `suggest` (common default) | Publishes a visible opportunity lane only — no automatic verify or write |
+| `read-only` | May run bounded read-only verification after publishing the lane |
+| `write` | May submit a change only through the **normal** daemon write path (trust, clean primary, leased worktree, budgets, gates, finality, merge authority) |
+
+Control the orchestrator from the experimental CLI:
+
+```bash
+headless experimental autonomy start --cwd "$PROJECT"
+headless experimental autonomy status --cwd "$PROJECT"
+headless experimental autonomy ask --cwd "$PROJECT" -- "Ready for the next task."
+headless experimental autonomy backup --cwd "$PROJECT" -- "Need a second review."
+headless experimental autonomy stop --cwd "$PROJECT"
+```
+
+Expected: `start`/`stop`/`status` print orchestrator state JSON; `ask` and
+`backup` append durable ledger events (`ask_for_more_work` /
+`ask_for_backup`) that peers and the observer can see. Autonomy **prohibits**
+`--unsafe-no-sandbox`. Detached autonomous goals remain a separate surface
+(`headless experimental goal run --autonomous --detach -- "…"`).
+
+Honest limits: `suggest` is the safe default for observation; `write` still
+cannot bypass project trust, dirty-primary checks, or human merge policy when
+approvals require it. Headless reports a dirty primary checkout but never
+modifies or cleans it automatically. Prefer explicit Layer D/E goals from the
+[building-apps playbook](./building-apps.md) for real product work.
 
 ### Gates
 

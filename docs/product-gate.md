@@ -74,3 +74,35 @@ measure Product Gate P → compile failing checks → fix in parallel/serial
 ```
 
 Stagnation: identical failure signature after two full loops without metric movement → replan OST, do not thrash.
+
+## Dogfood posture
+
+Product Gate P dogfood is **partial and deliberate** — not continuous self-host of Headless development.
+
+**In scope for dogfood / contrast verify**
+
+- Recorded cross-backend deliberate and council paths with real native subscription sessions
+- Native-subscription smokes on the platform-aware required set
+- Neon Breakout and rotating-lead write paths (orchestration + gated candidate kernels)
+- Product Gate contrast verify: automated checks plus manual golden-path dogfood
+
+**Out of scope — do not claim**
+
+- Continuous self-host of day-to-day Headless monorepo development
+- Unattended production operation
+- That Headless fully builds this monorepo as routine practice
+
+Case studies and Gate B/C evidence dogfood orchestration and write **kernels**, not full product bootstrap. Private beta remains unpublished (`0.2.0-beta.6`); a green Product Gate does not publish the package.
+
+### Product Gate loops vs runtime repair loops
+
+These are different systems. Do not treat one as proof of the other.
+
+| | Product Gate P “loop protocol” | Runtime `experimental loop --repair` |
+| --- | --- | --- |
+| Owner | Human / release process | Headless runtime automation |
+| Oracle | This document’s checks (`P.*`) + manual dogfood | Named project gate report against a candidate worktree |
+| Purpose | UX / golden-path quality until ship or replan | Automated repair of a failing gate within containment and policy |
+| Claims | Teachable setup → trust → profile exec → verify | Structured repair attempts under required containment |
+
+Contrast verify in the Product Gate protocol means re-running tests and manual dogfood after changes. It is not the same mechanism as a runtime repair graph driven by `experimental loop --repair`.

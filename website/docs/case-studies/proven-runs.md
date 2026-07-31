@@ -62,3 +62,37 @@ a separate product; contained workers created real artifacts; and approvals and
 gates remained authoritative under timeouts, backend limitations, and prompt
 mistakes. These examples do not demonstrate package publication, every
 backend's write enablement, or safe unattended use.
+
+## Dogfood posture
+
+Partial, recorded dogfood — not continuous self-host of Headless development.
+
+**What these case studies (and related private-beta evidence) do dogfood**
+
+- Recorded cross-backend deliberate and council paths with real native
+  subscription sessions
+- Native-subscription smokes on the platform-aware required set
+- Neon Breakout and rotating-lead write paths: leased candidates, gates,
+  approvals, rejection, and authorized integration
+- Product Gate P contrast verify (automated tests plus manual dogfood of the
+  golden path)
+
+**What we do not claim**
+
+- Continuous self-host of day-to-day Headless monorepo development
+- Unattended production operation
+- That Headless fully builds this monorepo as routine practice
+
+Case studies exercise orchestration and write **kernels** under required
+containment and durable ledger traces. They are not a full product bootstrap
+or a claim that the private beta (`0.2.0-beta.6`) is published.
+
+**Two different “loop” systems**
+
+| System | What it is |
+| --- | --- |
+| Runtime `experimental loop --repair` | Automation: a repair loop whose oracle is a named project gate report |
+| Product Gate P “loop protocol” | Human UX process: measure → fix → contrast verify → re-measure |
+
+Do not conflate them. Repair automation does not replace Product Gate P, and a
+green Product Gate does not mean Headless is continuously developing itself.

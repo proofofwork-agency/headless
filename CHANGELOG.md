@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.0-beta.6 — 2026-07-31
+
+Package publication remains blocked. Both package manifests are private at `0.2.0-beta.6`; npm publication and repository visibility remain separate human-authority decisions. This tree is an unpublished private beta (not alpha).
+
 ### Added
 
 - Product Gate P and opportunity solution tree (`docs/product-gate.md`, `docs/product-ost.md`) with `bun scripts/product-gate.ts` / `bun run check:product` wired into `check`.
@@ -23,7 +27,8 @@
 - Default help banner documents the golden path; `setup` joins the Beta 1 stable command set.
 - README and website quickstart lead with one path instead of multi-flag ceremony.
 - Product Gate treats kernel verification and stale/ceremony TTFV evidence as manual instead of self-certifying them green.
-
+- Operator docs (root README, SECURITY, CLI/TUI guide, native-login, MCP, plan, plugin README) synced to `0.2.0-beta.6`: stable surface includes `setup` and `daemon serve|status|stop|reap`; cross-provider `run.delegate` linked holds documented as implemented; MCP lead-core default and auth-default split (MCP tools vs CLI/daemon) corrected; Grok disposable capsules strip `refresh_token`.
+- Version bump to `0.2.0-beta.6` in `src/version.ts`, root `package.json`, and plugin package/peer.
 
 ## 0.2.0-beta.5 — 2026-07-27
 

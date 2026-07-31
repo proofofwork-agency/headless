@@ -13,7 +13,8 @@ Every command and output claim below is grounded in the current tree.
 ## Setup (once)
 
 Build from source and isolate a disposable fixture so nothing touches your
-real projects or state:
+real projects or state. Prefer `setup` (inventories CLIs, recommends a
+backend, and prints the next commands) over bare `init`:
 
 ```bash
 bun install --frozen-lockfile --ignore-scripts
@@ -25,25 +26,28 @@ export HEADLESS_STATE_HOME="$(mktemp -d)"
 export HEADLESS_RUNTIME_HOME="$(mktemp -d /tmp/headless-runtime.XXXXXX)"
 
 git -C "$PROJECT" init
-"$HEADLESS" init --cwd "$PROJECT"
-"$HEADLESS" doctor --cwd "$PROJECT"
+"$HEADLESS" setup --cwd "$PROJECT"
+"$HEADLESS" doctor --json --cwd "$PROJECT"
 ```
 
-`init` prints that external state was created and that the checkout and
-`.gitignore` were not modified. `doctor` shows which provider CLIs are on
-`PATH`.
+`setup` creates external per-project state (the checkout and `.gitignore` are
+not modified), inventories supported CLIs, and recommends a backend.
+`doctor --json` reports structured readiness (trust, native consent, PATH
+inventory). Equivalent to `init` alone when you only need empty project state.
 
 The scenarios use the native-login path (no separate API key), which requires
-one explicit consent:
+one explicit consent (or fold it into setup with
+`--yes --allow-native-direct-unrestricted`):
 
 ```bash
 "$HEADLESS" project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
 ```
 
-Scenarios write `headless` for brevity — substitute `"$HEADLESS"`. They use
-`--backend opencode --auth-mode native-login`; swap in `codex`, `claude`, or
-`grok` per your installed logins, or use broker mode
-(`--model openai/gpt-5` with `OPENAI_API_KEY` exported) instead.
+Scenarios write `headless` for brevity — substitute `"$HEADLESS"`. Prefer
+`--backend opencode --auth-mode native-login --profile read-only-native`
+(swap in `codex`, `claude`, or `grok` per your installed logins). Use
+`--profile broker-readonly` / broker mode (`--model openai/gpt-5` with
+`OPENAI_API_KEY` exported) when the daemon holds provider keys instead.
 
 ## 1. First contained read-only run, then inspect its receipt
 
@@ -53,6 +57,7 @@ against the live ledger.
 ```bash
 RUN_ID="$(headless exec --cwd "$PROJECT" \
   --backend opencode --auth-mode native-login \
+  --profile read-only-native \
   --timeout-ms 120000 --json \
   -- "List the files in this project and describe its purpose." \
   | jq -r .jobId)"
@@ -254,11 +259,11 @@ headless experimental budget list --cwd "$PROJECT"
 
 # First run fits the budget:
 headless exec --cwd "$PROJECT" --backend opencode --auth-mode native-login \
-  --json -- "Say ok."
+  --profile read-only-native --json -- "Say ok."
 
 # Second run exceeds max-requests:
 headless exec --cwd "$PROJECT" --backend opencode --auth-mode native-login \
-  --json -- "Say ok again."
+  --profile read-only-native --json -- "Say ok again."
 echo "exit code: $?"
 ```
 

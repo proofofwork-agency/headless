@@ -6,7 +6,7 @@ Headless has one externally launched foreground lead per project. The provider C
 
 ## Configure a lead
 
-Install Headless, then initialize external project state, install the host integration, and bind the foreground lead in one command:
+Install Headless, then initialize external project state, install the host integration, and bind the foreground lead. Prefer the setup wizard or the one-shot init form:
 
 ```bash
 bun install --frozen-lockfile --ignore-scripts
@@ -14,10 +14,11 @@ bun run build
 
 PROJECT="$(pwd)"
 HEADLESS=./dist/cli.js
-"$HEADLESS" init --lead codex --cwd "$PROJECT"
+"$HEADLESS" setup --lead codex --cwd "$PROJECT"
+# equivalent: "$HEADLESS" init --lead codex --cwd "$PROJECT"
 ```
 
-Supported lead names are `codex`, `claude`, `opencode`, and `grok`. The one-shot command does not grant project trust or native egress. Those remain explicit, separate policy decisions.
+Supported lead names are `codex`, `claude`, `opencode`, and `grok`. Neither `setup --lead` nor `init --lead` grants project trust or native egress. Those remain explicit, separate policy decisions.
 
 The equivalent manual sequence is:
 
@@ -31,7 +32,7 @@ HEADLESS="${HEADLESS:-./dist/cli.js}"
 
 Codex, Claude Code, and Grok are installed through their native MCP commands. Grok uses user scope. OpenCode is merged into its global `~/.config/opencode/opencode.json`; Headless refuses to place that configuration inside the project checkout. Claude and Grok failures print their complete native command plus configuration fallback. A Codex failure reports the complete retry command. An OpenCode update failure prints the exact JSON entry to merge manually.
 
-Install is automated for all four hosts. In the current Beta 1 tree, `mcp remove` and `mcp status` invoke Codex directly; for Claude, Grok, and OpenCode they print guidance to use that host's MCP command, configuration file, or UI.
+Install is automated for all four hosts. Automated install does **not** inject `HEADLESS_PROJECT_ROOT` into host configs; set that variable yourself when wiring a generic stdio configuration. In the current Beta 1 tree, `mcp remove` and `mcp status` invoke Codex directly; for Claude, Grok, and OpenCode they print guidance to use that host's MCP command, configuration file, or UI.
 
 `headless lead status` reports `configured`, `connected`, or `disconnected`. `headless lead release` revokes the current generation. Calling `lead use` again explicitly switches hosts, increments the generation, and invalidates the previous host’s state-changing access. Detached jobs, worker sessions, messages, artifacts, candidates, and ledger history remain intact.
 
@@ -114,7 +115,15 @@ There is no generic `claude/channel` fallback and no process-local queue or ledg
 
 ## Containment and results
 
-Required containment is the default. Broker authentication and `ask` approval remain the default policy. Native login additionally requires project trust and explicit unrestricted-egress acknowledgement. Grok remains experimental and read-only until lifetime write-containment can prove that late-created project control files are denied.
+Required containment is the default on every path. Auth defaults differ by surface:
+
+| Surface | Default auth | Default approval | Notes |
+| --- | --- | --- | --- |
+| CLI / daemon run contracts | **broker** | `ask` | Omission selects broker; use `--auth-mode native-login` or `--profile read-only-native` for subscription capsules |
+| Fleet profile create/upsert | **broker** | profile field | Unset goal auth may inherit the selected fleet profile |
+| MCP / OpenCode plugin tools (`headless_run`, deliberate, council) | **native-login** | `ask` | Tool schemas default native-login; still require project trust + unrestricted-egress acknowledgement |
+
+Native login always requires project trust and explicit unrestricted-egress acknowledgement. Grok remains experimental and read-only until lifetime write-containment can prove that late-created project control files are denied.
 
 `headless_run` returns the complete structured result, including output, diagnostics, usage, cost, containment evidence, diff/commit data, and truncation fields. Its timeout covers queueing, preparation, provider access, and execution. Expected failures remain structured and redacted.
 
