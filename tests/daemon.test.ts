@@ -118,7 +118,8 @@ describe("authenticated project daemon", () => {
     expect(ping.principal).toBe("daemon-owner");
     expect(ping.brokerEnv.map((entry) => entry.variable)).toContain("OPENAI_API_KEY");
     expect(ping.brokerEnv.every((entry) => Object.keys(entry).sort().join(",") === "present,variable")).toBe(true);
-    expect(statSync(daemon.state.socketPath).mode & 0o777).toBe(0o600);
+    // secureUnixListen binds under umask 0o077 → owner-only 0o700 (stricter than legacy chmod 0o600).
+    expect(statSync(daemon.state.socketPath).mode & 0o777).toBe(0o700);
     expect(statSync(daemon.state.daemonMetadataPath).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(daemon.state.daemonMetadataPath, "utf8")).running).toBe(true);
     await expect(new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token: "b".repeat(48), principal: "daemon-owner" }).start()).rejects.toThrow(/already owns/i);

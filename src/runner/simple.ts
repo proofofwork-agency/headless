@@ -822,6 +822,11 @@ function containedProbeExecutor(
 }
 
 function applyBrokerEnvironment(env: NodeJS.ProcessEnv, broker: NonNullable<InternalRunOptions["broker"]>) {
+  // CLI backends speak HTTP BASE_URL only. On Linux strict containment the
+  // supervisor rewrites connectivity: it binds 127.0.0.1:<port> INSIDE the
+  // worker netns and relays to the host AF_UNIX broker socket (unixSocket).
+  // Host-side TCP is not required and is gated off by default when a Unix
+  // socket is configured (see ProviderBroker.allowLoopbackTcp).
   if (broker.provider === "anthropic") {
     env.ANTHROPIC_API_KEY = broker.token;
     env.ANTHROPIC_BASE_URL = broker.baseUrl;
@@ -837,10 +842,14 @@ function applyBrokerEnvironment(env: NodeJS.ProcessEnv, broker: NonNullable<Inte
     env.OPENAI_BASE_URL = broker.baseUrl;
   }
   env.HEADLESS_BROKER_TOKEN = broker.token;
+  if (broker.unixSocket) env.HEADLESS_BROKER_UNIX_SOCKET = broker.unixSocket;
 }
 
 function brokerPort(broker?: InternalRunOptions["broker"]) {
   if (!broker) return undefined;
+  // Prefer baseUrl port (real TCP listener or synthetic Unix-only relay port).
+  // When unixSocket is set, this port is the in-netns relay listen port on Linux
+  // (host cannot reach it); on Darwin residual-trust it is the host loopback port.
   const url = new URL(broker.baseUrl);
   if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "::1") {
     throw new Error("Strict broker endpoint must be loopback-only.");

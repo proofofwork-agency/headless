@@ -141,7 +141,7 @@ function fixture(options: { hmac?: boolean } = {}) {
   const root = mkdtempSync(join(tmpdir(), "headless-receipt-verify-"));
   roots.push(root);
   const projectId = "a".repeat(64);
-  const hmacKey = "receipt-verification-key-material";
+  const hmacKey = "receipt-verification-key-material-00";
   const hmacKeyId = "receipt-test-key";
   const ledger = new LedgerV2({
     ledgerPath: join(root, "ledger.jsonl"),

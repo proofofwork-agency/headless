@@ -16,10 +16,14 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import { ProjectIdSchema } from "../contracts/common";
+import { HeadlessError } from "./headless-error";
 import { redactDeep } from "./redaction";
 import { safeJsonParse } from "./safe-json";
 import { atomicAppendFile, atomicWriteFile } from "./atomic-write";
 import { verifyReleaseEvidenceAnchors, type ReleaseEvidenceVerification } from "./release-evidence-anchor";
+
+/** Minimum HMAC key material for ledger tamper-evidence (UTF-8 bytes or decoded base64). */
+const MIN_LEDGER_HMAC_KEY_BYTES = 32;
 
 const MAX_LEDGER_EVENT_BYTES = 1_000_000;
 const LOCK_TIMEOUT_MS = 10_000;
@@ -134,13 +138,36 @@ export type LedgerVerificationOptions = LedgerVerificationKeys & {
   | { records: readonly LedgerRecordV2[]; ledgerPath?: never }
 );
 
+const LedgerHmacKeySchema = z.string().superRefine((value, ctx) => {
+  const failure = ledgerHmacKeyFailure(value);
+  if (failure) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: failure });
+  }
+});
+
+const LedgerHmacKeyringSchema = z.record(LedgerHmacKeySchema);
+
 export function ledgerIntegrityOptionsFromEnv(env: NodeJS.ProcessEnv = process.env) {
   let hmacKeyring: Record<string, string> | undefined;
   if (env.HEADLESS_LEDGER_KEYS) {
-    hmacKeyring = z.record(z.string().min(16)).parse(safeJsonParse(env.HEADLESS_LEDGER_KEYS));
+    try {
+      const parsed = safeJsonParse(env.HEADLESS_LEDGER_KEYS);
+      hmacKeyring = LedgerHmacKeyringSchema.parse(parsed);
+    } catch (error) {
+      throw weakLedgerHmacKeyError(error);
+    }
+  }
+  const rawHmacKey = env.HEADLESS_LEDGER_KEY;
+  let hmacKey: string | undefined;
+  if (rawHmacKey !== undefined && rawHmacKey.length > 0) {
+    try {
+      hmacKey = ledgerKey(rawHmacKey);
+    } catch (error) {
+      throw weakLedgerHmacKeyError(error);
+    }
   }
   return {
-    hmacKey: env.HEADLESS_LEDGER_KEY,
+    hmacKey,
     hmacKeyId: env.HEADLESS_LEDGER_KEY_ID,
     hmacKeyring,
     activeHmacKeyId: env.HEADLESS_LEDGER_ACTIVE_KEY_ID,
@@ -840,8 +867,84 @@ function ledgerKeyId(value: string) {
 }
 
 function ledgerKey(value: string) {
-  if (Buffer.byteLength(value) < 16) throw new TypeError("Ledger HMAC keys must contain at least 16 bytes.");
+  const failure = ledgerHmacKeyFailure(value);
+  if (failure) {
+    throw new TypeError(failure);
+  }
   return value;
+}
+
+function ledgerHmacKeyFailure(value: string): string | null {
+  if (typeof value !== "string" || value.length === 0) {
+    return "Ledger HMAC keys must be non-empty secrets of at least 32 bytes.";
+  }
+  const utf8Bytes = Buffer.byteLength(value, "utf8");
+  const decoded = tryDecodeBase64Key(value);
+  const meetsFloor = utf8Bytes >= MIN_LEDGER_HMAC_KEY_BYTES || (decoded !== null && decoded.length >= MIN_LEDGER_HMAC_KEY_BYTES);
+  if (!meetsFloor) {
+    return `Ledger HMAC key ${redactLedgerKeyPreview(value)} is shorter than 32 bytes / below entropy floor.`;
+  }
+  // Entropy checks apply to the operator-supplied string (and decoded bytes when base64).
+  if (isLowEntropyLedgerKey(value) || (decoded !== null && isLowEntropyBytes(decoded))) {
+    return `Ledger HMAC key ${redactLedgerKeyPreview(value)} is below the entropy floor.`;
+  }
+  return null;
+}
+
+function tryDecodeBase64Key(value: string): Buffer | null {
+  // Accept std/base64url without requiring padding; reject binary garbage.
+  if (!/^[A-Za-z0-9_+/=\n\r-]+$/.test(value) || value.length < 16) return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/").replace(/\s+/g, "");
+    const decoded = Buffer.from(normalized, "base64");
+    // Round-trip check avoids treating arbitrary text as base64.
+    if (decoded.length === 0) return null;
+    const reencoded = decoded.toString("base64").replace(/=+$/, "");
+    const input = normalized.replace(/=+$/, "");
+    if (reencoded !== input) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+function isLowEntropyLedgerKey(value: string): boolean {
+  if (/^(.)\1+$/u.test(value)) return true;
+  if (/^\d+$/u.test(value)) return true;
+  if (/^[A-Za-z]+$/u.test(value) && new Set(value.toLowerCase()).size <= 4) return true;
+  const lower = value.toLowerCase();
+  if (
+    /^(password|passw0rd|secret|changeme|headless|ledger|test|admin|default|qwerty|letmein|abc123)[\d!@._-]*$/u.test(
+      lower,
+    )
+  ) {
+    return true;
+  }
+  const unique = new Set(value).size;
+  if (value.length >= MIN_LEDGER_HMAC_KEY_BYTES && unique < 8) return true;
+  return false;
+}
+
+function isLowEntropyBytes(bytes: Buffer): boolean {
+  if (bytes.length === 0) return true;
+  const first = bytes[0]!;
+  if (bytes.every((b) => b === first)) return true;
+  if (bytes.every((b) => b >= 0x30 && b <= 0x39)) return true;
+  const unique = new Set(bytes).size;
+  return bytes.length >= MIN_LEDGER_HMAC_KEY_BYTES && unique < 8;
+}
+
+function redactLedgerKeyPreview(value: string): string {
+  if (value.length <= 4) return "…";
+  return `${value.slice(0, 4)}…`;
+}
+
+function weakLedgerHmacKeyError(cause?: unknown): HeadlessError {
+  return new HeadlessError(
+    "INVALID_REQUEST",
+    "HEADLESS_LEDGER_KEYS contains a key shorter than 32 bytes / below entropy floor — refusing to start with a weak tamper-evidence key. Generate with: openssl rand -base64 32",
+    { cause },
+  );
 }
 
 function withOwnedLock<T>(lockPath: string, operation: () => T) {

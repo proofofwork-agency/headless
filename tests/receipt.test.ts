@@ -337,7 +337,7 @@ describe("terminal execution receipts", () => {
 
   test("keeps a pending marker when verifier-only HMAC state cannot append receipt or gap", async () => {
     const fixture = createFixture();
-    const key = "receipt-hmac-key-material";
+    const key = "receipt-hmac-key-material-00000001";
     fixture.state.env.HEADLESS_RECEIPTS = "off";
     fixture.state.env.HEADLESS_LEDGER_KEY = key;
     fixture.state.env.HEADLESS_LEDGER_KEY_ID = "receipt-test-key";

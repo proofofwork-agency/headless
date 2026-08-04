@@ -68,7 +68,33 @@ Locks contain PID, process-start identity, host, and nonce. A lock with a verifi
 
 Persisted RunResult reads have a narrow schema-evolution decoder for the superseded `provider-direct` network value. It verifies protected archive hashes against the unmodified historical object before returning canonical in-memory `native-direct-unrestricted`, preserves every other field, and does not rewrite archive bytes. New writes and RPC use the strict current schema; malformed records and every other unknown enum value fail closed.
 
-An unkeyed chain detects accidental or unaudited modification but can be recomputed by a state-file writer. HMAC only prevents forgery when `HEADLESS_LEDGER_KEY` is kept outside that writer’s reach. Neither mode detects deletion/rollback of a valid tail without an external head/sequence anchor.
+An unkeyed chain detects accidental or unaudited modification but can be recomputed by a state-file writer. HMAC only prevents forgery when `HEADLESS_LEDGER_KEY` / `HEADLESS_LEDGER_KEYS` is kept outside that writer’s reach. Neither mode detects deletion/rollback of a valid tail without an external head/sequence anchor.
+
+### Ledger HMAC key generation
+
+HMAC ledger integrity is opt-in. When configured, Headless fails closed at startup if any key is shorter than 32 bytes or is obviously low-entropy (repeated characters, pure digits, common password patterns). Human-memorable 16-character secrets and similar passwords are insufficient and will be rejected — a weak key provides false tamper-evidence.
+
+Generate a key with:
+
+```bash
+openssl rand -base64 32
+```
+
+Set either a single active key:
+
+```bash
+export HEADLESS_LEDGER_KEY="$(openssl rand -base64 32)"
+export HEADLESS_LEDGER_KEY_ID="primary"
+```
+
+or a JSON keyring (for rotation / verification of historical records):
+
+```bash
+export HEADLESS_LEDGER_KEYS="$(jq -nc --arg k "$(openssl rand -base64 32)" '{primary:$k}')"
+export HEADLESS_LEDGER_ACTIVE_KEY_ID="primary"
+```
+
+Keys may be raw high-entropy strings (≥32 UTF-8 bytes) or standard base64 / base64url encodings of ≥32 random bytes. Do not auto-generate keys inside the daemon: out-of-band distribution is what keeps the key outside the ledger writer’s reach.
 
 The stable `headless verify` command performs an auditor-requested full-chain scan and exits non-zero at the first sequence, previous-hash, project, digest, key, or HMAC-downgrade break. Opt-in release-evidence smokes atomically write provenance-bearing JSON, hash those exact bytes, and record the relative path and digest through authenticated `ledger.artifact`; `headless verify --evidence` additionally compares each current file with its latest durable anchor. The file does not contain its ledger receipt, avoiding a circular digest.
 

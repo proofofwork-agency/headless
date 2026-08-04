@@ -272,11 +272,15 @@ export class RunExecutionService {
                 approvalPolicy: controls.coderToolApproved ? "auto" : request.approvalPolicy,
                 jobId,
                 resumeNativeSessionId: resumableNativeSessionId(request, durableSession, adapter),
+                // unixSocket is authoritative when present (Linux relay dials AF_UNIX).
+                // baseUrl remains for env BASE_URL + in-netns relay port selection;
+                // on Unix-socket-only brokers it may be a synthetic loopback URL
+                // that is not host-reachable (host TCP is gated off by default).
                 broker: brokerLease ? {
                   provider: brokerLease.provider,
                   baseUrl: brokerLease.baseUrl,
                   token: brokerLease.token,
-                  unixSocket: this.options.broker.unixSocketPath ?? undefined,
+                  unixSocket: this.options.broker.unixSocketPath ?? brokerLease.unixSocket,
                 } : undefined,
                 runTool: runToolEndpoint ? {
                   socketPath: runToolEndpoint.socketPath,

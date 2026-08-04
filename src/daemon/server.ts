@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
+import { secureUnixListen } from "../runtime/secure-socket";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { ZodError } from "zod";
@@ -239,15 +240,8 @@ export class HeadlessDaemon {
     const server = createServer((socket) => this.accept(socket));
     let bound = false;
     try {
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(this.state.socketPath, () => {
-          bound = true;
-          server.off("error", reject);
-          resolve();
-        });
-      });
-      chmodSync(this.state.socketPath, 0o600);
+      await secureUnixListen(server, this.state.socketPath);
+      bound = true;
       this.loadedExtensions = await loadDaemonExtensions(this.extensionConfig);
       this.initializeOwnedState();
       recoverLinkedProviderHolds({ budgets: this.budgets, broker: this.broker, jobs: this.jobs });
@@ -1071,9 +1065,23 @@ export class HeadlessDaemon {
     this.token = this.configuredToken ?? loadOrCreateToken(this.state.tokenPath);
     migrateSingleLeadState(this.state);
     const brokerQuotas = new DurableBrokerQuotaStore(this.state);
+    // Linux: Unix-socket-only by default (host TCP gated off). Workers reach the
+    // broker via the in-netns loopback relay → AF_UNIX. macOS residual-trust path:
+    // Seatbelt workers dial HTTP BASE_URL on 127.0.0.1 (CLI SDKs do not speak
+    // AF_UNIX), so default to loopback TCP on non-Linux. Operators on any platform
+    // can force AF_UNIX-only with HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0 (resolved
+    // inside ProviderBroker when allowLoopbackTcp is left undefined).
+    const brokerSocketPath = join(
+      this.state.daemonRuntimeDir,
+      `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`,
+    );
     this.broker = new ProviderBroker({
       credentials: this.stateOptions?.env ?? process.env,
-      unixSocketPath: join(this.state.daemonRuntimeDir, `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`),
+      unixSocketPath: brokerSocketPath,
+      // Leave undefined on all platforms so resolveAllowLoopbackTcp applies the
+      // platform default (Linux: off; non-Linux residual-trust: on) and honors
+      // HEADLESS_BROKER_ALLOW_LOOPBACK_TCP on every platform.
+      allowLoopbackTcp: undefined,
       initialBudgetQuotas: brokerQuotas.snapshot(),
       persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
       initialLinkedOperations: brokerQuotas.linkedSnapshot(),
