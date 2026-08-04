@@ -47,6 +47,16 @@ Ranked. The first two are design questions, not patches.
 5. **Unknown *positionals* are still ignored** — `headless experimental init not-a-subcommand` initialises successfully. Same class as the unknown-flag defect just fixed, but riskier to fix blind: many commands legitimately take positionals (prompts, run ids, hosts), so it needs the same per-command spec work Codex did for flags.
 6. **Nested `--help` is global-only** (`workflow wait --help` prints the top-level catalog), and `gate` prints "Running…" before validating its `--check` value.
 
+## Trap worth knowing
+
+`headless verify` does **not** read the CLI process's environment. It goes `verify()` →
+`daemonClient()` → RPC `ledger.verify` (`src/cli/commands/ledger.ts:22-28`), so ledger keys come
+from the *daemon's* env. With a daemon already alive holding a good key, a bad key on the CLI
+invocation is inert and verification appears to succeed. I hit exactly this and wrongly concluded
+the key-floor defect was not real; it took an isolated `HEADLESS_STATE_HOME`/`HEADLESS_RUNTIME_HOME`
+with no live daemon to reproduce. Same family as the existing "daemon serves a stale method surface
+until restarted" gotcha: **when testing anything env-driven, kill the daemon first.**
+
 ## Verification assets worth keeping
 
 `scratchpad/exhaustive-cli.ts` — derives the command surface from `COMMAND_SPECS` so it cannot miss a command, runs **872 invocations**, captures stdout/stderr/exit separately, and asserts: no stack traces, no secret leakage, no state-path leakage, no raw filesystem errors, no text/JSON classification divergence, no hangs. PR #50 passes all of it. Copy it into `scripts/` if you want it as a permanent gate — it found three defects the 961-test suite did not.
