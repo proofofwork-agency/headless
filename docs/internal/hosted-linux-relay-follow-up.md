@@ -63,7 +63,7 @@ docker run --rm --privileged --platform "$HOST_PLATFORM" --cpus=2 --memory=3g -v
 
 **Why every case is asserted by name instead of trusting the exit code.** A `bun test` run whose cases were all gated out prints `0 pass 4 skip 0 fail` and exits 0, which is indistinguishable from success at a glance — that vacuous pass is what this file used to hand a maintainer. Emulation produces it too: without a correct `--platform`, Docker on Apple Silicon reuses a cached `linux/amd64` image, emulated bubblewrap fails `strictContainmentAvailable()`, and every gated case skips. Hardcoding `linux/arm64` would move the same failure onto x86-64 hosts, so the platform is derived from `uname -m`. Asserting only the late-socket case was not enough either: re-running the suite with `GITHUB_ACTIONS=true HEADLESS_PRIVILEGED_CONTAINMENT_CI=1` skips exactly the four cooperation cases while the late-socket case still passes, and the single-case version of this command printed `OK` and exited 0 on that log. "Read the output carefully" is not fail-loud; the probe and the five anchored assertions are.
 
-**Current off-CI evidence — this command run VERBATIM at `6bc0263`** (extracted from the fenced block programmatically, not retyped), on Docker 27.4.0, `--platform linux/arm64`, real `bubblewrap 0.11.0`, privileged:
+**Current off-CI evidence — this command run VERBATIM at `f78a78d`** (extracted from the fenced block programmatically, not retyped), on Docker 27.4.0, `--platform linux/arm64`, real `bubblewrap 0.11.0`, privileged:
 
 ```
 (pass) injects the scoped helper into the contained worker and revokes it at terminal state [484.00ms]
