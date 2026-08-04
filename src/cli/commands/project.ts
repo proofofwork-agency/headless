@@ -1,4 +1,5 @@
 import type { DaemonMethod } from "../../daemon/protocol";
+import { resolveCommandAction } from "../argv";
 import { CliUsageError, daemonClient, flagArgsBeforeSeparator, getArg } from "../shared";
 
 export type ProjectCommandCall = {
@@ -7,8 +8,8 @@ export type ProjectCommandCall = {
 };
 
 export function parseProjectCommand(args: string[]): ProjectCommandCall {
-  const namespace = args[1];
-  const action = args[2] ?? "status";
+  const { action: namespace, operands } = resolveCommandAction(args);
+  const action = operands[0] ?? "status";
   if (namespace !== "trust" || !["status", "grant", "revoke"].includes(action)) {
     throw new CliUsageError("Usage: headless project trust <status|grant|revoke> [--allow-native-direct-unrestricted] [--allow-bypass]");
   }

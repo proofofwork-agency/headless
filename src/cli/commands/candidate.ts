@@ -1,4 +1,6 @@
 import type { DaemonMethod } from "../../daemon/protocol";
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
 import { CliUsageError, daemonClient, flagArgsBeforeSeparator, getArg, printJson, requiredArg } from "../shared";
 
 export type CandidateCommandCall = {
@@ -7,9 +9,9 @@ export type CandidateCommandCall = {
 };
 
 export function parseCandidateCommand(args: string[]): CandidateCommandCall {
-  const action = args[1] ?? "inspect";
+  const { action } = resolveCommandAction(args, "inspect");
   if (action !== "inspect" && action !== "integrate" && action !== "reject") {
-    throw new CliUsageError("Usage: headless candidate <inspect|integrate|reject> --candidate-id id");
+    throw new CliUsageError(renderCommandUsage("candidate"));
   }
   return {
     method: action === "inspect" ? "candidate.inspect" : action === "integrate" ? "candidate.integrate" : "candidate.reject",

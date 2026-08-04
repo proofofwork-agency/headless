@@ -7,6 +7,7 @@
 - **Ledger HMAC keys used to sign new records must be at least 32 bytes and pass an entropy floor.** Shorter or low-entropy keys (repeated characters, pure digits, common password shapes) are refused at the signing boundary: `append` and ledger tail repair fail closed, naming the key id and the variable that supplied it. A human-memorable 16-character secret provides false tamper-evidence, so it is rejected rather than accepted. **Rotate**: generate with `openssl rand -base64 32`, keep the old key in `HEADLESS_LEDGER_KEYS` so historical records stay verifiable, and point `HEADLESS_LEDGER_ACTIVE_KEY_ID` at the new one.
 - **Unix control sockets are created `0o700`, not `0o600`.** They are bound under `umask 0o077` instead of being chmod-ed after `listen`, which closes the window where the socket existed at the ambient umask. Owner-only either way; only the observed mode changed.
 - **The whole `HEADLESS_LEDGER_*` family is denied to worker environments**, by prefix rather than by name. A worker that could read the keyring could forge ledger entries, which is the property the HMAC exists to provide.
+- **Unknown flags are rejected instead of silently ignored.** Validation is per command, from each command's own declared flags, so a flag valid for one command no longer passes for another. A typo'd or removed flag now fails fast rather than being dropped. `--flag=value` is not accepted; pass `--flag value`. Validated against 261 documented invocations across the docs, website, scripts and README with no failures, but wrappers that append one flag set to every command will need adjusting.
 
 ### Fixed
 
@@ -19,6 +20,14 @@
 - A Bun listener refused by post-bind ownership verification is now disposed instead of leaked; the caller never receives that handle and so cannot close it.
 - `process.getuid` is guarded and fails closed where unavailable. The uid comparison is the only defence against a foreign-owned socket, so an unverifiable platform refuses rather than skipping the check.
 - The offline linked-hold lock now binds through the same verified helper as every other socket.
+- **CLI actions are resolved from grammar rather than from a physical argv index.** Every handler read its subcommand as `args[1]`, so a global flag became the action: `headless daemon --cwd DIR` and `headless lead --cwd DIR` failed with a usage error, and `headless mcp --cwd DIR` consumed the flag *and its value* and then reported the operator's own project path as `Unknown MCP host`. One scanner now consumes each registered value flag together with its value as a single unit; 27 index reads across 18 handlers went through it.
+- **Usage errors are no longer reported as internal faults.** A `CliUsageError` was classified as `INVALID_REQUEST` only under `--json`; text mode fell through to `INTERNAL_ERROR`, so a typo printed "the daemon or runner hit an unexpected failure" and sent the operator to `headless daemon status` to debug a healthy daemon. Classified once now, before the output-mode split, so the two modes cannot diverge again.
+- Usage strings name the namespace the operator has to type: experimental commands print `headless experimental <command>` instead of a stable form that the top-level gate rejects.
+- `--after-sequence -1` and other negative numeric values report the range error from the semantic parser instead of "Missing value", which blamed the flag for being absent.
+- `headless experimental events --errors --activity` keeps its actionable conflict message under `--json` instead of degrading to a generic `INTERNAL_ERROR`.
+- `headless experimental launch` requires its backend before starting a daemon, instead of consuming `--cwd` as the backend name.
+- `headless tui` refuses without a terminal instead of reaching Ink's renderer, which threw from inside React and printed a framework stack trace citing `node_modules`.
+- The `UNSUPPORTED_PLATFORM` remedy no longer blames the operating system for failures that are not about the operating system.
 
 ## 0.2.0-beta.6 — 2026-07-31
 

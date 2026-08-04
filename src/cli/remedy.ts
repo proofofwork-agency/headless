@@ -50,8 +50,11 @@ const TOP_REMEDIES: Remedy[] = [
   },
   {
     code: "UNSUPPORTED_PLATFORM",
-    title: "Unsupported platform",
-    explanation: "Headless v0.2 requires macOS or Linux.",
+    title: "Unsupported environment",
+    // Covers both carriers of this code: an unsupported OS, and an interactive
+    // command invoked without a terminal. Naming only the OS told a macOS
+    // operator running `headless tui` in a pipe that their platform was wrong.
+    explanation: "Headless v0.2 requires macOS or Linux, and interactive commands additionally require a terminal.",
     command: "headless doctor --cwd <cwd>",
   },
   {
