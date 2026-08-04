@@ -2,7 +2,7 @@
 
 import { join } from "node:path";
 import { resolveCommand } from "./cli/command-table";
-import { parseCliInvocation, renderHelp } from "./cli/command-specs";
+import { parseCliInvocation, renderInvocationHelp } from "./cli/command-specs";
 import { validateCommandFlags } from "./cli/argv";
 import { printRemedy } from "./cli/remedy";
 import { CliUsageError, getArg, handleSignal } from "./cli/shared";
@@ -10,7 +10,7 @@ import { toStructuredError } from "./runtime/headless-error";
 import { isValidationError, validationErrorDetails, validationErrorMessage } from "./runtime/validation-error";
 
 export { COMMAND_TABLE, resolveCommand } from "./cli/command-table";
-export { COMMAND_SPECS, VALUE_FLAGS, parseCliInvocation, renderCommandUsage, renderHelp, resolveCommandSpec } from "./cli/command-specs";
+export { COMMAND_SPECS, VALUE_FLAGS, parseCliInvocation, renderCommandUsage, renderHelp, renderInvocationHelp, resolveCommandSpec } from "./cli/command-specs";
 export { parseCommandArgv, resolveCommandAction, validateCommandFlags } from "./cli/argv";
 export { CLI_AUDIT_MANIFEST, auditManifestCommands } from "./cli/audit-manifest";
 export { COMMAND_REGISTRY_VERSION, UNIFIED_COMMAND_REGISTRY } from "./command-registry";
@@ -21,7 +21,7 @@ async function main() {
   const args = process.argv.slice(2);
   const invocation = parseCliInvocation(args);
   if (invocation.kind === "help") {
-    console.log(renderHelp(args[0] === "experimental" || args.includes("--experimental")));
+    console.log(renderInvocationHelp(args));
     return;
   }
   if (invocation.kind === "version") {

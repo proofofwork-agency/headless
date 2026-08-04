@@ -248,6 +248,17 @@ export function renderHelp(includeExperimental = false) {
   ].join("\n");
 }
 
+/** Render local usage when help names a public command, otherwise the catalog. */
+export function renderInvocationHelp(args: string[]) {
+  const experimental = args[0] === "experimental";
+  const name = experimental ? args[1] : args[0];
+  const spec = resolveCommandSpec(name);
+  if (spec && "help" in spec && (experimental || STABLE_COMMAND_NAMES.has(spec.name))) {
+    return renderCommandUsage(spec.name);
+  }
+  return renderHelp(experimental || args.includes("--experimental"));
+}
+
 /**
  * Usage lines must name the namespace the operator has to type. A bare
  * "Usage: headless goal ..." from an experimental command is an instruction the

@@ -14,6 +14,7 @@ import {
   parseCliInvocation,
   parseIntegerArg,
   renderHelp,
+  renderInvocationHelp,
   resolveCommand,
   runMcpInstall,
   validateCommandFlags,
@@ -87,6 +88,22 @@ describe("v0.2 CLI contracts", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe(`${renderHelp()}\n`);
     expect(result.stderr).toBe("");
+  });
+
+  test("renders command-local help without weakening namespace or separator handling", async () => {
+    const daemon = await runCli(["daemon", "--help"]);
+    expect(daemon.exitCode).toBe(0);
+    expect(daemon.stdout).toBe(`${renderInvocationHelp(["daemon", "--help"])}\n`);
+    expect(daemon.stdout).toContain("Usage: headless daemon");
+    expect(daemon.stdout).not.toContain("Commands:");
+
+    const fleet = await runCli(["experimental", "fleet", "--help"]);
+    expect(fleet.exitCode).toBe(0);
+    expect(fleet.stdout).toContain("Usage: headless experimental fleet");
+    expect(fleet.stdout).not.toContain("Commands:");
+
+    expect(renderInvocationHelp(["fleet", "--help"])).toBe(renderHelp());
+    expect(parseCliInvocation(["exec", "--", "--help"]).kind).toBe("command");
   });
 
   test("prints large JSON responses as one complete parseable document", async () => {
