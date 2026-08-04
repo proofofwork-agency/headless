@@ -493,11 +493,11 @@ export class HeadlessDaemon {
   private fleetHealth(profile: FleetProfile) {
     const probed = profile.agents.map((agent) => ({ agent, availability: this.agentAvailability(agent) }));
     const alternatives = probed.filter(({ agent, availability }) => {
-      const adapter = getBackendDefinition(resolveBackendId(agent.backend));
+      const { adapter } = registeredBackend(agent.backend);
       return agent.enabled && availability.authenticated && availability.health === "healthy" && adapter && requiredContainmentSecurityGaps(adapter, "read-only").length === 0;
     }).map(({ agent }) => agent.id);
     const agents = probed.map(({ agent, availability }) => {
-      const adapter = getBackendDefinition(resolveBackendId(agent.backend));
+      const { adapter } = registeredBackend(agent.backend);
       const gaps = adapter ? requiredContainmentSecurityGaps(adapter, "read-only") : ["registered backend"];
       const writeGaps = adapter ? requiredContainmentSecurityGaps(adapter, "write") : ["registered backend"];
       const login = adapter && adapter.id in backendMetadata ? backendMetadata[adapter.id as keyof typeof backendMetadata].login : undefined;
@@ -509,6 +509,7 @@ export class HeadlessDaemon {
         alternatives.filter((id) => id !== agent.id),
         this.state.canonicalProjectRoot,
         login,
+        adapter !== null,
       );
       return { agent, ...availability, executable: adapter?.probe.versionCommand[0] ?? null, detail: presentation.reason, presentation };
     });
@@ -525,9 +526,10 @@ export class HeadlessDaemon {
     agent: AgentProfile,
     security: GoalSecurityControls = { authMode: agent.authMode, approvalPolicy: agent.approvalPolicy },
   ): GoalAgentAvailability {
+    const backend = registeredBackend(agent.backend);
     let executable = false;
     try {
-      const adapter = getBackendDefinition(resolveBackendId(agent.backend));
+      const adapter = backend.adapter;
       executable = !!adapter && (
         Bun.which(adapter.probe.versionCommand[0]) !== null
         || (adapter.managedExecutable?.(this.stateOptions?.homeDir) ?? null) !== null
@@ -549,8 +551,8 @@ export class HeadlessDaemon {
         if (!trustRequired) {
           const worker = createWorkerEnvironment();
           try {
-            const adapter = getBackendDefinition(resolveBackendId(agent.backend));
-            const capsule = installNativeAuthCapsule(worker, resolveBackendId(agent.backend), {
+            const adapter = backend.adapter;
+            const capsule = installNativeAuthCapsule(worker, backend.id, {
               homeDir: this.stateOptions?.homeDir,
               requestedModel: agent.model,
               resolveOpenCodeModel: adapter?.nativeAuth?.resolveModel ?? false,
@@ -566,7 +568,7 @@ export class HeadlessDaemon {
           }
         }
       } else {
-        const adapter = getBackendDefinition(resolveBackendId(agent.backend));
+        const adapter = backend.adapter;
         const provider = providerForBackend(agent.backend, agent.model);
         const definition = provider ? getProvider(provider) : null;
         authenticated = adapter?.security.strictAuth === "credential-free"
@@ -578,17 +580,17 @@ export class HeadlessDaemon {
         }
       }
     }
-    const sessions = this.sessions.list().filter((session) => session.backend === resolveBackendId(agent.backend));
+    const sessions = this.sessions.list().filter((session) => session.backend === backend.id);
     const rateLimitedUntil = sessions.reduce<number | null>((latest, session) => {
       const rate = session.native?.rateLimit;
       if (!rate?.limited || rate.retryAfterMs === null || rate.detectedAt === null) return latest;
       const until = rate.detectedAt + rate.retryAfterMs;
       return latest === null || until > latest ? until : latest;
     }, null);
-    const recent = this.jobs.list().filter((job) => job.backend === resolveBackendId(agent.backend)).slice(-20);
+    const recent = this.jobs.list().filter((job) => job.backend === backend.id).slice(-20);
     const recentFailures = recent.filter((job) => job.state === "failed" || job.state === "timed_out").length;
     const activeTurns = sessions.filter((session) => session.state === "running" || session.state === "cancelling").length;
-    const adapter = executable ? getBackendDefinition(resolveBackendId(agent.backend)) : null;
+    const adapter = executable ? backend.adapter : null;
     const containmentReady = !!adapter && requiredContainmentSecurityGaps(adapter, security.mode ?? "read-only").length === 0;
     const health: GoalAgentAvailability["health"] = !executable
       ? "offline"
@@ -1829,6 +1831,7 @@ export function fleetPresentation(
   alternatives: string[],
   projectRoot: string,
   login?: { argv?: [string, ...string[]]; instructions: string; brokerMode: boolean },
+  backendRegistered = true,
 ) {
   const nativeLogin = agent.authMode === "native-login";
   const common = {
@@ -1839,6 +1842,15 @@ export function fleetPresentation(
     loginInstructions: nativeLogin ? login?.instructions ?? null : null,
   };
   if (!agent.enabled) return { code: "disabled", reason: "Agent is disabled in the active fleet profile.", recovery: "Enable the agent or activate another fleet profile.", ...common };
+  if (!backendRegistered) {
+    return {
+      code: "provider_unavailable",
+      reason: `Backend ${agent.backend} is not registered in the running daemon.`,
+      recovery: "Restart with trusted extension configuration that registers this backend, or remove it from the active fleet profile.",
+      ...common,
+    };
+  }
+  if (availability.health === "offline") return { code: "provider_unavailable", reason: "Provider executable is unavailable on PATH.", recovery: "Install or restore the declared provider CLI, inspect Events, then refresh health.", ...common };
   if (containmentGaps.length) return { code: "blocked_by_containment", reason: `Required project-safety controls are unsupported: ${containmentGaps.join(", ")}.`, recovery: "Exclude this provider from required runs or select a compatible alternative; containment cannot be unblocked from the TUI.", ...common };
   if (availability.rateLimitedUntil && availability.rateLimitedUntil > Date.now()) return { code: "rate_limited", reason: `Provider retry is unavailable until ${new Date(availability.rateLimitedUntil).toISOString()}.`, recovery: "Wait until the retry time or reassign work to an available alternative.", retryAt: availability.rateLimitedUntil, ...common };
   if (availability.trustRequired) {
@@ -1863,10 +1875,18 @@ export function fleetPresentation(
         recovery: "Configure the provider API credential in the daemon environment, restart the daemon, then refresh Fleet health.",
         ...common,
       };
-  if (availability.health === "offline") return { code: "provider_unavailable", reason: "Provider executable is unavailable on PATH.", recovery: "Install or restore the declared provider CLI, inspect Events, then refresh health.", ...common };
   if (availability.health !== "healthy") return { code: "provider_unavailable", reason: "Provider health checks did not report ready.", recovery: "Retry health, inspect Events, or reassign to an available alternative.", ...common };
   if (writeContainmentGaps.length) return { code: "ready", reason: "Ready for read-only planning, worker, and review roles. Direct candidate writes use another compatible provider.", recovery: "Assign read-only fleet work; keep writable leadership and candidate turns on a compatible provider.", writeCapable: false, ...common };
   return { code: "ready", reason: nativeLogin ? "Provider login state is available and satisfies required project-safety controls." : "Daemon broker credentials are available and satisfy required project-safety controls.", recovery: "Start a session, make it the future lead, or assign work.", ...common };
+}
+
+function registeredBackend(input: string) {
+  try {
+    const id = resolveBackendId(input);
+    return { id, adapter: getBackendDefinition(id) ?? null };
+  } catch {
+    return { id: input, adapter: null };
+  }
 }
 
 function loadOrCreateToken(path: string) {

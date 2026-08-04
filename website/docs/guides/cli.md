@@ -516,9 +516,8 @@ modifies or cleans it automatically. Prefer explicit Layer D/E goals from the
 headless experimental gate --check build --check test --timeout-ms 300000
 ```
 
-Expected: `Running daemon-owned release gate checks...` followed by a JSON
-report of each configured `check|build|test|pack` gate; exit 0 only when every
-requested gate passed.
+Expected: one parseable JSON report of each configured
+`check|build|test|pack` gate; exit 0 only when every requested gate passed.
 
 ### Budgets
 

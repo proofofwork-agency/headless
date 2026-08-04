@@ -29,6 +29,42 @@ afterEach(async () => {
 });
 
 describe("daemon fleet and collaboration routes", () => {
+  test("reports missing executables and unregistered backends instead of claiming login loss", async () => {
+    const fixture = createFixture();
+    const offlineAdapter = goalAdapter("/usr/bin/true");
+    registerBackendDefinition({
+      ...offlineAdapter,
+      probe: { ...offlineAdapter.probe, versionCommand: ["/definitely/missing/headless-provider"] },
+    });
+    await start(fixture);
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: fixture.token });
+    await client.call("fleet.profile.upsert", {
+      id: "fleet-offline-diagnostics",
+      name: "Offline diagnostics",
+      authMode: "broker",
+      approvalPolicy: "ask",
+      agents: [
+        { id: "missing-executable", backend: GOAL_BACKEND, name: "Missing executable", authMode: "broker", approvalPolicy: "ask" },
+        { id: "missing-registration", backend: "fixture-unregistered", name: "Missing registration", authMode: "broker", approvalPolicy: "ask" },
+      ],
+      activate: true,
+    });
+
+    const health = await client.call<{
+      leaderCandidates: Array<{ agent: { id: string }; presentation: { code: string; reason: string } }>;
+    }>("fleet.health");
+    expect(health.leaderCandidates.find((entry) => entry.agent.id === "missing-executable")?.presentation).toMatchObject({
+      code: "provider_unavailable",
+      reason: "Provider executable is unavailable on PATH.",
+    });
+    expect(health.leaderCandidates.find((entry) => entry.agent.id === "missing-registration")?.presentation).toMatchObject({
+      code: "provider_unavailable",
+      reason: "Backend fixture-unregistered is not registered in the running daemon.",
+    });
+    expect(health.leaderCandidates.map((entry) => entry.presentation.code)).not.toContain("login_required");
+    expect(health.leaderCandidates.map((entry) => entry.presentation.code)).not.toContain("blocked_by_containment");
+  });
+
   test("distinguishes missing native project trust from missing provider login state", async () => {
     const fixture = createFixture();
     registerBackendDefinition(goalAdapter("/usr/bin/true"));
