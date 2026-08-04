@@ -50,6 +50,18 @@ jobs:
           # step strictContainmentAvailable() can be false here and all four
           # cases skip — a second, quieter way for this job to prove nothing.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # Mirror ci.yml exactly. setup-bun installs under ~/.bun, and contained
+          # workers see a tmpfs over the real home, so a fixture that execs the
+          # literal `bun` cannot resolve it inside the sandbox. Omitting this is
+          # why `cannot connect to a non-broker host Unix socket re-exposed with
+          # the project` failed HERE with "bwrap: execvp bun: No such file or
+          # directory" while passing in the release gate at the same commit —
+          # an environment mismatch, not a containment regression. Until this
+          # step existed, the step name's claim to match the release gate's
+          # setup was false. A symlink is not enough; its target is masked by
+          # the same tmpfs.
+          sudo cp "$(command -v bun)" /usr/local/bin/bun
+          sudo chmod 755 /usr/local/bin/bun
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
