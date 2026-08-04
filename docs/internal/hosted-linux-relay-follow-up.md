@@ -6,7 +6,9 @@ GitHub-hosted Ubuntu 24.04 leaves a bubblewrap run-tool relay child alive until 
 
 **A privileged-container CI step was tried and disproven.** Running the same files inside a `--privileged` `oven/bun:1.3.14` container *on the GitHub hosted runner* still failed the four `tests/daemon-run-tool.test.ts` cooperation cases (the `tests/containment-v2.test.ts` cases passed). The identical container passes locally. Therefore the incompatibility is GitHub's hosted-runner kernel/virtualization itself, **not the privilege level**, and no in-CI environment currently runs these four reliably.
 
-The hosted-Linux test process therefore skips the four `tests/daemon-run-tool.test.ts` cooperation cases on **all** GitHub Linux (`process.platform === "linux" && process.env.GITHUB_ACTIONS === "true"`), and the one unprivileged-only `tests/containment-v2.test.ts` late-socket case on unprivileged hosted Linux. There is no privileged-container CI step.
+The hosted-Linux test process therefore skips the four `tests/daemon-run-tool.test.ts` cooperation cases on **all** GitHub Linux (`process.platform === "linux" && process.env.GITHUB_ACTIONS === "true"`), and the one `tests/containment-v2.test.ts` late-socket case on unprivileged hosted Linux. There is no privileged-container CI step.
+
+Because there is no privileged step, the late-socket case runs on **no CI leg at all**: its gate is `linuxBwrapTest`, so macOS skips it as Linux-only, and hosted Linux skips it as unprivileged. `HEADLESS_PRIVILEGED_CONTAINMENT_CI` is set by no workflow. That is recorded as an uncovered gate in `tests/gated-coverage.test.ts`; the four cooperation cases are different — they do run on macOS CI.
 
 Coverage for the four cooperation cases: macOS CI, local dev, and a documented local command a maintainer can run against real bubblewrap:
 
