@@ -32,7 +32,7 @@ const config: Config = {
       {
         docs: {
           path: 'docs',
-          routeBasePath: '/', // docs-only mode
+          routeBasePath: '/', // docs share the site with the custom showcase route
           sidebarPath: './sidebars.ts',
         },
         blog: false,

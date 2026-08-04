@@ -1,8 +1,4 @@
-/**
- * Headless docs theme — matches the product TUI:
- * cyan accent (#22d3ee) on near-black surfaces (#202023 / #252525).
- * Shade ramps follow the Tailwind cyan scale so hover states stay coherent.
- */
+/** Headless docs and showcase theme. */
 
 /* Light mode: darker cyan (#0e7490) keeps links and buttons readable on white. */
 :root {
@@ -16,6 +12,9 @@
   --ifm-code-font-size: 95%;
   --ifm-font-family-monospace: ui-monospace, 'SF Mono', SFMono-Regular, Menlo,
     Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  --ifm-font-family-base: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+  --ifm-heading-font-family: var(--ifm-font-family-base);
   --docusaurus-highlighted-code-line-bg: rgba(14, 116, 144, 0.1);
 }
 
@@ -45,6 +44,17 @@
 .navbar__title {
   font-family: var(--ifm-font-family-monospace);
   letter-spacing: 0.05em;
+}
+
+.navbar {
+  border-bottom: 1px solid rgba(128, 128, 128, 0.16);
+  box-shadow: none;
+}
+
+.navbar__link {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
 }
 
 /* Subtle admonitions: no shadow, thin accent edge. */
