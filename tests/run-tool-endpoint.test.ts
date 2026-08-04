@@ -80,6 +80,36 @@ describe("run-scoped daemon tool endpoint", () => {
     await expect(callRunToolEndpoint(endpoint, "context", {}, 250)).rejects.toMatchObject({ code: "RUN_TOOL_UNAVAILABLE" });
   });
 
+
+  test("a slow handler is not cut off by the accept-time idle window", async () => {
+    // On accept the endpoint sets socket.setTimeout(runToolCallTimeoutMs()) —
+    // 5s by default. That is an INACTIVITY timer, and a call whose handler takes
+    // longer produces no socket activity while it works, so the daemon destroys
+    // the connection underneath a healthy request. The client then reports
+    // "run tool connection closed without a response".
+    //
+    // Measured on hosted x86-64 (run 30950607386): all four cooperation cases
+    // fail at ~5.3-5.7s with exactly that message, containment enforced, the
+    // run-tool socket listening and connections established. Fast machines pass
+    // because the handler finishes inside 5s; the hosted runner does not.
+    const root = temporaryDirectory();
+    const manager = new RunToolEndpointManager({
+      socketDir: root,
+      // Deliberately longer than the 5s accept window, shorter than the test.
+      handle: async () => { await Bun.sleep(6_500); return { ok: true }; },
+      // no maxRequests tweak: one call is enough to expose the window.
+    });
+    managers.push(manager);
+    const endpoint = await manager.issue(scope(Date.now() + 120_000));
+
+    // 20s client budget so any failure here is the DAEMON closing the socket,
+    // not the caller giving up first.
+    expect(
+      await callRunToolEndpoint(endpoint, "note", { text: "slow but healthy" }, 20_000),
+      "a healthy call must not be closed by the accept-time idle window",
+    ).toEqual({ ok: true });
+  }, 20_000);
+
   test("the disposable helper works cross-process and loses access after revocation", async () => {
     const root = temporaryDirectory();
     const manager = new RunToolEndpointManager({ socketDir: root, handle: (_scope, operation, params) => ({ operation, params }) });

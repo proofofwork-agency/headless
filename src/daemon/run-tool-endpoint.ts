@@ -227,6 +227,14 @@ export class RunToolEndpointManager {
     }
     record.sockets.add(socket);
     socket.setEncoding("utf8");
+    // Bounds waiting for the REQUEST, not the work it asks for. See dispatch():
+    // this window is re-based once a complete frame arrives, because
+    // socket.setTimeout is an INACTIVITY timer and a handler that is running
+    // produces no socket traffic. Leaving 5s in force across the handler
+    // destroyed healthy connections whenever the work outlasted it — measured
+    // on hosted x86-64, where all four run-tool cooperation cases failed at
+    // ~5.3s with "run tool connection closed without a response" while fast
+    // machines passed because their handlers finished inside the window.
     socket.setTimeout(runToolCallTimeoutMs(), () => socket.destroy());
     socket.once("close", () => record.sockets.delete(socket));
     socket.once("error", () => {
@@ -246,6 +254,11 @@ export class RunToolEndpointManager {
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
       handled = true;
+      // The request is in. From here the connection is waiting on this daemon's
+      // own handler, so re-base the idle window to the credential's remaining
+      // lifetime — still bounded, and still reclaimed by the revoke timer and
+      // revokeAll, but no longer able to cut off work it asked for.
+      socket.setTimeout(Math.max(runToolCallTimeoutMs(), Math.max(1, record.scope.expiresAt - this.now())), () => socket.destroy());
       void this.dispatch(record, socket, buffer.slice(0, newline));
     });
   }
@@ -265,6 +278,9 @@ export class RunToolEndpointManager {
       if (!record.operations.has(request.operation)) throw policyError("POLICY_DENIED", "Run tool operation is not allowed for this credential.");
       const params = paramSchemas[request.operation].parse(request.params) as Record<string, unknown>;
       if (request.operation === "run.delegate") {
+        // Tighter than the credential-lifetime window set on frame completion:
+        // a delegate declares its own budget, so hold it to that rather than to
+        // everything its credential still permits.
         const requested = typeof params.timeoutMs === "number" ? params.timeoutMs : 60_000;
         socket.setTimeout(Math.max(runToolCallTimeoutMs(), Math.min(record.scope.expiresAt - this.now(), requested + 10_000)), () => socket.destroy());
       }
