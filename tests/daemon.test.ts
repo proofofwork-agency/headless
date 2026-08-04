@@ -391,6 +391,24 @@ describe("authenticated project daemon", () => {
     expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
   });
 
+  test("hands back a client whose default deadline is operational, not the liveness probe's", async () => {
+    const fixture = createFixture();
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state });
+    daemons.push(daemon);
+    await daemon.start();
+
+    // tryClient probes with a 500ms deadline and then RETURNS that client, so
+    // constructing it with the probe timeout made 500ms the default for every
+    // later call. An ordinary run.submit then failed DAEMON_UNAVAILABLE under
+    // load — on an operator's machine, not only in CI.
+    const client = await connectOrStartDaemon({ projectRoot: fixture.project, state: fixture.state });
+    // events.wait long-polls for its full timeoutMs, so this call deliberately
+    // outlives the probe deadline. No explicit per-call timeout: the client's
+    // own default is the thing under test.
+    const events = await client.call("events.wait", { afterCursor: Number.MAX_SAFE_INTEGER, timeoutMs: 900 });
+    expect(events).toBeDefined();
+  });
+
   test("answers only the first pipelined request and remains available", async () => {
     const fixture = createFixture();
     const token = "a".repeat(48);
