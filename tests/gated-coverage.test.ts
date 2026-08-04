@@ -42,7 +42,9 @@ const GATES: GateCoverage[] = [
       "It is a bwrap case, so macOS cannot run it, and the hosted GitHub Linux runner cannot terminalize "
       + "the relay child (see docs/internal/hosted-linux-relay-follow-up.md). The privileged CI step that "
       + "HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 was written for no longer exists, so the only coverage is a "
-      + "local Linux machine or a self-hosted privileged runner that sets that variable.",
+      + "local Linux machine or a self-hosted privileged runner that sets that variable. What stays covered "
+      + "in CI is the general AF_UNIX denial, via probeLinuxBwrap on ubuntu and the pre-existing-socket "
+      + "linuxBwrapTest; what is uncovered is specifically the late-CREATED host socket.",
   },
   { gate: "darwinTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },
   { gate: "realDarwinNetworkTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },
