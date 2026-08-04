@@ -119,6 +119,7 @@ function route<
 /** Single exhaustive source for daemon method validation, authorization, and dispatch family. */
 export const DAEMON_ROUTES = {
   "ping": route("ping", empty, null, "system"),
+  "capability.activate": route("capability.activate", empty, "admin", "system"),
   "lead.use": route("lead.use", LeadUseParamsSchema, "admin", "lead"),
   "lead.status": route("lead.status", empty, null, "lead"),
   "lead.release": route("lead.release", empty, "admin", "lead"),

@@ -25,6 +25,10 @@ type ControlFamilies = Pick<DaemonFamilyHandlerRegistrations,
 export function controlRouteHandlers(context: DaemonRouteContext): ControlFamilies {
   return {
     system: {
+      // Activating the capability is what `headless experimental session …`
+      // does on an already-running daemon, instead of telling the operator to
+      // stop a healthy one.
+      "capability.activate": (_params, credential) => context.activateExperimentalSessions(credential),
       ping: (_params, credential) => {
         const extensions = context.extensionInfo();
         return {
@@ -33,7 +37,7 @@ export function controlRouteHandlers(context: DaemonRouteContext): ControlFamili
           projectRoot: context.projectRoot,
           principal: credential.principal,
           scopes: credential.scopes,
-          experimentalSessionsEnabled: context.experimentalSessionsEnabled,
+          experimentalSessionsEnabled: context.experimentalSessionsEnabled(),
           runtime: daemonRuntimeIdentity(),
           extensionConfigDigest: extensions.digest,
           extensionAdapters: extensions.adapters,
