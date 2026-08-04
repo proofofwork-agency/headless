@@ -46,6 +46,19 @@ describe("daemon process inventory", () => {
     expect(entries[2]!.projectRoot).toBeNull();
   });
 
+  test("ignores a process that merely quotes a daemon command line", () => {
+    // `daemon reap` SIGTERMs whatever this returns, so matching `daemon serve`
+    // anywhere in an argv meant a shell echoing the string — or a message
+    // quoting it — could be killed as if it were a daemon. Observed as a stray
+    // whose "project root" contained backticks and a newline.
+    const table = [
+      "  5150   501 /bin/sh -c echo /opt/headless/src/cli.ts daemon serve --cwd /tmp/quoted",
+      "  5151   501 /usr/bin/bun /opt/headless/src/cli.ts daemon serve --cwd /tmp/real",
+      "",
+    ].join("\n");
+    expect(parseDaemonProcessTable(table, 501, 9_999).map((entry) => entry.pid)).toEqual([5151]);
+  });
+
   test("never reports the scanning process itself", () => {
     const table = "  7777   501 /usr/bin/bun /opt/headless/src/cli.ts daemon serve --cwd /tmp/self\n";
     expect(parseDaemonProcessTable(table, 501, 7_777)).toEqual([]);
