@@ -154,8 +154,26 @@ describe("capability gate coverage", () => {
    * Pinned deliberately. If this shrinks, a gate started running somewhere and
    * the registry is stale; if it grows, new dead coverage was added without a
    * stated reason.
+   *
+   * Counts GATES, not tests, and the two are not the same number. Behind these
+   * two gates sit THREE individual tests that execute on no CI leg:
+   *   - tests/containment-v2.test.ts:440  denies a host Unix socket created
+   *     after launch while broker and run tools remain reachable
+   *   - tests/grok-isolation.test.ts:180  attests a gated-config-free project
+   *     through the trust-gate canary
+   *   - tests/grok-isolation.test.ts:217  real inspect sees no project
+   *     instructions, skills, hooks, MCP, plugins, LSP, or startup config
+   * A gate-level count reads like a completeness claim over tests and is not
+   * one; adding a case under an existing uncovered gate would not move this
+   * number. The enumeration above is the human-readable record, kept here so
+   * the understatement is visible at the assertion rather than inferred.
+   *
+   * The first of those three is no longer merely declared: it is measured
+   * off-CI on privileged Linux with real bubblewrap. See
+   * docs/internal/hosted-linux-relay-follow-up.md for the command, the pass
+   * counts, and the architecture limit that still applies.
    */
-  test("exactly two gates are knowingly uncovered by CI", () => {
+  test("exactly two gate names are knowingly uncovered by CI", () => {
     const uncovered = GATES.filter((gate) => gate.legs.length === 0);
     expect(uncovered.map((gate) => gate.gate).sort()).toEqual(["linuxRelayLifecycleTest", "realGrokInspectTest"]);
   });
