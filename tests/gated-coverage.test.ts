@@ -42,12 +42,14 @@ const GATES: GateCoverage[] = [
       "It is a bwrap case, so macOS cannot run it, and the hosted GitHub Linux runner cannot terminalize "
       + "the relay child (see docs/internal/hosted-linux-relay-follow-up.md). The privileged CI step that "
       + "HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 was written for no longer exists, so the only coverage is a "
-      + "local Linux machine or a self-hosted privileged runner that sets that variable. A privileged "
-      + "hosted job (.github/workflows/privileged-containment.yml) now runs it on x86-64, but it is "
-      + "INTERMITTENT there — one pass then one fail on a docs-only commit, probe exit 82 — so it stays "
-      + "uncovered rather than being promoted on a single green sample. Measured reliably only off-CI on "
-      + "Linux arm64. What stays covered in CI is the general AF_UNIX denial, via probeLinuxBwrap on ubuntu "
-      + "and the pre-existing-socket linuxBwrapTest; what is uncovered is the late-CREATED host socket.",
+      + "local Linux machine or a self-hosted privileged runner that sets that variable. This gate now "
+      + "guards ONLY the combined case, which also requires the broker and run-tool relays to be "
+      + "reachable; that availability leg is repeatedly intermittent on hosted x86-64 (3 of 9 samples "
+      + "failed, every diagnosed one with unixError ENOENT and toolCode 1 — containment held), so it is "
+      + "deliberately skipped there and measured off-CI on native Linux. The SECURITY property it used to "
+      + "carry is not uncovered: the standalone `denies a host Unix socket created after launch` case is "
+      + "required on hosted x86-64 by .github/workflows/privileged-containment.yml, asserts the socket was "
+      + "visible before trusting its denial, and is mutation-proved against removal of the seccomp filter.",
   },
   { gate: "darwinTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },
   { gate: "realDarwinNetworkTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },

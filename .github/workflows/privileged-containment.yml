@@ -1,16 +1,23 @@
 name: Privileged containment
 
-# The late-socket relay case (`linuxRelayLifecycleTest`) ran on NO CI leg at
-# all: macOS skips it as Linux-only, and the ordinary hosted-Linux job skips it
-# because it is unprivileged. It was accurately declared uncovered and then left
-# that way, which is not the same as being safe.
+# Covers the containment properties that the ordinary release gate cannot.
 #
-# A privileged container on the hosted runner is known to work for THIS file —
-# docs/internal/hosted-linux-relay-follow-up.md records that the
-# tests/containment-v2.test.ts cases passed there while the four
-# tests/daemon-run-tool.test.ts cooperation cases did not. So this job covers
-# exactly the former on real x86-64 Linux, and deliberately does not attempt the
-# latter, whose hosted incompatibility is a separate open investigation.
+# The standalone late-created-socket denial and the x32 alternate-ABI check both
+# need real bubblewrap and a real seccomp filter, which the unprivileged hosted
+# job does not have; macOS skips them as Linux-only. This job runs them in a
+# privileged container on hosted x86-64 and REQUIRES them to pass.
+#
+# It deliberately does NOT cover the combined
+# "denied while broker and run tools remain reachable" case. That one also
+# depends on the run-tool relay being reachable, and that leg is repeatedly
+# intermittent on hosted runners — every diagnosed failure showed containment
+# holding and only availability breaking. Gating a security assertion behind a
+# flaky availability check produces a red people learn to re-run, which is how a
+# real breach gets waved through. It stays skipped here and measured off-CI on
+# native Linux; see docs/internal/hosted-linux-relay-follow-up.md.
+#
+# Nor does it attempt the four tests/daemon-run-tool.test.ts cooperation cases,
+# whose hosted incompatibility is reproduced and unresolved in that same file.
 on:
   workflow_dispatch:
   pull_request:

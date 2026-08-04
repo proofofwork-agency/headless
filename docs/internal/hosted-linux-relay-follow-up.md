@@ -59,21 +59,22 @@ GITHUB_ACTIONS=true (override unset)                      →  1 skip
 
 **Do not use emulation as evidence for the seccomp architecture check.** `rejects x32 syscall numbers before native seccomp dispatch` gates on `process.arch === "x64"`, so an arm64 host skips it. Running it under `--platform linux/amd64` on arm64 hardware **fails** (`Expected: true, Received: false`, containment-v2.test.ts:570) — and that is an emulation artifact, not a defect: the same test passes on real x86-64 in hosted Ubuntu CI (`(pass) … 108.24ms`, main @ 93c7928). Emulated x86-64 does not faithfully reproduce x32 syscall tagging, so a pass there would have been worthless and the fail is not a finding.
 
-**The late-socket case is INTERMITTENT on hosted x86-64 — one pass, one fail — and is NOT covered there.** `.github/workflows/privileged-containment.yml` runs `tests/containment-v2.test.ts` inside a privileged `oven/bun:1.3.14` container on `ubuntu-latest`, with `CI=true GITHUB_ACTIONS=true HEADLESS_PRIVILEGED_CONTAINMENT_CI=1` so the hosted predicate is armed and the override is what opens the gate. Measured on PR #57 @ 93e48fb:
+**Hosted x86-64 status, current.** `.github/workflows/privileged-containment.yml` runs `tests/containment-v2.test.ts` in a privileged `oven/bun:1.3.14` container on `ubuntu-latest` with `CI=true GITHUB_ACTIONS=true` and, deliberately, WITHOUT `HEADLESS_PRIVILEGED_CONTAINMENT_CI`. That combination arms the hosted predicate while leaving the flaky combined case skipped. A representative run:
 
 ```
 HEADLESS_TEST_ARCH=x86_64
-bubblewrap 0.11.0
-(pass) denies a host Unix socket created after launch while broker and run tools remain reachable [192.68ms]
-(pass) rejects x32 syscall numbers before native seccomp dispatch [100.51ms]
-16 pass  0 fail
+(pass) denies a host Unix socket created after launch [140.78ms]
+(skip) denies a host Unix socket created after launch while broker and run tools remain reachable
+(pass) rejects x32 syscall numbers before native seccomp dispatch [104.37ms]
 ```
 
-That run passed. **The very next run of the same job, on a docs-only commit, FAILED it** — `(fail) … [5194.52ms]` against `(pass) … [192.68ms]`, with the sandboxed probe exiting 82. So the case is intermittent on hosted x86-64, which is consistent with the hosted-runner relay incompatibility documented at the top of this file extending to it, and it must NOT be described as covered there. One green run is not coverage; it is a sample.
+**8 of 8 sampled runs passed after the split** (30943170347 … 30943470199), against **3 of 9 failing before it**, when the combined case still ran here. No rate is claimed from either sample; nine observations give a Wilson interval wide enough that a number would be false precision.
 
-Exit 82 is ambiguous by construction — the probe uses it for a connectable late socket (a containment breach) AND for an unreachable broker or run-tool (a relay-lifecycle failure). Which one occurred is unknown for that run, because the test reported only `stderr` while the probe writes its observations to `stdout`. That diagnostic gap is now fixed, so the next hosted failure will say which condition tripped. Until a run distinguishes them, treat the cause as UNDETERMINED and do not assume it is the benign one.
+The job cannot pass vacuously. It asserts the architecture sentinel whole-line, the pure case anchored on its trailing duration bracket — necessary because that name is a strict prefix of the combined one — the x32 case, AND that the combined case appears as `(skip)`. That last assertion is what proves `GITHUB_ACTIONS` actually reached the container: without it, the predicate silently disarms, the combined case runs, and it usually passes, so the regression would hide behind two green assertions. The log is uploaded as an artifact.
 
-The job still refuses to pass vacuously: it asserts the architecture sentinel and both case names anchored to `(pass)`, so a skipped suite fails rather than reporting the same `0 fail` a passing one does, and it uploads the log as an artifact.
+**Why the split, and what the failures actually were.** The combined case asserts the security property AND broker reachability AND run-tool reachability together, so a flaky relay turned the security gate red. Every diagnosed failure reported `{"unixError":"ENOENT","brokerStatus":200,"toolCode":1}` — the late socket was unreachable, the broker answered, only run-tool failed. Containment held in each. Runs 30941830730, 30942404411, 30942472935.
+
+That classification was nearly impossible: the probe originally collapsed four outcomes into `process.exit(82)`, which covers both a connectable socket (a breach) and an unreachable helper (availability), and it short-circuited the parent's own per-field assertions. The first failure is permanently unclassifiable — its observations went to stdout while only stderr reached the message, and the uploaded artifact preserved no more.
 
 **What remains genuinely unexecuted**, and must not be papered over: the four `tests/daemon-run-tool.test.ts` cooperation cases. They are measured on macOS CI and, per the evidence above, off-CI on Linux arm64 — but not on x86-64 Linux, because the hosted-runner incompatibility at the top of this file is reproduced and unresolved, and privilege is not the cause. Those four traverse the x86-64 + x32 `seccompDefinition` only on a machine nobody has run them on. Closing that needs real, non-hosted x86-64 Linux; it is not an absence of effort and must not be described as covered.
 
