@@ -1,23 +1,31 @@
 name: Privileged containment
 
-# Covers the containment properties that the ordinary release gate cannot.
+# INDEPENDENT, DUPLICATE evidence for the containment invariants — not their
+# only coverage. Be precise about that: the ordinary ubuntu release gate
+# installs bubblewrap, runs probeLinuxBwrap fail-closed, and already executes
+# both the standalone late-created-socket denial and the x32 alternate-ABI case
+# on real x86-64. Splitting the security property out of the combined case is
+# what covered it; this job did not create that coverage.
 #
-# The standalone late-created-socket denial and the x32 alternate-ABI check both
-# need real bubblewrap and a real seccomp filter, which the unprivileged hosted
-# job does not have; macOS skips them as Linux-only. This job runs them in a
-# privileged container on hosted x86-64 and REQUIRES them to pass.
+# What this job adds that the ordinary gate does not:
+#   - the privileged-container shape, exercising the same invariants under
+#     --privileged rather than the runner's default capabilities;
+#   - explicit anti-vacuity. The ordinary gate reports "0 fail" whether these
+#     cases ran or silently skipped. Here the architecture is asserted by
+#     whole-line sentinel, each case name is anchored to (pass), and the
+#     combined case is required to appear as (skip) — which is the only proof
+#     that GITHUB_ACTIONS actually reached the container and armed the hosted
+#     predicate.
 #
 # It deliberately does NOT cover the combined
-# "denied while broker and run tools remain reachable" case. That one also
-# depends on the run-tool relay being reachable, and that leg is repeatedly
-# intermittent on hosted runners — every diagnosed failure showed containment
-# holding and only availability breaking. Gating a security assertion behind a
-# flaky availability check produces a red people learn to re-run, which is how a
-# real breach gets waved through. It stays skipped here and measured off-CI on
-# native Linux; see docs/internal/hosted-linux-relay-follow-up.md.
-#
-# Nor does it attempt the four tests/daemon-run-tool.test.ts cooperation cases,
-# whose hosted incompatibility is reproduced and unresolved in that same file.
+# "denied while broker and run tools remain reachable" case: that one also
+# depends on the run-tool relay, and that leg is repeatedly intermittent on
+# hosted runners with containment holding in every diagnosed failure. Gating a
+# security assertion behind a flaky availability check produces a red people
+# learn to re-run, which is how a real breach gets waved through. Nor does it
+# attempt the four tests/daemon-run-tool.test.ts cooperation cases, whose
+# hosted incompatibility is reproduced and unresolved.
+# See docs/internal/hosted-linux-relay-follow-up.md.
 on:
   workflow_dispatch:
   pull_request:
