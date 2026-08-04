@@ -573,10 +573,14 @@ describe("Linux bubblewrap profiles", () => {
       `writeFileSync(${JSON.stringify(marker)},'ready');`,
       `for(let i=0;i<500&&!existsSync(${JSON.stringify(proceed)});i++)await Bun.sleep(10);`,
       `if(!existsSync(${JSON.stringify(proceed)}))process.exit(81);`,
+      // Same premise the pure case asserts: an ABSENT path also refuses, with
+      // ENOENT, so without this a mount change that merely hid the socket would
+      // read as a seccomp denial here too.
+      `const socketVisible=existsSync(${JSON.stringify(lateSocket)});`,
       `const unixError=await new Promise((resolve)=>{const socket=createConnection(${JSON.stringify(lateSocket)});socket.once('connect',()=>resolve('CONNECTED'));socket.once('error',(error)=>resolve(error.code));});`,
       `const response=await fetch(${JSON.stringify(`${relayUrl}/openai/v1/responses`)},{method:'POST',headers:{authorization:${JSON.stringify(`Bearer ${lease.token}`)},'content-type':'application/json'},body:JSON.stringify({model:'gpt-test',input:'hello'})});`,
       "const tool=Bun.spawnSync(['headless-run-tool','task_status','{}'],{env:process.env,stdout:'pipe',stderr:'pipe'});",
-      "const observed={unixError,brokerStatus:response.status,brokerBody:await response.text(),toolCode:tool.exitCode,toolOutput:tool.stdout.toString(),toolError:tool.stderr.toString()};",
+      "const observed={socketVisible,unixError,brokerStatus:response.status,brokerBody:await response.text(),toolCode:tool.exitCode,toolOutput:tool.stdout.toString(),toolError:tool.stderr.toString()};",
       "console.log(JSON.stringify(observed));",
       // Deliberately NO aggregate failure exit here. This used to exit 82 when
       // any observation was wrong, which collapsed four distinct outcomes into
@@ -623,7 +627,8 @@ describe("Linux bubblewrap profiles", () => {
       // a distinct failure from any observation being wrong. Both streams are in
       // the message because this runs on hosted CI where the log is all there is.
       expect(exitCode, `stdout: ${stdout}\nstderr: ${stderr}`).toBe(0);
-      const observed = JSON.parse(stdout) as { unixError: string; brokerStatus: number; brokerBody: string; toolCode: number; toolOutput: string; toolError: string };
+      const observed = JSON.parse(stdout) as { socketVisible: boolean; unixError: string; brokerStatus: number; brokerBody: string; toolCode: number; toolOutput: string; toolError: string };
+      expect(observed.socketVisible, `late socket never became visible inside the sandbox, so its denial proves nothing: ${stdout}`).toBe(true);
       // THE SECURITY PROPERTY, asserted first and on its own. A connectable
       // late socket is a containment breach; everything below it is
       // availability. Keeping them separate means a flaky relay can never

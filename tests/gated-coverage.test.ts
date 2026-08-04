@@ -48,7 +48,7 @@ const GATES: GateCoverage[] = [
       + "failed, every diagnosed one with unixError ENOENT and toolCode 1 — containment held), so it is "
       + "deliberately skipped there and measured off-CI on native Linux. The SECURITY property it used to "
       + "carry is not uncovered: the standalone `denies a host Unix socket created after launch` case is "
-      + "required on hosted x86-64 by .github/workflows/privileged-containment.yml, asserts the socket was "
+      + "run on the ordinary ubuntu leg and again by .github/workflows/privileged-containment.yml — advisory, + since main has no branch protection so no check here is enforced — asserts the socket was "
       + "visible before trusting its denial, and is mutation-proved against removal of the seccomp filter.",
   },
   { gate: "darwinTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },

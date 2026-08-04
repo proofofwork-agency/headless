@@ -1,7 +1,15 @@
 name: Privileged containment
 
-# INDEPENDENT, DUPLICATE evidence for the containment invariants — not their
-# only coverage. Be precise about that: the ordinary ubuntu release gate
+# ADVISORY, INDEPENDENT, DUPLICATE evidence for the containment invariants —
+# not their only coverage, and NOT enforced.
+#
+# Nothing in this repository is a required check. Measured, not assumed:
+# `gh api repos/.../branches/main/protection` returns 404 "Branch not
+# protected", and both `/rules/branches/main` and `/rulesets` return []. So a
+# red result here does not block a merge; a human has to look. Saying
+# "required" anywhere would be the same false claim this job exists to prevent.
+# If enforcement is wanted, it is a repository-settings decision for the owner,
+# not something a workflow file can assert about itself. Be precise about that: the ordinary ubuntu release gate
 # installs bubblewrap, runs probeLinuxBwrap fail-closed, and already executes
 # both the standalone late-created-socket denial and the x32 alternate-ABI case
 # on real x86-64. Splitting the security property out of the combined case is
