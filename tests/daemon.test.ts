@@ -313,6 +313,72 @@ describe("authenticated project daemon", () => {
     expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
   });
 
+  test("drops a connection that drips bytes without ever completing a frame", async () => {
+    const fixture = createFixture();
+    const token = "a".repeat(48);
+    // Short absolute deadline so the drip below outlives it several times over.
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token, requestFrameTimeoutMs: 300 });
+    daemons.push(daemon);
+    await daemon.start();
+
+    const socket = createConnection(daemon.state.socketPath);
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+    const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    // 60ms is far below the 300ms deadline, so an inactivity timer would be
+    // reset by every write and never fire. Only an absolute deadline armed at
+    // accept can end this. No newline is ever sent: the frame stays incomplete.
+    const startedAt = Date.now();
+    const drip = setInterval(() => {
+      if (!socket.destroyed) socket.write(".");
+    }, 60);
+    try {
+      await closed;
+    } finally {
+      clearInterval(drip);
+    }
+    const elapsed = Date.now() - startedAt;
+    expect(elapsed).toBeLessThan(5_000);
+
+    // The daemon dropped one client, not its listener.
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
+    expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
+  });
+
+  test("does not apply the frame deadline once a complete frame has arrived", async () => {
+    const fixture = createFixture();
+    const token = "a".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token, requestFrameTimeoutMs: 150 });
+    daemons.push(daemon);
+    await daemon.start();
+
+    // The deadline is about waiting on the client, not about how long a handler
+    // takes. A completed request must still be answered after it elapses.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
+    expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
+  });
+
+  test("records a post-bind transport error instead of crashing the process", async () => {
+    const fixture = createFixture();
+    const token = "a".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token });
+    daemons.push(daemon);
+    await daemon.start();
+
+    // secureUnixListen removes its bind-time handler on success. With no
+    // persistent replacement, EventEmitter turns any post-bind OS transport
+    // fault into an unhandled 'error' throw that takes the daemon down.
+    const server = (daemon as unknown as { server: { listenerCount(event: string): number; emit(event: string, error: Error): boolean } }).server;
+    expect(server.listenerCount("error")).toBeGreaterThan(0);
+    expect(() => server.emit("error", new Error("synthetic post-bind transport error"))).not.toThrow();
+
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
+    expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
+  });
+
   test("answers only the first pipelined request and remains available", async () => {
     const fixture = createFixture();
     const token = "a".repeat(48);
