@@ -63,6 +63,50 @@ describe("daemon goal runtime service", () => {
     })).toThrow("shutting down");
     runtime.dispose();
   });
+
+  test("dispose drains an in-flight autonomy scan instead of diagnosing it afterwards", async () => {
+    // startAutonomyScan is fire-and-forget: `void this.scanAutonomy().catch(...)`.
+    // dispose() clears the interval and disposes the coordinator, but neither
+    // awaits nor aborts a scan already running. The scan therefore resumes into
+    // a torn-down runtime, fails, and its .catch LOGS that failure — errors
+    // attributed to a runtime that no longer exists. That is the background
+    // leakage recorded in docs/internal/hosted-linux-relay-follow-up.md as
+    // crossing test/runtime ownership boundaries.
+    //
+    // Localised from source by Codex, after two of my own theories about this
+    // fault were disproved by experiment.
+    const fixture = createFixture();
+    fixture.orchestration.setEnabled(true);
+    const runtime = createRuntime(fixture, { activeJobs: 0, queuedJobs: 0 });
+    const internals = runtime as unknown as {
+      diagnostic: (message: string, error?: unknown) => void;
+      idleAutonomy: { scan: () => Promise<unknown> };
+      startAutonomyScan: () => void;
+    };
+    const diagnostics: string[] = [];
+    internals.diagnostic = (message) => diagnostics.push(message);
+
+    let failScan: (() => void) | undefined;
+    // Held open so dispose() lands mid-scan, the only state that reproduces
+    // this. A scan settling first proves nothing.
+    internals.idleAutonomy = {
+      scan: () => new Promise((_resolve, reject) => {
+        failScan = () => reject(new Error("Unknown goal: goal_torn_down"));
+      }),
+    };
+
+    internals.startAutonomyScan();
+    await Bun.sleep(10);
+    runtime.dispose();
+    failScan?.();
+    await Bun.sleep(80);
+
+    expect(
+      diagnostics.filter((message) => message.includes("Idle autonomy scan failed")),
+      "a disposed runtime must not report failures for work it no longer owns",
+    ).toEqual([]);
+  });
+
 });
 
 type Fixture = ReturnType<typeof createFixture>;
