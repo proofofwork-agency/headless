@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Breaking
+
+- **Ledger HMAC keys must be at least 32 bytes and pass an entropy floor.** Shorter or low-entropy keys (repeated characters, pure digits, common password shapes) are refused at startup. A human-memorable 16-character secret provides false tamper-evidence, so it is rejected rather than accepted. **Rotate before upgrading**: generate with `openssl rand -base64 32`. The floor is enforced when the ledger is opened, so an existing short key blocks `headless verify` on historical records as well as new writes — rotate first, or keep the prior binary available to read an old chain.
+- **Unix control sockets are created `0o700`, not `0o600`.** They are bound under `umask 0o077` instead of being chmod-ed after `listen`, which closes the window where the socket existed at the ambient umask. Owner-only either way; only the observed mode changed.
+- **The whole `HEADLESS_LEDGER_*` family is denied to worker environments**, by prefix rather than by name. A worker that could read the keyring could forge ledger entries, which is the property the HMAC exists to provide.
+
+### Fixed
+
+- Restored Unix-socket bind exclusivity. The bind helper cleared the socket path before every bind, so `listen()` could never raise `EADDRINUSE` — the kernel backstop that made each caller's check-then-bind safe. Stale-socket policy belongs to the caller, and every caller already implements it.
+- Concurrent socket binds no longer corrupt the process umask. The window is reference-counted and await-spanning binds are serialized, so the baseline is restored exactly once.
+- A Bun listener refused by post-bind ownership verification is now disposed instead of leaked; the caller never receives that handle and so cannot close it.
+- `process.getuid` is guarded and fails closed where unavailable. The uid comparison is the only defence against a foreign-owned socket, so an unverifiable platform refuses rather than skipping the check.
+- The offline linked-hold lock now binds through the same verified helper as every other socket.
+
 ## 0.2.0-beta.6 — 2026-07-31
 
 Package publication remains blocked. Both package manifests are private at `0.2.0-beta.6`; npm publication and repository visibility remain separate human-authority decisions. This tree is an unpublished private beta (not alpha).
