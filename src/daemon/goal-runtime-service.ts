@@ -191,9 +191,19 @@ export class GoalRuntimeService {
   }
 
   dispose() {
+    // Set BEFORE anything else: an autonomy scan already in flight is a
+    // fire-and-forget promise this cannot cancel, and when it fails its .catch
+    // reports the failure as a runtime fault. After teardown that is not a
+    // fault, it is the expected consequence of disposing underneath it, and
+    // attributing it to a runtime that no longer exists is what leaked errors
+    // across ownership boundaries.
+    this.disposed = true;
     this.clearAutonomyTimer();
     this.coordinator.dispose();
   }
+
+  /** True once dispose() has run; see the note there. */
+  private disposed = false;
 
   private startAutonomyTimer() {
     if (!this.autonomyTimer) {
@@ -209,7 +219,12 @@ export class GoalRuntimeService {
   }
 
   private startAutonomyScan() {
+    if (this.disposed) return;
     void this.scanAutonomy().catch((error) => {
+      // A scan that outlived dispose() is not reporting a fault of this
+      // runtime; suppressing it here is what keeps teardown noise out of
+      // unrelated diagnostics.
+      if (this.disposed) return;
       this.diagnostic("Idle autonomy scan failed.", error);
     });
   }

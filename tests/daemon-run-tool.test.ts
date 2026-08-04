@@ -31,8 +31,14 @@ const COOPERATION_TEST_TIMEOUT_MS = process.platform === "linux" ? 240_000 : 45_
 // macOS CI, local dev, and the documented local privileged-Docker command in
 // docs/internal/hosted-linux-relay-follow-up.md. This is a tracked CI
 // incompatibility, not a containment waiver.
+// The `!== "1"` clause mirrors tests/containment-v2.test.ts and is what lets a
+// privileged/self-hosted runner opt IN to executing these. Without it the skip
+// was unconditional on hosted Linux, so the diagnostic workflow written to
+// reproduce this very failure set an environment variable the suite ignored and
+// would have reported four skips as a clean run.
 const HOSTED_LINUX_RELAY_INCOMPATIBLE = process.platform === "linux"
-  && process.env.GITHUB_ACTIONS === "true";
+  && process.env.GITHUB_ACTIONS === "true"
+  && process.env.HEADLESS_PRIVILEGED_CONTAINMENT_CI !== "1";
 if (HOSTED_LINUX_RELAY_INCOMPATIBLE) {
   console.warn("Skipping daemon run-tool cooperation on GitHub-hosted Linux (privileged and unprivileged both hang relay child terminalization). Runs on macOS CI, local dev, and the documented local privileged-Docker command. Tracked in docs/internal/hosted-linux-relay-follow-up.md.");
 }

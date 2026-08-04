@@ -20,6 +20,64 @@ afterEach(() => {
 });
 
 describe("adaptive durable goal coordinator", () => {
+  test("a disposed coordinator stops running further turns", async () => {
+    // CHARACTERISATION, not a bug fix. I predicted from source that an
+    // executePipeline already in flight would carry on past dispose() — the
+    // chain is not cancellable and the entry guard is before the first await —
+    // and that this was the origin of the `Unknown goal: …` background leakage
+    // in docs/internal/hosted-linux-relay-follow-up.md.
+    //
+    // That prediction was WRONG, and this test is what disproved it: it passes
+    // against unmodified code, because dispose() calls delegations.dispose()
+    // and the worker turns never launch. The leak comes from somewhere else.
+    //
+    // Kept because the property is worth holding: no turn may run for a
+    // disposed coordinator. It pins current correct behaviour rather than
+    // proving a fix, and it is deliberately labelled that way so nobody later
+    // reads it as evidence that the goal-ownership leak was addressed.
+    const fixture = createFixture();
+    const turns: string[] = [];
+    let releasePlanning: (() => void) | undefined;
+    const service = new GoalCoordinatorService({
+      ...fixture,
+      now: () => 1_000,
+      id: () => "id-1",
+      availability: () => healthy(),
+      cancelJob: () => {},
+      diagnostic: () => {},
+      executeTurn: ({ role }) => {
+        turns.push(role);
+        return {
+          jobId: `job-${turns.length}`,
+          sessionId: `session-${turns.length}`,
+          artifactIds: [],
+          completion: role === "planning"
+            // Held open so dispose() lands mid-pipeline, which is the state
+            // under test. Anything settling before dispose proves nothing.
+            ? new Promise((resolve) => {
+              releasePlanning = () => resolve(result(
+                plan([{ id: "inspect", task: "Inspect the current behavior and report concrete evidence." }]),
+                "succeeded",
+                "job-1",
+                null,
+              ));
+            })
+            : Promise.resolve(result("worker output", "succeeded", `job-${turns.length}`, null)),
+        };
+      },
+    });
+
+    service.start({ principal: "coordinator", objective: "teardown probe", fleetProfileId: fixture.profileId });
+    await Bun.sleep(20);
+    expect(turns, "the planning turn should be in flight before dispose").toEqual(["planning"]);
+
+    service.dispose();
+    releasePlanning?.();
+    await Bun.sleep(150);
+
+    expect(turns, "no turn may run after dispose").toEqual(["planning"]);
+  });
+
   test("selects a leader, delivers actual output to a reviewer, revises, gates, and persists", async () => {
     const fixture = createFixture();
     const prompts: Array<{ agent: string; role: string; prompt: string; timeoutMs: number }> = [];

@@ -72,4 +72,36 @@ describe("CLI audit manifest", () => {
     }
     for (const id of ["lead:status", "receipt:list", "receipt:show", "mcp:server"]) expect(risk(id)).toBe("safe");
   });
+
+  test("mutating subcommands are never classified as reads", () => {
+    // The risk taxonomy used to be destructive-arms over `return "safe"`, so a
+    // subcommand nobody remembered to name inherited "safe" by omission. Every
+    // id below did exactly that. The allowlist inversion makes the fallback
+    // conservative instead: unknown means destructive until someone lists it as
+    // a read.
+    const mutators = [
+      "daemon:stop",
+      "collaboration:transfer-synthesizer",
+      "workflow:draft-create",
+      "goal:cancel",
+      "session:cancel",
+      "workflow:pause",
+      "loop:resume",
+      "skill:revoke",
+      "autonomy:off",
+    ];
+    for (const id of mutators) {
+      const row = CLI_AUDIT_MANIFEST.find((entry) => entry.id === id);
+      expect(row, `${id} missing from the manifest`).toBeDefined();
+      expect(row!.risk, `${id} must not be classified as a read`).not.toBe("safe");
+    }
+
+    // The other direction, so the conservative fallback cannot be "fixed" by
+    // simply calling everything destructive.
+    for (const id of ["daemon:status", "lead:status", "receipt:list", "goal:list"]) {
+      const row = CLI_AUDIT_MANIFEST.find((entry) => entry.id === id);
+      if (row) expect(row.risk, `${id} is a read`).toBe("safe");
+    }
+  });
+
 });

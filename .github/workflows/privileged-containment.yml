@@ -1,15 +1,19 @@
 name: Privileged containment
 
 # ADVISORY, INDEPENDENT, DUPLICATE evidence for the containment invariants —
-# not their only coverage, and NOT enforced.
+# not their only coverage, and deliberately NOT a required check.
 #
-# Nothing in this repository is a required check. Measured, not assumed:
-# `gh api repos/.../branches/main/protection` returns 404 "Branch not
-# protected", and both `/rules/branches/main` and `/rulesets` return []. So a
-# red result here does not block a merge; a human has to look. Saying
-# "required" anywhere would be the same false claim this job exists to prevent.
-# If enforcement is wanted, it is a repository-settings decision for the owner,
-# not something a workflow file can assert about itself. Be precise about that: the ordinary ubuntu release gate
+# main IS protected as of 2026-08-04 — "website build", "ubuntu-latest release
+# gate" and "macos-latest release gate" are required, with strict up-to-date
+# merges. This job is deliberately excluded, because it is path-filtered: a
+# required context that never reports blocks a pull request forever, so
+# requiring a filtered job would wedge every PR that does not touch the
+# containment surface. Its value is evidence, not enforcement.
+#
+# Note also that enforce_admins is false, so an admin can still merge past a
+# red required check. That is a deliberate solo-maintainer choice, not an
+# oversight — but it means "required" here means "reported and visible", not
+# "impossible to bypass". Be precise about that: the ordinary ubuntu release gate
 # installs bubblewrap, runs probeLinuxBwrap fail-closed, and already executes
 # both the standalone late-created-socket denial and the x32 alternate-ABI case
 # on real x86-64. Splitting the security property out of the combined case is

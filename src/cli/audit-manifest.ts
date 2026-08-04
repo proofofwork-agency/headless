@@ -48,6 +48,47 @@ function subcommandsFor(command: CliCommandName): string[] {
   });
 }
 
+/**
+ * Subcommands that only READ. This is an allowlist on purpose: the previous
+ * shape was a chain of "destructive" arms over `return "safe"`, so any
+ * subcommand nobody remembered to name inherited "safe" by omission. That is
+ * how `daemon stop`, every cancel/pause/resume, transfer-synthesizer, the
+ * workflow draft mutators, `autonomy off/stop` and `loop start` all ended up
+ * classified as reads. A comment saying the fallback "is not silent" did not
+ * change that it was.
+ *
+ * Inverting it makes the failure mode conservative: a new subcommand is
+ * destructive until someone deliberately lists it here as a read.
+ */
+const READ_ONLY_SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
+  lead: ["status"],
+  daemon: ["status"],
+  mcp: ["serve", "server", "status", "status codex", "status grok", "status claude", "status opencode"],
+  budget: ["list", "linked-hold inspect"],
+  ledger: ["verify"],
+  receipt: ["list", "show", "export", "verify", "diff"],
+  collaboration: ["turns", "messages"],
+  approval: ["list"],
+  candidate: ["inspect"],
+  session: ["status", "result"],
+  goal: ["list", "follow", "status", "result"],
+  workflow: ["list", "status", "wait", "validate", "draft-list", "draft-get"],
+  autonomy: ["status"],
+  loop: ["list", "status"],
+  skill: ["list", "inspect"],
+  fleet: ["health", "profile get", "profile list"],
+  project: ["trust status"],
+};
+
+/** Subcommands that spend provider quota rather than mutating local state. */
+const COST_SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = {
+  session: ["create", "send", "resume"],
+  goal: ["start", "run", "send"],
+  workflow: ["run", "draft-launch"],
+  autonomy: ["on", "start", "ask", "more", "ask-for-work", "backup"],
+  loop: ["start"],
+};
+
 /** Read-only inventory used by the black-box audit and CI coverage checks. */
 export const CLI_AUDIT_MANIFEST: readonly CliAuditCase[] = COMMAND_SPECS.flatMap((spec) => {
   const aliases = "aliases" in spec ? spec.aliases : [];
@@ -82,22 +123,12 @@ function commandRisk(command: CliCommandName): CliAuditCase["risk"] {
 }
 
 function subcommandRisk(command: CliCommandName, subcommand: string): CliAuditCase["risk"] {
-  if (command === "mcp") return /^(install|remove)(?: |$)/.test(subcommand) ? "destructive" : "safe";
-  if (command === "budget") return subcommand === "upsert" || subcommand === "linked-hold quarantine" ? "destructive" : "safe";
-  if (command === "ledger") return subcommand === "repair-tail" ? "destructive" : "safe";
-  if (command === "collaboration" && (subcommand === "ack" || subcommand === "acknowledge")) return "destructive";
-  if (command === "approval" && subcommand === "resolve") return "destructive";
-  if (command === "candidate" && (subcommand === "integrate" || subcommand === "reject")) return "destructive";
-  if (command === "project" || command === "fleet") return "destructive";
-  // reap kills resident daemons; use/release rewrite the configured foreground
-  // lead. Both were unreachable while the catalog was hand-maintained.
-  if (command === "daemon") return ["serve", "start", "reap"].includes(subcommand) ? "destructive" : "safe";
-  if (command === "lead") return subcommand === "status" ? "safe" : "destructive";
-  if (["exec", "launch", "council"].includes(command)) return "cost";
-  if (["session", "goal", "workflow"].includes(command) && ["create", "send", "resume", "run", "start"].includes(subcommand)) return "cost";
-  if (command === "autonomy" && ["on", "start"].includes(subcommand)) return "cost";
-  if (command === "orchestrate") return "cost";
-  return "safe";
+  if ((READ_ONLY_SUBCOMMANDS[command] ?? []).includes(subcommand)) return "safe";
+  if ((COST_SUBCOMMANDS[command] ?? []).includes(subcommand)) return "cost";
+  if (["exec", "launch", "council", "orchestrate"].includes(command)) return "cost";
+  // Conservative fallback. Overstating a read as destructive is a review
+  // annoyance; understating a mutation is the defect this replaced.
+  return "destructive";
 }
 
 export function auditManifestCommands() {
