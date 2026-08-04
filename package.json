@@ -66,6 +66,7 @@
     "check:docs": "bun scripts/docs-check.ts",
     "check:daemons": "bun scripts/daemon-hygiene.ts",
     "check:product": "bun scripts/product-gate.ts",
+    "check:cli-surface": "bun scripts/cli-surface-sweep.ts",
     "smoke:ttfv": "bun scripts/ttfv-smoke.ts",
     "smoke:ttfv:live": "HEADLESS_TTFV_LIVE=1 bun scripts/ttfv-smoke.ts",
     "validate:cli-panel": "bun scripts/cli-panel-validate.ts",
