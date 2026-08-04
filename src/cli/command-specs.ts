@@ -139,7 +139,7 @@ export const COMMAND_SPECS = [
   {
     name: "mcp",
     valueFlags: ["--cwd"],
-    help: "mcp <serve|install|remove|status> [codex|grok|claude|opencode] [--cwd dir]",
+    help: "mcp <serve [host]|install <host>|remove <host>|status [host]> [--cwd dir]   Install/remove require an explicit codex, grok, claude, or opencode host.",
   },
   {
     name: "launch",

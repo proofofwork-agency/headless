@@ -3,9 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { runInitCommand } from "../src/cli/commands/lifecycle";
-import { opencodeGlobalConfigPath, runMcpInstall } from "../src/cli/commands/mcp";
+import { opencodeGlobalConfigPath, runMcpCommand, runMcpInstall } from "../src/cli/commands/mcp";
 
 describe("MCP host installation", () => {
+  test("requires an explicit host before install or remove can mutate global configuration", async () => {
+    await expect(runMcpCommand(["mcp", "install", "--cwd", "/fixture/project"])).rejects.toThrow("MCP host is required for install");
+    await expect(runMcpCommand(["mcp", "remove", "--cwd", "/fixture/project"])).rejects.toThrow("MCP host is required for remove");
+  });
+
   test("installs Codex, Claude Code, and Grok with each host's non-interactive CLI", async () => {
     const checkout = "/fixture/project";
     const cases = [
