@@ -233,6 +233,8 @@ export type BrokerLinkedOperation = z.infer<typeof BrokerLinkedOperationSchema>;
 
 export type ProviderBrokerOptions = {
   credentials?: Record<string, string | undefined>;
+  /** Environment used for broker policy flags; defaults to the process environment. */
+  env?: Readonly<NodeJS.ProcessEnv>;
   upstreams?: Record<string, string | undefined>;
   fetch?: typeof fetch;
   maxLogEntries?: number;
@@ -296,7 +298,7 @@ export class ProviderBroker {
       this.linkedOperations.set(parsed.operationId, parsed);
     }
     this.unixSocketPath = options.unixSocketPath ?? null;
-    this.allowLoopbackTcp = resolveAllowLoopbackTcp(options.allowLoopbackTcp);
+    this.allowLoopbackTcp = resolveAllowLoopbackTcp(options.allowLoopbackTcp, options.env ?? process.env);
   }
 
   /**
@@ -1617,13 +1619,16 @@ function messageOf(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function resolveAllowLoopbackTcp(explicit?: boolean): boolean {
+function resolveAllowLoopbackTcp(explicit: boolean | undefined, sourceEnv: Readonly<NodeJS.ProcessEnv>): boolean {
   if (explicit === true) return true;
   if (explicit === false) return false;
-  const env = process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP?.trim().toLowerCase();
+  const env = sourceEnv.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP?.trim().toLowerCase();
   // Explicit env opt-out honored on all platforms (operators who accept AF_UNIX-only breakage).
   if (env === "0" || env === "false" || env === "no" || env === "off") return false;
   if (env === "1" || env === "true" || env === "yes" || env === "on") return true;
+  if (env) {
+    throw new TypeError("HEADLESS_BROKER_ALLOW_LOOPBACK_TCP must be one of: 0, 1, false, true, no, yes, off, on.");
+  }
   // Default to a real loopback owner on every platform. Required-contained Linux
   // workers still use the AF_UNIX relay, but host-side and explicit unsafe runs
   // consume baseUrl directly and must never receive the synthetic unowned port.

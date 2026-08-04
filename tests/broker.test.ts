@@ -266,6 +266,23 @@ describe("provider broker", () => {
     }
   });
 
+  test("reads loopback policy from the supplied environment instead of ambient process state", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-env-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const broker = new ProviderBroker({
+      credentials: { OPENAI_API_KEY: "parent-key" },
+      env: { HEADLESS_BROKER_ALLOW_LOOPBACK_TCP: "0" },
+      unixSocketPath: join(root, "broker.sock"),
+    });
+    expect(broker.allowLoopbackTcp).toBe(false);
+  });
+
+  test("rejects an invalid loopback policy instead of silently enabling TCP", () => {
+    expect(() => new ProviderBroker({
+      env: { HEADLESS_BROKER_ALLOW_LOOPBACK_TCP: "flase" },
+    })).toThrow("HEADLESS_BROKER_ALLOW_LOOPBACK_TCP must be one of");
+  });
+
   test("without unixSocketPath, loopback TCP behavior is unchanged", async () => {
     const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ tcp: true }) });
     closers.push(() => upstream.stop(true));

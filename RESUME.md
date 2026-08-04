@@ -7,7 +7,7 @@ Session paused on low credits. Everything below is committed and pushed. **Nothi
 | Branch | PR | Head | State |
 |---|---|---|---|
 | `main` | — | `51ce83f` | PR #48 merged (you authorised this) |
-| `security/hardening-wip` | [#49](https://github.com/proofofwork-agency/headless/pull/49) | inspect current head | Open. Local full gate is green; confirm the new Ubuntu CI rerun before merge |
+| `security/hardening-wip` | [#49](https://github.com/proofofwork-agency/headless/pull/49) | inspect current head | Open. Local full gate and the Ubuntu/macOS/website CI jobs are green |
 | `fix/cli-usage-error-classification` | [#50](https://github.com/proofofwork-agency/headless/pull/50) | `0d53d99` | Open. Verified green |
 
 A git worktree for PR #50 lives at
@@ -17,7 +17,7 @@ It is a scratchpad path and will not survive indefinitely — the branch is push
 
 ## FIRST THING TO DO ON RESUME
 
-Inspect PR #49's current Ubuntu release-gate result. Its first Linux run exposed nine regressions from making the broker AF_UNIX-only by default: explicit unsafe broker runs were blocked, and host-side tests received the synthetic relay URL. The follow-up restores the existing dual-edge default while retaining explicit AF_UNIX-only mode and the fail-closed unserved-endpoint guard. Local `bun run check` is green; Linux CI is the remaining platform proof.
+Re-read current ContextRelay state and inspect the open PR heads before assigning work. PR #49's first Linux run exposed nine regressions from making the broker AF_UNIX-only by default; the follow-up restored the existing dual-edge default while retaining explicit AF_UNIX-only mode and the fail-closed unserved-endpoint guard. The replacement CI run is now green on Ubuntu, macOS, and the website job. Do not merge either open PR without the human's authorization.
 
 ## What was fixed
 
@@ -27,7 +27,7 @@ Inspect PR #49's current Ubuntu release-gate result. Its first Linux run exposed
 
 Plus: per-command unknown-flag rejection, `--json` scoped to commands that actually emit JSON, negative numeric flag values, `experimental`-qualified usage strings, `events` conflict surviving `--json`, `launch` requiring its backend, `tui` refusing without a TTY instead of dumping an Ink/React stack trace, and a bad `--cwd` naming itself instead of leaking `ENOENT … lstat`.
 
-**PR #49 — hardening.** Six blockers found reviewing the uncommitted work that was sitting in the tree when the session started (ledger keyring reaching workers, pre-bind `rmSync` destroying bind exclusivity, umask corruption across concurrent binds, an un-migrated listen-then-chmod site, a leaked Bun listener, an unguarded `getuid`). Then two more found reviewing *that*: the ledger key floor blocking verification of existing history, and the broker handing workers a lease token pointed at a port nothing serves.
+**PR #49 — hardening.** Six blockers found reviewing the uncommitted work that was sitting in the tree when the session started (ledger keyring reaching workers, pre-bind `rmSync` destroying bind exclusivity, umask corruption across concurrent binds, an un-migrated listen-then-chmod site, a leaked Bun listener, an unguarded `getuid`). Then two more found reviewing *that*: the ledger key floor blocking verification of existing history, and the broker handing workers a lease token pointed at a port nothing serves. The final independent pass also made the broker policy use the daemon's injected environment and reject misspelled `HEADLESS_BROKER_ALLOW_LOOPBACK_TCP` values instead of silently enabling TCP.
 
 ## Known-open, deliberately not fixed
 
@@ -59,6 +59,6 @@ Two cautions if you reuse it. On macOS `mkdtemp` returns `/var/...` while the CL
 ## Honest status
 
 - PR #50 is verified: 961 tests, typecheck, lint, format, and the 872-invocation sweep.
-- PR #49 passes the complete local gate on macOS: 933 pass, 11 documented platform skips, zero failures; Product Gate P reports 9 pass, 1 manual, 0 fail. The next Ubuntu CI result remains required before merge.
+- PR #49 passes the complete local gate on macOS: 935 pass, 11 documented platform skips, zero failures; Product Gate P reports 9 pass, 1 manual, 0 fail. GitHub CI is green on Ubuntu, macOS, and the website build.
 - The Linux relay itself cannot execute on this macOS machine. The prior Ubuntu run proved that a Unix-only *default* broke stable unsafe and extension paths; the corrected default gives every host-side lease URL a real listener while the explicit opt-out remains covered by the fail-closed reachability tests.
-- Codex reviewed PR #50 against its own spec and found two blockers, both fixed. It has not re-reviewed since, and has not reviewed #49's late ledger/broker work at all.
+- Codex reviewed PR #50 against its own spec and found two blockers, both fixed. Codex then independently reviewed PR #49's ledger, socket/path, broker-endpoint, and worker-environment changes; no remaining merge blocker was found. Two same-user socket cleanup races remain a reliability follow-up, outside the documented hostile-user threat boundary.

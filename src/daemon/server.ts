@@ -1089,6 +1089,7 @@ export class HeadlessDaemon {
     );
     this.broker = new ProviderBroker({
       credentials: this.stateOptions?.env ?? process.env,
+      env: this.stateOptions?.env ?? process.env,
       unixSocketPath: brokerSocketPath,
       // Leave undefined so ProviderBroker applies the safe dual-edge default and
       // honors HEADLESS_BROKER_ALLOW_LOOPBACK_TCP on every platform.
