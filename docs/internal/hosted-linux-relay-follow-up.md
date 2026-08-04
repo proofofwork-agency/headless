@@ -54,7 +54,19 @@ GITHUB_ACTIONS=true (override unset)                      →  1 skip
 
 **Do not use emulation as evidence for the seccomp architecture check.** `rejects x32 syscall numbers before native seccomp dispatch` gates on `process.arch === "x64"`, so an arm64 host skips it. Running it under `--platform linux/amd64` on arm64 hardware **fails** (`Expected: true, Received: false`, containment-v2.test.ts:570) — and that is an emulation artifact, not a defect: the same test passes on real x86-64 in hosted Ubuntu CI (`(pass) … 108.24ms`, main @ 93c7928). Emulated x86-64 does not faithfully reproduce x32 syscall tagging, so a pass there would have been worthless and the fail is not a finding.
 
-**What remains genuinely unexecuted**, and must not be papered over: the late-socket case and the four run-tool cooperation cases are outcome-level and architecture-neutral, but they traverse the architecture-specific `seccompDefinition` — the AArch64 table on the host above, the x86-64 + x32 table on hosted Ubuntu. So the honest statement is: *complete late-socket and run-tool cooperation are measured off-CI on Linux arm64; the x86-64 native and x32 filter primitives are measured on hosted Ubuntu; the full integrated late-socket and run-tool cooperation cases remain unexecuted on x86-64 Linux.* Closing that needs real x86-64 Linux hardware, not a runner and not emulation.
+**The late-socket case now also runs on x86-64 in CI.** `.github/workflows/privileged-containment.yml` runs `tests/containment-v2.test.ts` inside a privileged `oven/bun:1.3.14` container on `ubuntu-latest`, with `CI=true GITHUB_ACTIONS=true HEADLESS_PRIVILEGED_CONTAINMENT_CI=1` so the hosted predicate is armed and the override is what opens the gate. Measured on PR #57 @ 93e48fb:
+
+```
+HEADLESS_TEST_ARCH=x86_64
+bubblewrap 0.11.0
+(pass) denies a host Unix socket created after launch while broker and run tools remain reachable [192.68ms]
+(pass) rejects x32 syscall numbers before native seccomp dispatch [100.51ms]
+16 pass  0 fail
+```
+
+The job refuses to pass vacuously: it asserts the architecture sentinel and both case names anchored to `(pass)`, so a skipped suite fails it rather than reporting the same `0 fail` a passing one does. It uploads the log as an artifact so the claim can be checked rather than trusted. This makes `linuxRelayLifecycleTest` covered on hosted x86-64, not merely declared.
+
+**What remains genuinely unexecuted**, and must not be papered over: the four `tests/daemon-run-tool.test.ts` cooperation cases. They are measured on macOS CI and, per the evidence above, off-CI on Linux arm64 — but not on x86-64 Linux, because the hosted-runner incompatibility at the top of this file is reproduced and unresolved, and privilege is not the cause. Those four traverse the x86-64 + x32 `seccompDefinition` only on a machine nobody has run them on. Closing that needs real, non-hosted x86-64 Linux; it is not an absence of effort and must not be described as covered.
 
 Two issues need a hosted-environment reproducer before the guard can be removed:
 
