@@ -187,10 +187,27 @@ async function tryClient(
       throw new HeadlessError("EXTENSION_CONFIG_MISMATCH", "The running Headless daemon uses a different extension configuration. Stop it before changing trusted extension modules.");
     }
     if (options.enableExperimentalSessions && ping.experimentalSessionsEnabled !== true) {
-      throw new HeadlessError(
-        "CONFLICT",
-        "The running daemon does not enable experimental persistent sessions. Stop it before using the experimental session namespace.",
-      );
+      // Availability used to depend on which command happened to start the
+      // daemon first, and the remedy was to stop a healthy one — turning a
+      // `session status` read into process mutation. Invoking the session
+      // namespace is the consent signal; activate over the already
+      // owner-authenticated socket instead, without disturbing running jobs.
+      try {
+        await client.call("capability.activate", {}, timeoutMs);
+      } catch (error) {
+        throw new HeadlessError(
+          "CONFLICT",
+          "The running daemon cannot enable experimental persistent sessions. It is likely an older build; finish its work, then stop it and retry.",
+          { cause: error },
+        );
+      }
+      const reping = await client.call<{ experimentalSessionsEnabled?: boolean }>("ping", {}, timeoutMs);
+      if (reping.experimentalSessionsEnabled !== true) {
+        throw new HeadlessError(
+          "CONFLICT",
+          "The running daemon reported experimental persistent sessions as still disabled after activation.",
+        );
+      }
     }
     return client;
   } catch (error) {

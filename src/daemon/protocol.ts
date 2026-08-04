@@ -22,6 +22,7 @@ export const MAX_DAEMON_MESSAGE_BYTES = 4_000_000;
 
 export const DaemonMethodSchema = z.enum([
   "ping",
+  "capability.activate",
   "lead.use",
   "lead.status",
   "lead.release",

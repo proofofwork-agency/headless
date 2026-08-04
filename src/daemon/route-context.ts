@@ -26,7 +26,9 @@ type GoalRecord = NonNullable<ReturnType<GoalStore["get"]>>;
 export type DaemonRouteContext = {
   projectId: string;
   projectRoot: string;
-  experimentalSessionsEnabled: boolean;
+  /** Read live: the capability can be activated after handlers are built. */
+  experimentalSessionsEnabled: () => boolean;
+  activateExperimentalSessions: (credential: AuthenticatedCredential) => unknown;
   stateOptions?: ProjectStateOptions;
   extensionInfo: () => {
     digest: string;
