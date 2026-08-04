@@ -78,8 +78,10 @@ const GATES: GateCoverage[] = [
       + "carry is NOT uncovered: the standalone `denies a host Unix socket created after launch` case runs "
       + "on the ordinary ubuntu leg and again in the privileged workflow, asserts the socket was visible "
       + "before trusting its denial, and is mutation-proved against removal of the seccomp filter. Note "
-      + "that no check in this repository is ENFORCED — main has no branch protection, rules or rulesets — "
-      + "so every leg named here is advisory.",
+      + "that the ordinary ubuntu leg IS an enforced required check on main (branch protection added "
+      + "2026-08-04: website build, ubuntu-latest and macos-latest release gates, strict up-to-date), while "
+      + "the privileged job is deliberately NOT required because it is path-filtered and a never-reporting "
+      + "required context would block unrelated pull requests.",
     cases: [
       {
         file: "tests/containment-v2.test.ts",
