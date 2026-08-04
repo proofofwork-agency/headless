@@ -62,21 +62,24 @@ export function parseDaemonProcessTable(output: string, uid: number, selfPid: nu
     const command = remainder.slice(secondBreak + 1).trim();
     if (!Number.isSafeInteger(pid) || pid <= 1 || pid === selfPid) continue;
     if (!Number.isSafeInteger(owner) || owner !== uid) continue;
-    const argv = command.split(/\s+/).filter(Boolean);
-    const serve = argv.findIndex((value, index) => value === "daemon" && argv[index + 1] === "serve");
-    // Anchored to argv[1], not merely "somewhere after an entrypoint". Every
-    // daemon in this tree is spawned as `<runtime> <entrypoint> daemon serve`,
-    // so the subcommand is always the third token. Accepting it anywhere let
-    // any process whose command line CONTAINS that text be classified as a
-    // daemon — a shell echoing the string, or a message quoting it — and
-    // `daemon reap` SIGTERMs what this returns, so a false positive kills an
-    // unrelated process. Observed: a stray reported with backticks and a
-    // newline inside its "project root".
-    if (serve !== 2) continue;
-    const entrypoint = argv[serve - 1];
-    if (!entrypoint || !DAEMON_ENTRYPOINTS.has(basename(entrypoint))) continue;
-    const cwdFlag = argv.indexOf("--cwd", serve);
-    const projectRoot = cwdFlag >= 0 ? argv[cwdFlag + 1] ?? null : null;
+    // Matched as a whole line rather than split on whitespace, because a real
+    // daemon installed under a path containing spaces — "/Users/me/My
+    // Projects/..." is ordinary on macOS — was silently MISSED by tokenising,
+    // so `check:daemons` reported clean while a stray ran.
+    //
+    // The anti-quoting anchor is preserved: the entrypoint must be the token
+    // immediately after the runtime AND must look like a path (leading / or
+    // ./) with no flag-like " -" inside it. That is what still rejects
+    // `/bin/sh -c echo .../cli.ts daemon serve`, where the would-be entrypoint
+    // is preceded by "-c echo".
+    const match = /^(\S+) ((?:\/|\.\/)(?:(?! -).)*?\/cli\.(?:ts|js)) daemon serve(?:\s+(.*))?$/.exec(command);
+    if (!match) continue;
+    const entrypoint = match[2]!;
+    if (!DAEMON_ENTRYPOINTS.has(basename(entrypoint))) continue;
+    // --cwd values can contain spaces too, so take everything up to the next
+    // flag rather than the next space.
+    const cwdMatch = /--cwd (.+?)(?= --|$)/.exec(match[3] ?? "");
+    const projectRoot = cwdMatch ? cwdMatch[1]!.trim() : null;
     entries.push({ pid, projectRoot, entrypoint });
   }
   return entries;

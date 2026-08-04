@@ -91,12 +91,26 @@ function subcommandRisk(command: CliCommandName, subcommand: string): CliAuditCa
   if (command === "project" || command === "fleet") return "destructive";
   // reap kills resident daemons; use/release rewrite the configured foreground
   // lead. Both were unreachable while the catalog was hand-maintained.
-  if (command === "daemon") return ["serve", "start", "reap"].includes(subcommand) ? "destructive" : "safe";
+  // `stop` tears down a running control plane, so it belongs here with the ones
+  // that start or kill daemons. It was reaching the "safe" fallback because no
+  // arm named it.
+  if (command === "daemon") return ["serve", "start", "stop", "reap"].includes(subcommand) ? "destructive" : "safe";
   if (command === "lead") return subcommand === "status" ? "safe" : "destructive";
   if (["exec", "launch", "council"].includes(command)) return "cost";
   if (["session", "goal", "workflow"].includes(command) && ["create", "send", "resume", "run", "start"].includes(subcommand)) return "cost";
   if (command === "autonomy" && ["on", "start"].includes(subcommand)) return "cost";
   if (command === "orchestrate") return "cost";
+  // Cancels, pauses and resumes MUTATE durable state — they stop running work,
+  // release holds, and change lifecycle. They were reaching the "safe" fallback
+  // below simply because no arm named them, which understates the row for any
+  // future consumer of this taxonomy. `daemon stop` likewise tears down a
+  // running control plane. Nothing executes on `risk` today, so this is
+  // metadata correctness rather than an authorization change.
+  if (["cancel", "pause", "resume"].includes(subcommand)) return "destructive";
+  if (command === "skill" && ["import", "enable", "revoke"].includes(subcommand)) return "destructive";
+  // Deliberately last, and deliberately not a silent default: anything reaching
+  // here is a read. If a new mutating subcommand is added it must be named
+  // above rather than inheriting "safe" by omission.
   return "safe";
 }
 

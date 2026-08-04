@@ -46,6 +46,23 @@ describe("daemon process inventory", () => {
     expect(entries[2]!.projectRoot).toBeNull();
   });
 
+  test("finds a daemon whose paths contain spaces", () => {
+    // Tokenising on whitespace MISSED these entirely, so `check:daemons` could
+    // report clean while a stray ran — a false negative in the direction that
+    // matters, since the whole point of the inventory is finding strays.
+    // "/Users/me/My Projects/..." is an ordinary macOS layout.
+    const table = [
+      "  4242   501 /usr/bin/bun /Users/me/My Projects/headless/src/cli.ts daemon serve --cwd /tmp/alpha",
+      "  4243   501 /usr/bin/bun /opt/h/src/cli.ts daemon serve --cwd /tmp/My Project --idle-timeout-ms 5",
+      "",
+    ].join("\n");
+    const entries = parseDaemonProcessTable(table, 501, 9_999);
+    expect(entries.map((entry) => entry.pid)).toEqual([4242, 4243]);
+    expect(entries[0]!.projectRoot).toBe("/tmp/alpha");
+    // A --cwd value with a space, followed by another flag.
+    expect(entries[1]!.projectRoot).toBe("/tmp/My Project");
+  });
+
   test("ignores a process that merely quotes a daemon command line", () => {
     // `daemon reap` SIGTERMs whatever this returns, so matching `daemon serve`
     // anywhere in an argv meant a shell echoing the string — or a message
