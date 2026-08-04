@@ -1,4 +1,5 @@
 import { COMMAND_SPECS, VALUE_FLAGS, renderCommandUsage, resolveCommandSpec, type ResolvedCliCommandSpec } from "./command-specs";
+import { POSITIONAL_GRAMMAR } from "./positional-grammar";
 
 /**
  * Operator input, never a runtime fault. It lives here rather than in shared.ts
@@ -155,21 +156,85 @@ export function validateCommandFlags(argv: string[]) {
 }
 
 /**
- * Reject a stray positional on a command whose grammar is flags only.
+ * Reject positionals the resolved command's grammar does not allow.
  *
- * `headless init not-a-subcommand` used to initialise successfully and discard
- * the token — the same silent-ignore defect as unknown flags, and just as
- * likely to hide a typo for a subcommand the operator thought existed. Only
- * commands that opt in via `positionals: "none"` are checked, so commands
- * taking prompts, ids, hosts or unbounded trailing text are untouched.
+ * Extra tokens were discarded in silence — `init wat` initialised, `daemon
+ * status wat` ran, `lead use codex wat` succeeded — the same defect class as
+ * ignored unknown flags, and just as likely to hide a typo for a subcommand the
+ * operator believed existed.
+ *
+ * Deliberately separate from validateCommandFlags, whose contract is flag-only:
+ * folding these together would make `exec - prompt` newly fail, and a test pins
+ * that bare `-` is an operand rather than a flag.
+ *
+ * An UNRECOGNISED action is left alone — the handler's own usage error is more
+ * specific than anything this layer could say. Only surplus, missing, or
+ * doubly-sourced values are rejected here.
  */
 export function validateCommandPositionals(argv: string[]) {
   const spec = resolveCommandSpec(argv[0]);
-  if (!spec || !("positionals" in spec) || spec.positionals !== "none") return;
-  const { positionalEntries } = parseCommandArgv(argv);
-  const stray = positionalEntries[0];
-  if (!stray) return;
-  throw new CliUsageError(
-    `${spec.name} takes no subcommand or argument, but received "${stray.value}". ${renderCommandUsage(spec.name)}`,
-  );
+  if (!spec) return;
+  const grammar = POSITIONAL_GRAMMAR[spec.name];
+  if (!grammar) return;
+  const { positionalEntries, flagsBeforeSeparator } = parseCommandArgv(argv);
+  const hasSeparatorTail = argv.indexOf("--") !== -1;
+  const reject = (detail: string) => {
+    throw new CliUsageError(`${detail} ${renderCommandUsage(spec.name)}`);
+  };
+  const flagPresent = (flags: readonly string[] | undefined) =>
+    flags !== undefined && flags.some((flag) => flagsBeforeSeparator.includes(flag));
+
+  let node = grammar;
+  let cursor = 0;
+  // Walk nested action selectors first: `project trust grant`, `receipt diff`.
+  while (node.kind === "actions") {
+    const token = positionalEntries[cursor]?.value;
+    if (token === undefined) {
+      if (!node.default) reject(`${spec.name} requires a subcommand.`);
+      node = node.actions[node.default!]!;
+      break;
+    }
+    const next = node.actions[token];
+    // An unrecognised token is reported by the handler's own usage error, which
+    // is more specific than anything this layer could say. Only EXTRA tokens
+    // are this validator's business.
+    if (!next) return;
+    cursor += 1;
+    node = next;
+  }
+  if (node.kind !== "leaf") return;
+
+  for (const field of node.fields ?? []) {
+    if (flagPresent(field.unlessAnyFlag)) {
+      // The flag owns this value, so a positional here is a second source.
+      if (positionalEntries[cursor]) {
+        reject(`${spec.name} takes ${field.name} from ${field.unlessAnyFlag!.join(" or ")}, so the extra argument is ambiguous.`);
+      }
+      continue;
+    }
+    if (!positionalEntries[cursor]) {
+      // A fixed field can never be satisfied from the opaque `--` tail.
+      if (field.required) reject(`${spec.name} requires ${field.name}.`);
+      continue;
+    }
+    cursor += 1;
+  }
+
+  const text = node.text;
+  if (text) {
+    if (flagPresent(text.unlessAnyFlag)) {
+      if (positionalEntries[cursor]) {
+        reject(`${spec.name} takes ${text.name} from ${text.unlessAnyFlag!.join(" or ")}, so the extra argument is ambiguous.`);
+      }
+    } else if (positionalEntries[cursor]) {
+      // One quoted token before `--`; the tail may hold any number.
+      cursor += 1;
+      if (hasSeparatorTail) reject(`${spec.name} received ${text.name} both before and after --.`);
+    }
+  }
+
+  const leftover = positionalEntries[cursor];
+  if (leftover) {
+    reject(`${spec.name} received an unexpected extra argument "${leftover.value}".`);
+  }
 }

@@ -1,72 +1,130 @@
 import { describe, expect, test } from "bun:test";
 import { COMMAND_SPECS, validateCommandPositionals } from "../src/cli";
+import { COMMANDS_MISSING_GRAMMAR, POSITIONAL_GRAMMAR } from "../src/cli/positional-grammar";
 
 /**
- * `headless init not-a-subcommand` used to initialise successfully and discard
- * the stray token — the same silent-ignore defect as unknown flags, and just as
- * likely to hide a typo for a subcommand the operator believed existed.
- *
- * Rejection is opt-in per command rather than a blanket arity rule, because
- * most commands legitimately take positionals and several take unbounded
- * trailing text. These tests pin both halves: the flag-only commands reject,
- * and everything that carries a prompt, id, host or operand is untouched.
+ * Extra positionals used to be discarded in silence — `init wat` initialised,
+ * `daemon status wat` ran, `lead use codex wat` succeeded, `receipt verify
+ * --file x runId` dropped one of two conflicting sources. Same defect class as
+ * ignored unknown flags, and just as likely to hide a typo for a subcommand the
+ * operator believed existed.
  */
-describe("commands whose grammar is flags only reject a stray positional", () => {
-  const flagOnly = ["init", "setup", "status", "doctor", "verify", "tui"];
+const accepts = (argv: string[]) => expect(() => validateCommandPositionals(argv)).not.toThrow();
+const rejects = (argv: string[], detail?: string) =>
+  expect(() => validateCommandPositionals(argv)).toThrow(detail ?? "");
 
-  for (const name of flagOnly) {
-    test(`${name} names the stray token instead of discarding it`, () => {
-      expect(() => validateCommandPositionals([name, "not-a-subcommand"]))
-        .toThrow(`${name} takes no subcommand or argument, but received "not-a-subcommand".`);
-      // The refusal carries the command's own usage, so the operator can see
-      // what it does accept.
-      expect(() => validateCommandPositionals([name, "junk"])).toThrow(`Usage: headless ${name}`);
-    });
-
-    test(`${name} still accepts its flags, including a value that is not a flag`, () => {
-      expect(() => validateCommandPositionals([name, "--cwd", "/repo"])).not.toThrow();
-      expect(() => validateCommandPositionals([name])).not.toThrow();
-    });
-  }
-
-  test("a value flag's value is never mistaken for a positional", () => {
-    // The decisive case: --lead's value is a bare word, and consuming the flag
-    // without its value would read "codex" as a stray subcommand.
-    expect(() => validateCommandPositionals(["init", "--lead", "codex", "--cwd", "/repo"])).not.toThrow();
-    expect(() => validateCommandPositionals(["setup", "--lead", "opencode"])).not.toThrow();
+describe("every command declares a positional grammar", () => {
+  test("no command is left unvalidated", () => {
+    expect(COMMANDS_MISSING_GRAMMAR).toEqual([]);
   });
 
-  test("everything after the separator stays opaque", () => {
-    expect(() => validateCommandPositionals(["status", "--cwd", "/repo", "--", "anything", "at", "all"])).not.toThrow();
+  test("aliases resolve to the canonical grammar", () => {
+    // run/logs/skills/release-gate are aliases; they must not need own entries.
+    for (const alias of ["run", "logs", "skills", "release-gate"]) {
+      expect(alias in POSITIONAL_GRAMMAR).toBe(false);
+    }
+    accepts(["run", "a prompt"]);
+    accepts(["logs"]);
+    rejects(["logs", "EXTRA"]);
+  });
+
+  test("the grammar covers exactly the declared command set", () => {
+    expect(Object.keys(POSITIONAL_GRAMMAR).sort()).toEqual(COMMAND_SPECS.map((spec) => spec.name).sort());
   });
 });
 
-describe("commands that legitimately take positionals are untouched", () => {
-  test("prompts, ids, hosts and operands still pass", () => {
-    for (const argv of [
-      ["exec", "explain this repository"],
-      ["exec", "--backend", "codex", "a prompt"],
-      ["council", "should we ship?"],
-      ["receipt", "show", "run-1"],
-      ["mcp", "install", "codex"],
-      ["lead", "use", "codex"],
-      ["daemon", "stop"],
-      ["project", "trust", "grant"],
-      ["skill", "inspect", "some-skill"],
-      ["launch", "opencode"],
-      ["approval", "resolve", "--approval-id", "a1", "--decision", "approved", "Gates passed."],
-    ]) {
-      expect(() => validateCommandPositionals(argv)).not.toThrow();
+describe("surplus positionals are rejected rather than discarded", () => {
+  test("flag-only commands take nothing", () => {
+    for (const name of ["init", "setup", "status", "doctor", "verify", "tui", "events", "orchestrate", "gate"]) {
+      rejects([name, "EXTRA"], "unexpected extra argument");
+      accepts([name]);
+      accepts([name, "--cwd", "/repo"]);
     }
   });
 
-  test("only the opted-in commands declare the restriction", () => {
-    // Guards against someone marking a prompt-bearing command by mistake: a
-    // command with unbounded trailing text must never carry positionals:"none".
-    const declared = COMMAND_SPECS
-      .filter((spec) => "positionals" in spec && spec.positionals === "none")
-      .map((spec) => spec.name)
-      .sort();
-    expect(declared).toEqual(["doctor", "init", "setup", "status", "tui", "verify"]);
+  test("action commands reject a token after the action", () => {
+    rejects(["daemon", "status", "EXTRA"], "unexpected extra argument");
+    rejects(["lead", "use", "codex", "EXTRA"], "unexpected extra argument");
+    rejects(["receipt", "list", "EXTRA"], "unexpected extra argument");
+    rejects(["budget", "list", "EXTRA"], "unexpected extra argument");
+    rejects(["fleet", "profile", "list", "EXTRA"], "unexpected extra argument");
+    rejects(["project", "trust", "grant", "EXTRA"], "unexpected extra argument");
+    rejects(["receipt", "diff", "a", "b", "EXTRA"], "unexpected extra argument");
+    rejects(["skill", "use", "some-skill", "EXTRA"], "unexpected extra argument");
+  });
+
+  test("legal invocations still pass", () => {
+    for (const argv of [
+      ["daemon"], ["daemon", "stop"], ["lead"], ["lead", "use", "codex"],
+      ["project", "trust"], ["project", "trust", "grant"],
+      ["fleet"], ["fleet", "profile", "create"],
+      ["receipt", "diff", "a", "b"], ["receipt", "show", "run-1"],
+      ["budget", "linked-hold", "inspect"], ["skill", "use", "some-skill"],
+      ["mcp"], ["mcp", "status"], ["mcp", "install", "codex"],
+      ["ledger", "verify"], ["exec", "a prompt"], ["council"], ["council", "a question"],
+    ]) accepts(argv);
+  });
+});
+
+describe("required fields are demanded, and never taken from the opaque tail", () => {
+  test("a missing required field is named", () => {
+    rejects(["mcp", "install"], "requires host");
+    rejects(["receipt", "show"], "requires runId");
+    rejects(["lead", "use"], "requires host");
+    rejects(["launch"], "requires backend");
+    rejects(["receipt", "diff", "only-one"], "requires runIdB");
+  });
+
+  test("a fixed field cannot be satisfied from after the separator", () => {
+    // `--` is opaque by contract, so these stay missing rather than silently
+    // consuming the tail as the value.
+    rejects(["mcp", "install", "--", "codex"], "requires host");
+    rejects(["receipt", "show", "--", "id"], "requires runId");
+  });
+
+  test("a command with no default subcommand demands one", () => {
+    rejects(["ledger"], "requires a subcommand");
+    rejects(["receipt"], "requires a subcommand");
+  });
+});
+
+describe("a value supplied twice is rejected instead of silently dropped", () => {
+  test("a flag that owns the value closes the positional slot", () => {
+    rejects(["approval", "resolve", "--resolution", "done", "also done"], "ambiguous");
+    rejects(["receipt", "verify", "--file", "export.json", "run-1"], "ambiguous");
+    rejects(["loop", "start", "--file", "plan.json", "an objective"], "ambiguous");
+    rejects(["loop", "start", "--repair", "an objective"], "ambiguous");
+  });
+
+  test("either source alone is accepted", () => {
+    accepts(["approval", "resolve", "--resolution", "done"]);
+    accepts(["approval", "resolve", "done"]);
+    accepts(["receipt", "verify", "--file", "export.json"]);
+    accepts(["receipt", "verify", "run-1"]);
+    accepts(["loop", "start", "--file", "plan.json"]);
+    accepts(["loop", "start", "an objective"]);
+  });
+});
+
+describe("the separator contract is preserved", () => {
+  test("nothing after -- is inspected", () => {
+    accepts(["exec", "--", "--json", "-x", "many", "tokens"]);
+    accepts(["council", "--", "a", "long", "question"]);
+    accepts(["skill", "use", "some-skill", "--", "any", "args"]);
+    // init has no consumer for a tail, but the separator contract makes it
+    // opaque; rejecting it would be a separate product decision.
+    accepts(["init", "--", "anything"]);
+  });
+
+  test("prompt text may not come from both sides", () => {
+    rejects(["exec", "before", "--", "after"], "both before and after --");
+    accepts(["exec", "just before"]);
+    accepts(["exec", "--", "just after"]);
+  });
+
+  test("an unrecognised action is left to the handler's own usage error", () => {
+    // More specific there than anything this layer could say.
+    accepts(["daemon", "not-a-real-action"]);
+    accepts(["receipt", "not-a-real-action"]);
   });
 });
