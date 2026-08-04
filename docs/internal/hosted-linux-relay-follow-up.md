@@ -15,7 +15,7 @@ The late-socket surface is now split, and the security property is covered by th
 - The four `tests/daemon-run-tool.test.ts` cooperation cases remain macOS-CI plus off-CI arm64 evidence. They are NOT integrated x86-64 evidence.
 - `HEADLESS_PRIVILEGED_CONTAINMENT_CI` remains a manual/self-hosted override and is deliberately UNSET in the privileged workflow — setting it would re-enable the flaky combined case. The workflow asserts that case appears as `(skip)`, which is only true when the hosted predicate actually reached the container.
 
-Coverage for the four cooperation cases: macOS CI, local dev, and a documented local command a maintainer can run against real bubblewrap. The same command is the only coverage the `tests/containment-v2.test.ts` late-socket case has anywhere, so it asserts all five cases by name:
+Coverage for the four cooperation cases: macOS CI, local dev, and a documented local command a maintainer can run against real bubblewrap. The same command is the only RELIABLE coverage for the COMBINED late-socket + broker/run-tool case on Linux — the standalone denial runs on the ordinary ubuntu leg and in the privileged job, so it is not what this command exists for, so it asserts all five cases by name:
 
 ```bash
 # Derives the platform from THIS host, refuses to run under emulation, and

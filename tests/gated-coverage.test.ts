@@ -216,8 +216,8 @@ function scanGates(file: string, source: string): FoundGate[] {
  * none of the evidence: bun prints it as a pass and counts zero assertions.
  * tests/backend-hardening.test.ts:186 returns when codex is absent, which is
  * every CI run, and no `test.skip` token exists there for the scan above to
- * find — so "the gate-count assertion are knowingly uncovered" counted neither exit
- * from that body and no assertion here could have caught it. Measured: with
+ * find, so the gate-count assertion did not account for either early exit from
+ * that body and no assertion here could have caught it. Measured: with
  * this scan removed, planting a fresh `if (…) return;` in a test body left
  * this file at 5 pass / 0 fail. Only a top-level `if (…) return;`
  * counts: one nested a level deeper is ordinary control flow, and the cleanup
