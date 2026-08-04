@@ -99,17 +99,12 @@ jobs:
             bun install --frozen-lockfile --ignore-scripts
             echo "HEADLESS_TEST_ARCH=$(uname -m)"
             bwrap --version
-            # HEADLESS_PRIVILEGED_CONTAINMENT_CI is deliberately NOT set. That
-            # override would additionally enable the COMBINED late-socket case,
-            # which also requires the run-tool relay to be reachable — and that
-            # leg is repeatedly intermittent on hosted x86-64. Every diagnosed
-            # failure reported unixError=ENOENT with toolCode=1: containment
-            # held, only availability broke. Raw sample counts and run IDs live
-            # in docs/internal/hosted-linux-relay-follow-up.md, deliberately not
-            # here, so a changing sample never rots this comment. Gating a security
-            # assertion behind a flaky availability check produces a red that
-            # people learn to re-run, which is how a real breach gets waved
-            # through. The pure denial case below runs without the override.
+            # HEADLESS_PRIVILEGED_CONTAINMENT_CI no longer gates anything: the
+            # combined late-socket case ran only when it was set, because its
+            # run-tool leg was intermittent on hosted x86-64. That intermittency
+            # was the relay discarding requests that arrived before its upstream
+            # connect resolved, which is fixed, so the case now runs everywhere
+            # and this job covers it too.
             CI=true GITHUB_ACTIONS=true NO_COLOR=1 bun test tests/containment-v2.test.ts
           ' 2>&1 | tee containment.log
 
@@ -132,13 +127,14 @@ jobs:
             || { echo "::error::pure late-socket denial case did not PASS — skipped or failed, so this job proved nothing"; exit 1; }
           grep -qE '^\(pass\).*rejects x32 syscall numbers before native seccomp dispatch' containment.log \
             || { echo "::error::x32 alternate-ABI case did not PASS on x86-64"; exit 1; }
-          # Prove the hosted predicate was ARMED. If GITHUB_ACTIONS failed to
-          # reach the container, the combined relay case would RUN instead of
-          # skipping — and it would usually pass, so pure+x32 staying green
-          # would hide the regression. Requiring the skip makes that impossible.
-          grep -qE '^\(skip\).*denies a host Unix socket created after launch while broker' containment.log \
-            || { echo "::error::combined relay case was not skipped — GITHUB_ACTIONS did not reach the container, so the hosted predicate was not armed"; exit 1; }
-          echo "pure late-socket denial and x32 cases executed and passed on x86-64"
+          # This used to require the combined case to SKIP, as proof that
+          # GITHUB_ACTIONS reached the container and armed the hosted predicate.
+          # That predicate is gone, so the skip is no longer available as a
+          # witness — and asserting it would now fail. Require the PASS instead,
+          # which is a strictly stronger statement about the same case.
+          grep -qE '^\(pass\).*denies a host Unix socket created after launch while broker and run tools remain reachable \[' containment.log \
+            || { echo "::error::combined late-socket case did not PASS — it is no longer gated, so a skip here means it did not run at all"; exit 1; }
+          echo "pure denial, combined late-socket, and x32 cases executed and passed on x86-64"
 
       - name: Upload containment log
         if: always()

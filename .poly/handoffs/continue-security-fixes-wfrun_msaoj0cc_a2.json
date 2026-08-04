@@ -1,0 +1,32 @@
+{
+  "workflowId": "wfrun_msaoj0cc_a2",
+  "name": "continue-security-fixes",
+  "from": "free-text-lead-grok",
+  "failedHops": [
+    "implement-fix-1",
+    "implement-fix-2"
+  ],
+  "done": [
+    "sec-broker-token-query",
+    "sec-broker-tcp-surface",
+    "sec-ledger-hmac-key-floor"
+  ],
+  "open": [
+    "sec-socket-chmod-race",
+    "sec-owner-only-no-uid"
+  ],
+  "openFiles": {
+    "sec-socket-chmod-race": [
+      "src/daemon/server.ts",
+      "src/daemon/run-tool-endpoint.ts",
+      "src/broker/server.ts",
+      "src/runtime/os-sandbox.ts"
+    ],
+    "sec-owner-only-no-uid": [
+      "src/runtime/project-state.ts",
+      "src/runtime/daemon-extensions.ts"
+    ]
+  },
+  "handoffMd": ".poly/handoffs/continue-security-fixes-wfrun_msaoj0cc_a2.md",
+  "guidance": "Do not redo broker token/TCP/ledger. Land socket TOCTOU helper + ensureOwnerOnly uid/ancestor only. Serialize edits."
+}
