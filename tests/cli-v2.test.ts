@@ -20,8 +20,10 @@ import {
   validateCommandFlags,
 } from "../src/cli";
 import { parseBudgetCommand } from "../src/cli/commands/budget";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
 import { stopTrackedDaemons, trackDaemonProjectRoot } from "./support/daemon-teardown";
+
+setTestTimeout(10_000);
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const cliSharedUrl = new URL("../src/cli/shared.ts", import.meta.url).href;

@@ -8,7 +8,9 @@ import type { DurableSession, Job } from "../src/contracts/durable";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { BudgetStore } from "../src/runtime/budget-store";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(5_000);
 
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];

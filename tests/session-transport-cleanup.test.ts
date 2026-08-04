@@ -3,7 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunSessionExecutor } from "../src/runtime/session-drivers";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(1_000);
 
 const roots: string[] = [];
 

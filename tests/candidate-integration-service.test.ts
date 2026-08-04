@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,12 +16,13 @@ import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runt
 import { WorktreeLeaseStore } from "../src/runtime/worktree-leases";
 import { captureWriteDiff, createWriteWorktree, planWriteWorktree, removeWriteWorktree } from "../src/runtime/worktree";
 import type { WriteGateContext, WriteGateDecision } from "../src/runtime/write-integration";
+import { setTestTimeout } from "./support/timing";
 
 const roots: string[] = [];
 const gitAvailable = runGitStrict(["--version"], process.cwd()).ok;
 const gitTest = gitAvailable ? test : test.skip;
 
-setDefaultTimeout(15_000);
+setTestTimeout(10_000);
 
 const passed: WriteGateDecision = {
   policyPassed: true,

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,9 +29,11 @@ import { registerBackendDefinition, unregisterBackendDefinition, type BackendDef
 import { parseGrokJsonl } from "../src/backends/grok";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
 import { exec as headlessExec } from "../src/index";
-import { schedulingAttempts, schedulingDeadline, schedulingWindow } from "./support/timing";
+import { schedulingAttempts, schedulingDeadline, schedulingWindow, setTestTimeout, testTimeout } from "./support/timing";
 
-setDefaultTimeout(20_000);
+// The council-resume cases poll for 30s, so the file budget has to outlast that
+// window; a 20s default made their ceiling unreachable on every CI leg.
+setTestTimeout(30_000);
 
 const FIXTURE_READ_BACKEND = "fixture-opencode";
 const FIXTURE_REVIEW_BACKEND = "fixture-review";
@@ -1033,7 +1035,7 @@ console.log(JSON.stringify({type:"text",text}));`);
     expect(admitted.proposalJobs).toContain(unadmitted.id);
     expect(daemon.jobs.get(unadmitted.id)).toMatchObject({ attempt: 1, state: "succeeded" });
     expect(admitted.decision?.approved, admitted.decision?.reason).toBe(true);
-  }, 40_000);
+  }, testTimeout(35_000));
 
   test("daemon restart never retries a council phase whose cancellation was in progress", async () => {
     const fixture = createFixture();
@@ -1138,7 +1140,7 @@ console.log(JSON.stringify({type:"text",text}));`);
       usedUsage: { input: null, output: null },
       usedCost: { amountUsd: null, source: "unknown" },
     });
-  }, 40_000);
+  }, testTimeout(35_000));
 
   test("an even council requires a strict majority and never approves a tie", async () => {
     const fixture = createFixture();

@@ -4,8 +4,14 @@
  * resident daemon unless the idle watchdog or an explicit teardown reclaims it.
  *
  * Resident daemons for real checkouts are legitimate and never reported. This
- * is deliberately not part of `bun run check`: a concurrent test run holds
- * short-lived disposable daemons, which would make the shared gate flaky.
+ * runs first in `bun run check` (see `check:kernel`) so a machine the gate would
+ * reject is reported in seconds instead of after minutes of typecheck and tests,
+ * and so a stray daemon cannot skew the timing-sensitive suite that follows.
+ *
+ * The cost is that this reads machine-global state: a second test run in another
+ * checkout holds short-lived disposable daemons, and `check` will fail on them.
+ * That is a true report about the machine, not a false one — rerun once the
+ * other run finishes, or reclaim with `headless experimental daemon reap`.
  */
 import { listDaemonInventory } from "../src/runtime/daemon-inventory";
 

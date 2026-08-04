@@ -7,6 +7,7 @@ import { getProvider, registerProvider, unregisterProvider } from "../src/broker
 import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
 import { DurableBrokerQuotaStore } from "../src/runtime/broker-quota-store";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
+import { testTimeout } from "./support/timing";
 
 const closers: Array<() => void> = [];
 const pricingIds: string[] = [];
@@ -311,6 +312,8 @@ describe("provider broker", () => {
     expect((await response.json()) as { tcp: boolean }).toEqual({ tcp: true });
   });
 
+  // Launches the relay and a child bun process, so bun's 5s default is a
+  // local-speed budget for the one case that runs only on a loaded Linux runner.
   test.skipIf(process.platform !== "linux")("the Linux loopback relay forwards only through the designated broker socket", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-broker-relay-"));
     closers.push(() => rmSync(root, { recursive: true, force: true }));
@@ -331,7 +334,7 @@ describe("provider broker", () => {
     expect(code, stderr).toBe(0);
     expect(output).toContain('"relayed":true');
     expect(broker.getLeaseObservation(lease.id)?.requests).toBe(1);
-  });
+  }, testTimeout(10_000));
 
   test("rejects invalid tokens, models, routes, bodies, and exhausted leases", async () => {
     const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ ok: true }) });

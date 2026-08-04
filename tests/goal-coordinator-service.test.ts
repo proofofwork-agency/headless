@@ -9,7 +9,9 @@ import { GoalCoordinatorService } from "../src/runtime/goal-coordinator-service"
 import { GoalStore } from "../src/runtime/goal-store";
 import { HeadlessError } from "../src/runtime/headless-error";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(2_000);
 
 const roots: string[] = [];
 

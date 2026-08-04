@@ -9,7 +9,9 @@ import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { WorkflowStore } from "../src/runtime/workflow-store";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(5_000);
 
 const BACKEND = "fixture-workflow";
 const originalPath = process.env.PATH;

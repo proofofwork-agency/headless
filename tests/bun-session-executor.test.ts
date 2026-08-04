@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunSessionExecutor } from "../src/runtime/session-drivers";
 import { CLAUDE_SETUP_TOKEN_ENV } from "../src/runtime/native-auth-capsule";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout, testTimeout } from "./support/timing";
+
+setTestTimeout(5_000);
 
 const roots: string[] = [];
 
@@ -119,7 +121,7 @@ await Bun.sleep(60000);
     const descendantPid = Number(readFileSync(marker, "utf8"));
     expect(cleanupSawLiveDescendant).toBe(false);
     expect(processAlive(descendantPid)).toBe(false);
-  }, 10_000);
+  }, testTimeout(5_000));
 
   test("runs a persistent JSON-RPC transport and waits for lifecycle notifications", async () => {
     const root = fixture();

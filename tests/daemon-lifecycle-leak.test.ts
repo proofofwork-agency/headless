@@ -8,7 +8,9 @@ import {
   parseDaemonProcessTable,
 } from "../src/runtime/daemon-inventory";
 import { countDaemonsForRoots, stopTrackedDaemons, trackDaemonProjectRoot } from "./support/daemon-teardown";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(20_000);
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const roots: string[] = [];

@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { countDaemonsForRoots, stopTrackedDaemons, trackDaemonProjectRoot } from "./support/daemon-teardown";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(10_000);
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const roots: string[] = [];

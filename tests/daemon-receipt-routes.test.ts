@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,8 +9,9 @@ import { HeadlessDaemonClient } from "../src/daemon/client";
 import { HeadlessDaemon } from "../src/daemon/server";
 import type { CredentialStore } from "../src/runtime/credential-store";
 import type { ReceiptVerificationVerdict } from "../src/runtime/receipt-verify";
+import { setTestTimeout } from "./support/timing";
 
-setDefaultTimeout(30_000);
+setTestTimeout(25_000);
 
 const daemons: HeadlessDaemon[] = [];
 const roots: string[] = [];

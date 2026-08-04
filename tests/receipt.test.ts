@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,8 +24,9 @@ import {
   receiptBrokerLeaseSnapshot,
   receiptIdForRun,
 } from "../src/runtime/receipt-service";
+import { setTestTimeout } from "./support/timing";
 
-setDefaultTimeout(45_000);
+setTestTimeout(40_000);
 
 const roots: string[] = [];
 const runtimes: string[] = [];

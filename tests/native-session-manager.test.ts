@@ -8,7 +8,9 @@ import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { CLAUDE_SETUP_TOKEN_ENV } from "../src/runtime/native-auth-capsule";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { createWorkerEnvironment } from "../src/runtime/worker-environment";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout, testTimeout } from "./support/timing";
+
+setTestTimeout(10_000);
 
 const roots: string[] = [];
 const originalPath = process.env.PATH;
@@ -460,7 +462,7 @@ describe("native session manager", () => {
     expect(result).toMatchObject({ ok: false, status: "cancelled", error: { code: "CANCELLED" } });
     expect(readCalls(fixture.project)).toEqual([]);
     await manager.closeAll();
-  }, 15_000);
+  }, testTimeout(10_000));
 
   test("does not initialize a runtime for a pre-aborted turn", async () => {
     const fixture = createFixture();
@@ -503,7 +505,7 @@ describe("native session manager", () => {
 
     expect(result).toMatchObject({ ok: false, status: "cancelled", error: { code: "CANCELLED" } });
     expect(readCalls(fixture.project)).toEqual([]);
-  }, 15_000);
+  }, testTimeout(10_000));
 
   test("refuses native resume after the auth profile fingerprint changes and uses bounded replay", async () => {
     const fixture = createFixture();

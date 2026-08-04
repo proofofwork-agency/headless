@@ -1097,20 +1097,48 @@ export class JobAdmissionService {
     }
   }
 
+  /**
+   * Retires every queued job whose lifecycle deadline has passed, including the
+   * ones parked on an approval rather than in the run queue. Deadlines are armed
+   * as unref'd timers, and a suspended host or a starved event loop delivers
+   * those late — enforcing the deadline from durable state instead means expiry
+   * is something a caller can drive and observe, not a race it has to outwait.
+   */
+  sweepQueueDeadlines(now = Date.now()) {
+    const expired: Job[] = [];
+    for (const jobId of [...this.queueDeadlineTimers.keys()]) {
+      const job = this.options.jobs.get(jobId);
+      // The durable request is authoritative, but an unreadable one must not
+      // disarm the deadline: falling back to the queued copy keeps a job that
+      // cannot be re-read from becoming one that never times out.
+      const request = this.options.jobs.request(jobId)
+        ?? this.pendingJobs.find((pending) => pending.id === jobId)?.request;
+      if (!job || !request || job.state !== "queued") {
+        this.clearQueueDeadline(jobId);
+        continue;
+      }
+      if (jobDeadlineAt(job, request) > now) continue;
+      const completed = this.expireQueuedJob(jobId, request);
+      if (completed) expired.push(completed);
+    }
+    if (expired.length > 0) this.pump();
+    return expired;
+  }
+
   private scheduleQueueDeadline(jobId: string, request: SerializedRunRequest) {
     this.clearQueueDeadline(jobId);
     const job = this.options.jobs.get(jobId);
     if (!job || job.state !== "queued") return;
-    const remainingMs = jobDeadlineAt(job, request) - Date.now();
+    const deadlineAt = jobDeadlineAt(job, request);
+    const remainingMs = deadlineAt - Date.now();
     if (remainingMs <= 0) {
       this.expireQueuedJob(jobId, request);
       return;
     }
-    const timer = setTimeout(() => {
-      this.queueDeadlineTimers.delete(jobId);
-      this.expireQueuedJob(jobId, request);
-      this.pump();
-    }, remainingMs);
+    // Sweeping rather than expiring this one job keeps a late timer from
+    // leaving an even older deadline armed, and `deadlineAt` keeps a timer that
+    // fires a hair early from skipping the job it was armed for.
+    const timer = setTimeout(() => this.sweepQueueDeadlines(Math.max(Date.now(), deadlineAt)), remainingMs);
     timer.unref?.();
     this.queueDeadlineTimers.set(jobId, timer);
   }
