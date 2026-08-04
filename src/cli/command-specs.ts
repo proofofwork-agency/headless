@@ -8,6 +8,17 @@ export type CliCommandSpec<Name extends string = string> = {
    * flags would let a flag that is valid somewhere pass everywhere.
    */
   booleanFlags?: readonly string[];
+  /**
+   * Declare `"none"` for a command whose whole grammar is flags — no
+   * subcommand, no operand, no trailing prompt. A stray token there is a typo
+   * the operator wants to hear about, not something to discard silently.
+   *
+   * Deliberately opt-in. Most commands legitimately take positionals (exec's
+   * prompt, receipt's runId, mcp's host, approval's resolution text), and
+   * several accept unbounded trailing text, so a blanket arity rule would
+   * reject valid usage. Commands without this field keep today's behaviour.
+   */
+  positionals?: "none";
   help?: string;
   internal?: true;
 };
@@ -118,23 +129,26 @@ export const COMMAND_SPECS = [
   },
   {
     name: "init",
+    positionals: "none",
     valueFlags: ["--lead", "--cwd", "--extension-config", "--extension-module"],
     help: "init [--lead codex|grok|claude|opencode] [--cwd dir]   Initialize external per-project state and optionally configure its foreground lead.",
   },
   {
     name: "setup",
+    positionals: "none",
     valueFlags: ["--lead", "--cwd", "--extension-config", "--extension-module"],
     booleanFlags: ["--yes", "--allow-native-direct-unrestricted", "--allow-bypass"],
     help: "setup [--lead host] [--yes] [--allow-native-direct-unrestricted] [--cwd dir]   Golden-path wizard: init, inventory CLIs, print next commands.",
   },
   {
     name: "status",
+    positionals: "none",
     valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"],
     booleanFlags: ["--json"],
     help: "status [--cwd dir]              Show project and daemon status.",
   },
-  { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--json", "-j"], help: "doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, daemon broker env, next commands." },
-  { name: "tui", valueFlags: ["--cwd"], help: "tui [--cwd dir]                 Open the read-only observer log and configuration pane." },
+  { name: "doctor", positionals: "none", valueFlags: ["--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--json", "-j"], help: "doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, daemon broker env, next commands." },
+  { name: "tui", positionals: "none", valueFlags: ["--cwd"], help: "tui [--cwd dir]                 Open the read-only observer log and configuration pane." },
   { name: "pair", valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"], internal: true },
   {
     name: "mcp",
@@ -157,7 +171,7 @@ export const COMMAND_SPECS = [
   { name: "coop-proof", aliases: ["autonomy-coop-proof"], valueFlags: ["--cwd", "--extension-config", "--extension-module"], internal: true },
   { name: "skill", aliases: ["skills"], valueFlags: ["--source", "--backend", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"], help: "skill | skills <list|inspect|import|enable|use|revoke> [options]" },
   { name: "loop", valueFlags: ["--loop-id", "--file", "--mode", "--deadline-ms", "--max-iterations", "--per-iteration-cost-usd", "--total-cost-usd", "--check", "--backend", "--verify-backend", "--auth-mode", "--approval-policy", "--model", "--max-repair-nodes", "--stagnation-limit", "--gate-timeout-ms", "--step-timeout-ms", "--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--confirm", "--repair"], help: "loop <start|list|status|pause|resume|cancel> --confirm [--repair --check name] [finite policy options]" },
-  { name: "verify", valueFlags: ["--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--evidence", "--json"], help: "verify [--evidence] [--json] [--cwd dir]   Verify the tamper-evident ledger and optional evidence files." },
+  { name: "verify", positionals: "none", valueFlags: ["--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--evidence", "--json"], help: "verify [--evidence] [--json] [--cwd dir]   Verify the tamper-evident ledger and optional evidence files." },
   { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--confirm", "--evidence", "--json"], help: "ledger <verify [--evidence] [--json] | repair-tail --confirm> [--cwd dir]" },
   {
     name: "receipt",

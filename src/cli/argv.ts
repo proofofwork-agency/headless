@@ -1,4 +1,4 @@
-import { COMMAND_SPECS, VALUE_FLAGS, resolveCommandSpec, type ResolvedCliCommandSpec } from "./command-specs";
+import { COMMAND_SPECS, VALUE_FLAGS, renderCommandUsage, resolveCommandSpec, type ResolvedCliCommandSpec } from "./command-specs";
 
 /**
  * Operator input, never a runtime fault. It lives here rather than in shared.ts
@@ -152,4 +152,24 @@ export function validateCommandFlags(argv: string[]) {
       throw new CliUsageError(`Unknown flag for ${spec.name}: ${token}.`);
     }
   }
+}
+
+/**
+ * Reject a stray positional on a command whose grammar is flags only.
+ *
+ * `headless init not-a-subcommand` used to initialise successfully and discard
+ * the token — the same silent-ignore defect as unknown flags, and just as
+ * likely to hide a typo for a subcommand the operator thought existed. Only
+ * commands that opt in via `positionals: "none"` are checked, so commands
+ * taking prompts, ids, hosts or unbounded trailing text are untouched.
+ */
+export function validateCommandPositionals(argv: string[]) {
+  const spec = resolveCommandSpec(argv[0]);
+  if (!spec || !("positionals" in spec) || spec.positionals !== "none") return;
+  const { positionalEntries } = parseCommandArgv(argv);
+  const stray = positionalEntries[0];
+  if (!stray) return;
+  throw new CliUsageError(
+    `${spec.name} takes no subcommand or argument, but received "${stray.value}". ${renderCommandUsage(spec.name)}`,
+  );
 }
