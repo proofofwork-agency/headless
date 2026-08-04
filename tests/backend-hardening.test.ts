@@ -25,6 +25,31 @@ import {
 import { runHeadless } from "../src/runner/simple";
 
 const cleanups: Array<() => void> = [];
+
+/**
+ * Gate the installed-Codex case explicitly instead of returning early from it.
+ *
+ * It used to `return` when the CLI was absent or too old, which reports as a
+ * PASS with zero assertions — the least visible failure mode there is. A skip
+ * at least tells the reader nothing was proved, and unlike an early return it
+ * is discoverable by tests/gated-coverage.test.ts, which can only see declared
+ * gates. CI installs no provider CLIs, so this runs on an operator machine
+ * only; that is now a registered gap rather than a silent green.
+ *
+ * Written as a one-line ternary on purpose: the coverage scanner reads gate
+ * declarations textually and cannot see one built inside a multi-statement
+ * expression, so a cleverer form here would re-hide the gate it exists to
+ * expose.
+ */
+function hasStrictCodex() {
+  const codex = Bun.which("codex");
+  if (!codex) return false;
+  const version = Bun.spawnSync([codex, "--version"], { stdout: "pipe", stderr: "pipe" });
+  const parsed = version.stdout.toString().match(/(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number);
+  return !!parsed && compareVersion(parsed, [0, 144, 1]) >= 0;
+}
+
+const installedCodexTest: typeof test | typeof test.skip = hasStrictCodex() ? test : test.skip;
 afterEach(() => {
   while (cleanups.length) cleanups.pop()?.();
 });
@@ -181,12 +206,8 @@ describe("hardened built-in command preparation", () => {
     expect(config).not.toContain("personal/SKILL.md");
   });
 
-  test("installed Codex accepts the complete strict policy before provider access", () => {
-    const codex = Bun.which("codex");
-    if (!codex) return;
-    const version = Bun.spawnSync([codex, "--version"], { stdout: "pipe", stderr: "pipe" });
-    const parsed = version.stdout.toString().match(/(\d+)\.(\d+)\.(\d+)/)?.slice(1).map(Number);
-    if (!parsed || compareVersion(parsed, [0, 144, 1]) < 0) return;
+  installedCodexTest("installed Codex accepts the complete strict policy before provider access", () => {
+    const codex = Bun.which("codex")!;
 
     const root = mkdtempSync(join(tmpdir(), "headless-codex-strict-policy-"));
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));

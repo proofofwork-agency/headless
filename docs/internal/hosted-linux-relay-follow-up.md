@@ -12,18 +12,33 @@ Because there is no privileged step, the late-socket case runs on **no CI leg at
 
 Coverage for the four cooperation cases: macOS CI, local dev, and a documented local command a maintainer can run against real bubblewrap:
 
-```
-docker run --rm --privileged --platform linux/arm64 --cpus=2 --memory=3g -v "$PWD:/repo:ro" oven/bun:1.3.14 \
-  bash -lc 'apt-get update -qq && apt-get install -y -qq bubblewrap && cp -r /repo /work && cd /work && bun install --frozen-lockfile --ignore-scripts && bun test tests/daemon-run-tool.test.ts tests/containment-v2.test.ts'
+```bash
+# Derives the platform from THIS host, refuses to run under emulation, and
+# fails if the cases skip instead of passing. Do not hardcode --platform:
+# pinning the wrong one silently reintroduces the emulation problem below.
+HOST_PLATFORM="linux/$(uname -m | sed 's/^x86_64$/amd64/; s/^aarch64$/arm64/; s/^arm64$/arm64/')"
+docker run --rm --privileged --platform "$HOST_PLATFORM" --cpus=2 --memory=3g -v "$PWD:/repo:ro" oven/bun:1.3.14 bash -lc '
+  set -euo pipefail
+  apt-get update -qq && apt-get install -y -qq bubblewrap
+  cp -r /repo /work && cd /work
+  bun install --frozen-lockfile --ignore-scripts
+  # Fail closed BEFORE the suite: without real bubblewrap every gated case
+  # skips and the run still exits 0.
+  bun -e "import {probeLinuxBwrap} from \"./src/runtime/os-sandbox\"; const r = probeLinuxBwrap(); if (!r.ok) { console.error(\"bubblewrap unusable: \" + r.reason); process.exit(1); }"
+  bun test tests/daemon-run-tool.test.ts tests/containment-v2.test.ts 2>&1 | tee /tmp/out.log
+  grep -qE "\(pass\).*denies a host Unix socket created after launch" /tmp/out.log \
+    || { echo "late-socket case did not PASS (skipped or failed) — this run proved nothing"; exit 1; }
+  echo "OK: late-socket case executed and passed"
+'
 ```
 
-**Pin `--platform` to the host architecture, and read the PASS count, not the fail count.** Without the pin, Docker on an Apple Silicon machine will happily reuse a cached `linux/amd64` image and run the suite under emulation. Emulated bubblewrap fails `strictContainmentAvailable()`, every gated case skips, and the run reports
+**Why the platform is derived and the result is asserted rather than eyeballed.** Without a correct pin, Docker on an Apple Silicon machine reuses a cached `linux/amd64` image and runs under emulation; emulated bubblewrap fails `strictContainmentAvailable()`, every gated case skips, and the run reports
 
 ```
 0 pass  4 skip  0 fail
 ```
 
-which is indistinguishable from success at a glance. That is a vacuous pass: it proves nothing and it is the outcome a maintainer following this file on the most common developer hardware would have got. This command is the only coverage these cases have, so it has to fail loudly rather than skip quietly — verify `4 pass` for the cooperation cases, and for the late-socket case verify that `denies a host Unix socket created after launch while broker and run tools remain reachable` appears as `(pass)` rather than `(skip)`.
+which is indistinguishable from success at a glance. That is a vacuous pass, and it is exactly what this file produced for a maintainer on the most common developer hardware. Hardcoding `--platform linux/arm64` would simply move the same failure onto x86-64 hosts, so the command derives it from `uname -m`. And "read the output carefully" is not fail-loud: the probe and the `grep` above make a skipped case exit non-zero, because this command is the only coverage these cases have.
 
 **Recorded evidence, 2026-08-04, against `main` @ 93c7928.** Run on Docker 27.4.0, `--platform linux/arm64`, real `bubblewrap 0.11.0`, a genuine Linux kernel via the Docker VM:
 

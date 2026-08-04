@@ -11,20 +11,26 @@ name: Privileged containment
 # tests/daemon-run-tool.test.ts cooperation cases did not. So this job covers
 # exactly the former on real x86-64 Linux, and deliberately does not attempt the
 # latter, whose hosted incompatibility is a separate open investigation.
-#
-# Not on every pull request: it pulls an image and builds a sandbox, and the
-# ordinary gates already cover the unprivileged surface. Run it on demand, and
-# on any change to the containment surface it exists to prove.
 on:
   workflow_dispatch:
   pull_request:
     branches: [main]
+    # Directory scopes, not a hand-listed file set. A hand list goes stale
+    # silently and the failure mode is this job NOT running on a change that
+    # breaks the exact path it exists to prove — src/runner/simple.ts wraps the
+    # sandbox and launches the relay, worker-environment and run-tool-client
+    # build what crosses it, and a dependency bump changes the runtime under all
+    # of it.
     paths:
-      - "src/runtime/os-sandbox.ts"
-      - "src/runtime/secure-socket.ts"
-      - "src/broker/linux-relay.ts"
+      - "src/runtime/**"
+      - "src/broker/**"
+      - "src/runner/**"
+      - "src/backends/**"
       - "src/daemon/run-tool-endpoint.ts"
       - "tests/containment-v2.test.ts"
+      - "tests/support/timing.ts"
+      - "package.json"
+      - "bun.lock"
       - ".github/workflows/privileged-containment.yml"
 
 permissions:
@@ -41,33 +47,54 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          # This checkout is mounted into a PRIVILEGED container running
+          # pull-request code. Without this, the persisted GITHUB_TOKEN
+          # extraheader travels with it. Nothing here needs to talk to git.
+          persist-credentials: false
 
       - name: Run containment suite under privileged bubblewrap
         run: |
           set -euo pipefail
-          docker run --rm --privileged -v "$PWD:/repo:ro" oven/bun:1.3.14 bash -lc '
+          # --cpus/--memory match the recorded evidence in the follow-up doc.
+          # GITHUB_ACTIONS=true is deliberate: it makes the hosted predicate
+          # TRUE so the run proves the HEADLESS_PRIVILEGED_CONTAINMENT_CI
+          # override actually opens the gate, rather than passing because the
+          # predicate was never armed. CI=true selects the slow-Linux timing
+          # context; NO_COLOR keeps the result lines anchorable below.
+          docker run --rm --privileged --cpus=2 --memory=3g -v "$PWD:/repo:ro" oven/bun:1.3.14 bash -lc '
             set -euo pipefail
             apt-get update -qq
             apt-get install -y -qq bubblewrap
             cp -r /repo /work
             cd /work
             bun install --frozen-lockfile --ignore-scripts
-            echo "arch=$(uname -m) bwrap=$(bwrap --version)"
-            HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 bun test tests/containment-v2.test.ts
+            echo "HEADLESS_TEST_ARCH=$(uname -m)"
+            bwrap --version
+            CI=true GITHUB_ACTIONS=true HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 NO_COLOR=1 \
+              bun test tests/containment-v2.test.ts
           ' 2>&1 | tee containment.log
 
       - name: Refuse a vacuous pass
         run: |
           set -euo pipefail
-          # The whole point of this job is the ONE case no other leg runs, and a
-          # skipped suite reports "0 fail" exactly like a passing one. That is
+          # A skipped suite reports "0 fail" exactly like a passing one. That is
           # not hypothetical: the documented local command silently skipped
           # everything on Apple Silicon and printed 0 pass / 4 skip / 0 fail.
-          # Assert the case RAN, on this architecture, or fail the job.
-          grep -q 'x86_64' containment.log \
+          # So assert the architecture and the individual cases, anchored, or
+          # fail. A coverage check must not be able to certify its own absence.
+          grep -qx 'HEADLESS_TEST_ARCH=x86_64' containment.log \
             || { echo "::error::not x86-64; this job exists to cover that architecture"; exit 1; }
-          grep -qE '\(pass\).*denies a host Unix socket created after launch' containment.log \
-            || { echo "::error::late-socket case did not PASS — it was skipped or failed, so this job proved nothing"; exit 1; }
-          grep -qE '\(pass\).*rejects x32 syscall numbers before native seccomp dispatch' containment.log \
+          grep -qE '^\(pass\).*denies a host Unix socket created after launch' containment.log \
+            || { echo "::error::late-socket case did not PASS — skipped or failed, so this job proved nothing"; exit 1; }
+          grep -qE '^\(pass\).*rejects x32 syscall numbers before native seccomp dispatch' containment.log \
             || { echo "::error::x32 alternate-ABI case did not PASS on x86-64"; exit 1; }
-          echo "late-socket and x32 cases both executed and passed on x86-64"
+          echo "late-socket and x32 cases executed and passed on x86-64 with the hosted predicate armed"
+
+      - name: Upload containment log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privileged-containment-log
+          path: containment.log
+          retention-days: 14

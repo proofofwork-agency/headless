@@ -70,6 +70,17 @@ const GATES: GateCoverage[] = [
       + "subscription login. CI installs no provider CLIs, so this runs only on an operator machine, "
       + "in the same category as the credentialed smoke scripts.",
   },
+  {
+    gate: "installedCodexTest",
+    files: ["tests/backend-hardening.test.ts"],
+    legs: [],
+    undeclaredReason:
+      "Requires a locally installed codex CLI at >= 0.144.1, and CI installs no provider CLIs. It was "
+      + "previously an early `return` inside the test body, which reports as a PASS with zero assertions — "
+      + "invisible to this registry and to anyone reading the output. Declaring it as a gate makes the gap "
+      + "countable; the strict-policy construction it guards is still covered by the non-installed "
+      + "buildCodexCommand cases on both legs.",
+  },
   { gate: 'skipIf(process.platform !== "linux")', files: ["tests/broker.test.ts"], legs: ["ubuntu"] },
   {
     gate: 'skipIf(process.platform !== "darwin" && process.platform !== "linux")',
@@ -156,13 +167,17 @@ describe("capability gate coverage", () => {
    * stated reason.
    *
    * Counts GATES, not tests, and the two are not the same number. Behind these
-   * two gates sit THREE individual tests that execute on no CI leg:
+   * three gates sit FOUR individual tests that execute on no CI leg:
    *   - tests/containment-v2.test.ts:440  denies a host Unix socket created
    *     after launch while broker and run tools remain reachable
    *   - tests/grok-isolation.test.ts:180  attests a gated-config-free project
    *     through the trust-gate canary
    *   - tests/grok-isolation.test.ts:217  real inspect sees no project
    *     instructions, skills, hooks, MCP, plugins, LSP, or startup config
+   *   - tests/backend-hardening.test.ts  installed Codex accepts the complete
+   *     strict policy before provider access — found only because it was NOT a
+   *     skip: it early-returned with zero assertions and reported as a pass,
+   *     which no scanner reading skip syntax can see. Now an explicit gate.
    * A gate-level count reads like a completeness claim over tests and is not
    * one; adding a case under an existing uncovered gate would not move this
    * number. The enumeration above is the human-readable record, kept here so
@@ -173,9 +188,10 @@ describe("capability gate coverage", () => {
    * docs/internal/hosted-linux-relay-follow-up.md for the command, the pass
    * counts, and the architecture limit that still applies.
    */
-  test("exactly two gate names are knowingly uncovered by CI", () => {
+  test("exactly three gate names are knowingly uncovered by CI", () => {
     const uncovered = GATES.filter((gate) => gate.legs.length === 0);
-    expect(uncovered.map((gate) => gate.gate).sort()).toEqual(["linuxRelayLifecycleTest", "realGrokInspectTest"]);
+    expect(uncovered.map((gate) => gate.gate).sort())
+      .toEqual(["installedCodexTest", "linuxRelayLifecycleTest", "realGrokInspectTest"]);
   });
 
   /**
