@@ -3,7 +3,6 @@
 ## Unreleased
 
 ### Breaking
-
 - **Unknown flags are rejected instead of silently ignored.** Validation is per command, from each command's own declared flags, so a flag valid for one command no longer passes for another. A typo'd or removed flag now fails fast rather than being dropped. `--flag=value` is not accepted; pass `--flag value`. Validated against 261 documented invocations across the docs, website, scripts and README with no failures, but wrappers that append one flag set to every command will need adjusting.
 
 - **Ledger HMAC keys used to sign new records must be at least 32 bytes and pass an entropy floor.** Shorter or low-entropy keys (repeated characters, pure digits, common password shapes) are refused at the signing boundary: `append` and ledger tail repair fail closed, naming the key id and the variable that supplied it. A human-memorable 16-character secret provides false tamper-evidence, so it is rejected rather than accepted. **Rotate**: generate with `openssl rand -base64 32`, keep the old key in `HEADLESS_LEDGER_KEYS` so historical records stay verifiable, and point `HEADLESS_LEDGER_ACTIVE_KEY_ID` at the new one.
