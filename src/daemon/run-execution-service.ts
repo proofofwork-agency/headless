@@ -274,8 +274,8 @@ export class RunExecutionService {
                 resumeNativeSessionId: resumableNativeSessionId(request, durableSession, adapter),
                 // unixSocket is authoritative when present (Linux relay dials AF_UNIX).
                 // baseUrl remains for env BASE_URL + in-netns relay port selection;
-                // on Unix-socket-only brokers it may be a synthetic loopback URL
-                // that is not host-reachable (host TCP is gated off by default).
+                // in explicitly configured Unix-socket-only mode it may be a
+                // synthetic loopback URL that is not host-reachable.
                 // hostLoopbackListener reports that fact from the one component
                 // that knows it, so the runner can refuse to hand a worker a
                 // bearer token addressed to a port with no owner. Both the

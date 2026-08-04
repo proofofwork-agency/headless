@@ -868,8 +868,8 @@ function applyBrokerEnvironment(env: NodeJS.ProcessEnv, broker: NonNullable<Inte
   // CLI backends speak HTTP BASE_URL only. On Linux strict containment the
   // supervisor rewrites connectivity: it binds 127.0.0.1:<port> INSIDE the
   // worker netns and relays to the host AF_UNIX broker socket (unixSocket).
-  // Host-side TCP is not required and is gated off by default when a Unix
-  // socket is configured (see ProviderBroker.allowLoopbackTcp).
+  // Host-side TCP is not required for this relay and can be explicitly gated
+  // off when a Unix socket is configured (see ProviderBroker.allowLoopbackTcp).
   if (broker.provider === "anthropic") {
     env.ANTHROPIC_API_KEY = broker.token;
     env.ANTHROPIC_BASE_URL = broker.baseUrl;

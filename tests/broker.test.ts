@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProviderBroker, type BrokerLinkedOperation } from "../src/broker/server";
+import { BROKER_UNIX_ONLY_RELAY_PORT, ProviderBroker, type BrokerLinkedOperation } from "../src/broker/server";
 import { getProvider, registerProvider, unregisterProvider } from "../src/broker/providers";
 import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
 import { DurableBrokerQuotaStore } from "../src/runtime/broker-quota-store";
@@ -213,6 +213,36 @@ describe("provider broker", () => {
       body: JSON.stringify({ model: "gpt-test", input: "hello" }),
     });
     expect(viaUnix.status).toBe(200);
+  });
+
+  test("with unixSocketPath and no opt-out, the lease baseUrl has a host TCP owner", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-tcp-default-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const socket = join(root, "broker.sock");
+    const previous = process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP;
+    delete process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP;
+    try {
+      const broker = new ProviderBroker({
+        unixSocketPath: socket,
+        credentials: { OPENAI_API_KEY: "parent-key" },
+      });
+      broker.start();
+      closers.push(() => broker.stop());
+      expect(broker.allowLoopbackTcp).toBe(true);
+      expect(broker.tcpListening).toBe(true);
+      const lease = broker.issueLease({
+        runId: "tcp-default",
+        provider: "openai",
+        models: ["gpt-test"],
+        endpointClasses: ["responses"],
+        expiresAt: Date.now() + 60_000,
+        maxRequests: 1,
+      });
+      expect(new URL(lease.baseUrl).port).not.toBe(String(BROKER_UNIX_ONLY_RELAY_PORT));
+    } finally {
+      if (previous === undefined) delete process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP;
+      else process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP = previous;
+    }
   });
 
   test("with unixSocketPath and allowLoopbackTcp omitted, HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=1 enables TCP", async () => {

@@ -7,7 +7,7 @@ Session paused on low credits. Everything below is committed and pushed. **Nothi
 | Branch | PR | Head | State |
 |---|---|---|---|
 | `main` | — | `51ce83f` | PR #48 merged (you authorised this) |
-| `security/hardening-wip` | [#49](https://github.com/proofofwork-agency/headless/pull/49) | `5342608` | Open. Last commit's full-suite run did not finish — **re-run before trusting it** |
+| `security/hardening-wip` | [#49](https://github.com/proofofwork-agency/headless/pull/49) | inspect current head | Open. Local full gate is green; confirm the new Ubuntu CI rerun before merge |
 | `fix/cli-usage-error-classification` | [#50](https://github.com/proofofwork-agency/headless/pull/50) | `0d53d99` | Open. Verified green |
 
 A git worktree for PR #50 lives at
@@ -17,14 +17,7 @@ It is a scratchpad path and will not survive indefinitely — the branch is push
 
 ## FIRST THING TO DO ON RESUME
 
-```bash
-cd /Users/danillofelanso/projects/proofofworks/headless   # on security/hardening-wip
-bun run check          # full gate; the last background run was cut off mid-flight
-```
-
-`bun run check` = daemon hygiene → typecheck → plugin typecheck → lint → format → docs → `bun test tests` → product gate.
-If it is green, PR #49 is ready for your review. If not, the failure is almost certainly in the
-ledger or broker work described below, both of which landed late and were verified only at file scope.
+Inspect PR #49's current Ubuntu release-gate result. Its first Linux run exposed nine regressions from making the broker AF_UNIX-only by default: explicit unsafe broker runs were blocked, and host-side tests received the synthetic relay URL. The follow-up restores the existing dual-edge default while retaining explicit AF_UNIX-only mode and the fail-closed unserved-endpoint guard. Local `bun run check` is green; Linux CI is the remaining platform proof.
 
 ## What was fixed
 
@@ -66,6 +59,6 @@ Two cautions if you reuse it. On macOS `mkdtemp` returns `/var/...` while the CL
 ## Honest status
 
 - PR #50 is verified: 961 tests, typecheck, lint, format, and the 872-invocation sweep.
-- PR #49's last commit is **not** fully verified. Typecheck is clean and the touched suites pass at file scope, but the full run was interrupted. Re-run `bun run check` first.
-- The broker fix's Linux path was reasoned about, not executed — this machine is macOS and the Linux relay test is `skipIf(platform !== "linux")`. That skip is also why the host-TCP change shipped originally with no executed coverage. **Worth a Linux CI run before merging #49**, since a false refusal there would break production runs.
+- PR #49 passes the complete local gate on macOS: 933 pass, 11 documented platform skips, zero failures; Product Gate P reports 9 pass, 1 manual, 0 fail. The next Ubuntu CI result remains required before merge.
+- The Linux relay itself cannot execute on this macOS machine. The prior Ubuntu run proved that a Unix-only *default* broke stable unsafe and extension paths; the corrected default gives every host-side lease URL a real listener while the explicit opt-out remains covered by the fail-closed reachability tests.
 - Codex reviewed PR #50 against its own spec and found two blockers, both fixed. It has not re-reviewed since, and has not reviewed #49's late ledger/broker work at all.

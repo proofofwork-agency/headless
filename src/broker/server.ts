@@ -238,9 +238,10 @@ export type ProviderBrokerOptions = {
   maxLogEntries?: number;
   unixSocketPath?: string;
   /**
-   * When a Unix socket is configured, loopback TCP is off by default.
-   * Set true (or HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=1) to also bind 127.0.0.1.
-   * When no Unix socket is configured, TCP remains the sole edge (macOS residual-trust path).
+   * When a Unix socket is configured, loopback TCP remains on by default so
+   * every lease baseUrl has a host owner and explicit unsafe runs keep working.
+   * Set false (or HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0) for AF_UNIX-only mode;
+   * only required-contained Linux workers can consume those leases.
    */
   allowLoopbackTcp?: boolean;
   maxConcurrentRequests?: number;
@@ -272,7 +273,7 @@ export class ProviderBroker {
   private server: ReturnType<typeof Bun.serve> | null = null;
   private unixServer: ReturnType<typeof Bun.serve> | null = null;
   readonly unixSocketPath: string | null;
-  /** Explicit or env-derived opt-in for 127.0.0.1 TCP when a Unix socket is configured. */
+  /** Explicit or env-derived policy for 127.0.0.1 TCP when a Unix socket is configured. */
   readonly allowLoopbackTcp: boolean;
 
   constructor(options: ProviderBrokerOptions = {}) {
@@ -301,12 +302,13 @@ export class ProviderBroker {
   /**
    * Start the broker edge(s).
    *
-   * - No unixSocketPath: bind loopback TCP only (documented macOS residual-trust path;
-   *   Seatbelt workers dial HTTP BASE_URL and CLI SDKs do not speak AF_UNIX).
-   * - unixSocketPath without allowLoopbackTcp: Unix socket only — no host TCP listener.
+   * - No unixSocketPath: bind loopback TCP only.
+   * - unixSocketPath with allowLoopbackTcp disabled: Unix socket only — no host TCP listener.
    *   Lease baseUrl still carries a synthetic 127.0.0.1 port so Linux in-netns relays
    *   and worker env wiring keep working; unixSocket on the worker config is authoritative.
-   * - unixSocketPath + allowLoopbackTcp / HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=1: both edges.
+   * - unixSocketPath without an explicit opt-out: bind both edges. The TCP listener
+   *   owns the lease baseUrl for host-side and explicit unsafe execution, while
+   *   required-contained Linux workers still relay through the owner-only Unix socket.
    */
   start(port = 0) {
     if (this.server || this.unixServer) return this.endpoint;
@@ -1622,9 +1624,10 @@ function resolveAllowLoopbackTcp(explicit?: boolean): boolean {
   // Explicit env opt-out honored on all platforms (operators who accept AF_UNIX-only breakage).
   if (env === "0" || env === "false" || env === "no" || env === "off") return false;
   if (env === "1" || env === "true" || env === "yes" || env === "on") return true;
-  // Default: Linux off (workers use in-netns AF_UNIX relay); non-Linux residual-trust on
-  // (Seatbelt CLI SDKs dial HTTP BASE_URL and do not speak AF_UNIX to the broker).
-  return process.platform !== "linux";
+  // Default to a real loopback owner on every platform. Required-contained Linux
+  // workers still use the AF_UNIX relay, but host-side and explicit unsafe runs
+  // consume baseUrl directly and must never receive the synthetic unowned port.
+  return true;
 }
 
 function boundedPositive(value: number, maximum: number, label: string) {

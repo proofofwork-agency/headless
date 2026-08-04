@@ -1078,12 +1078,11 @@ export class HeadlessDaemon {
     this.token = this.configuredToken ?? loadOrCreateToken(this.state.tokenPath);
     migrateSingleLeadState(this.state);
     const brokerQuotas = new DurableBrokerQuotaStore(this.state);
-    // Linux: Unix-socket-only by default (host TCP gated off). Workers reach the
-    // broker via the in-netns loopback relay → AF_UNIX. macOS residual-trust path:
-    // Seatbelt workers dial HTTP BASE_URL on 127.0.0.1 (CLI SDKs do not speak
-    // AF_UNIX), so default to loopback TCP on non-Linux. Operators on any platform
-    // can force AF_UNIX-only with HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0 (resolved
-    // inside ProviderBroker when allowLoopbackTcp is left undefined).
+    // Bind both broker edges by default. Required-contained Linux workers reach
+    // the owner-only Unix socket through the in-netns relay, while host-side and
+    // explicit unsafe runs consume the loopback baseUrl directly. Operators can
+    // force AF_UNIX-only mode with HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0; the runner
+    // then refuses any lease for which no relay will exist.
     const brokerSocketPath = join(
       this.state.daemonRuntimeDir,
       `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`,
@@ -1091,9 +1090,8 @@ export class HeadlessDaemon {
     this.broker = new ProviderBroker({
       credentials: this.stateOptions?.env ?? process.env,
       unixSocketPath: brokerSocketPath,
-      // Leave undefined on all platforms so resolveAllowLoopbackTcp applies the
-      // platform default (Linux: off; non-Linux residual-trust: on) and honors
-      // HEADLESS_BROKER_ALLOW_LOOPBACK_TCP on every platform.
+      // Leave undefined so ProviderBroker applies the safe dual-edge default and
+      // honors HEADLESS_BROKER_ALLOW_LOOPBACK_TCP on every platform.
       allowLoopbackTcp: undefined,
       initialBudgetQuotas: brokerQuotas.snapshot(),
       persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
