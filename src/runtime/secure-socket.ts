@@ -1,4 +1,4 @@
-import { lstatSync } from "node:fs";
+import { lstatSync, rmSync } from "node:fs";
 import type { Server } from "node:net";
 import { HeadlessError } from "./headless-error";
 
@@ -53,6 +53,49 @@ export function assertSecureSocket(socketPath: string): void {
       `Secure socket verification failed: ${socketPath} is owned by uid ${info.uid}, expected uid ${expectedUid}; refusing to use a foreign-owned trust root.`,
     );
   }
+}
+
+/** Which inode a socket path named at a known moment (dev+ino, exact via bigint). */
+export type BoundSocketIdentity = { readonly dev: bigint; readonly ino: bigint };
+
+/**
+ * Snapshot the inode a socket path currently names.
+ *
+ * Null means "nothing is there", which every caller treats as holding no claim
+ * on the path — a later removal then stays a no-op instead of a blind delete.
+ */
+export function captureSocketIdentity(socketPath: string): BoundSocketIdentity | null {
+  try {
+    const info = lstatSync(socketPath, { bigint: true });
+    return { dev: info.dev, ino: info.ino };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Unlink socketPath only while it still names the inode recorded in `identity`.
+ *
+ * Both runtimes unlink a bound path from inside close()/stop() — verified on Bun
+ * 1.3.14 for node:net and Bun.serve alike — so a teardown's path is already free
+ * before its close callback even fires. An unconditional rmSync after that point
+ * deletes whatever bound the path in the window instead of the caller's own
+ * socket. The daemon socket path is deterministic per project and the daemon
+ * auto-stops when idle, so the reachable case needs no attacker: a CLI
+ * invocation arriving during idle shutdown starts a replacement daemon that
+ * binds and is then unlinked by the departing one, leaving a running but
+ * unreachable daemon. The same shape lets a daemon that lost a startup election
+ * delete the winner's live socket after its staleness probe came back "dead".
+ *
+ * Comparing dev+ino keeps a removal scoped to the exact entry the caller proved
+ * it owns. Returns true only when this call removed that entry.
+ */
+export function removeOwnedSocket(socketPath: string, identity: BoundSocketIdentity | null): boolean {
+  if (!identity) return false;
+  const current = captureSocketIdentity(socketPath);
+  if (!current || current.dev !== identity.dev || current.ino !== identity.ino) return false;
+  rmSync(socketPath, { force: true });
+  return true;
 }
 
 /**

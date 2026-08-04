@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { z } from "zod";
 import { HeadlessError } from "../runtime/headless-error";
 import { redactAndTruncate } from "../runtime/redaction";
@@ -7,7 +7,7 @@ import { calculateModelPricedCost, listPricing } from "../runtime/pricing";
 import { recordRuntimeDiagnostic } from "../runtime/diagnostics";
 import { linkedProviderOperationIds } from "../runtime/linked-provider-ids";
 import { getProvider, type ProviderDefinition } from "./providers";
-import { secureBunUnixServe } from "../runtime/secure-socket";
+import { type BoundSocketIdentity, captureSocketIdentity, removeOwnedSocket, secureBunUnixServe } from "../runtime/secure-socket";
 
 const DEFAULT_BODY_LIMIT = 4_000_000;
 const DEFAULT_STREAM_LIMIT_MS = 300_000;
@@ -274,6 +274,9 @@ export class ProviderBroker {
   private pricingWarningEmitted = false;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private unixServer: ReturnType<typeof Bun.serve> | null = null;
+  // Which inode our own Unix bind put at unixSocketPath; null whenever we hold
+  // no claim on that path, so teardown never unlinks a stranger's socket.
+  private unixSocketIdentity: BoundSocketIdentity | null = null;
   readonly unixSocketPath: string | null;
   /** Explicit or env-derived policy for 127.0.0.1 TCP when a Unix socket is configured. */
   readonly allowLoopbackTcp: boolean;
@@ -329,6 +332,7 @@ export class ProviderBroker {
         this.unixServer = secureBunUnixServe(this.unixSocketPath, () =>
           Bun.serve({ unix: this.unixSocketPath as string, maxRequestBodySize: 64_000_000, fetch: (request) => this.handle(request) }),
         );
+        this.unixSocketIdentity = captureSocketIdentity(this.unixSocketPath);
       }
       if (!this.server && !this.unixServer) {
         throw new Error("Provider broker start requires a TCP listener or a Unix socket path.");
@@ -338,7 +342,10 @@ export class ProviderBroker {
       this.unixServer?.stop(true);
       this.server = null;
       this.unixServer = null;
-      if (this.unixSocketPath) rmSync(this.unixSocketPath, { force: true });
+      // The refusal above fires precisely because something else already owns the
+      // path; deleting it here would undo our own check and hand the next start
+      // a path whose owner we never proved dead.
+      this.releaseUnixSocket();
       throw error;
     }
     return this.endpoint;
@@ -349,7 +356,17 @@ export class ProviderBroker {
     this.unixServer?.stop(true);
     this.server = null;
     this.unixServer = null;
-    if (this.unixSocketPath) rmSync(this.unixSocketPath, { force: true });
+    this.releaseUnixSocket();
+  }
+
+  /**
+   * Bun.serve().stop() already unlinks the bound path (verified on Bun 1.3.14),
+   * so this is a belt-and-braces reclaim for a runtime that does not — scoped to
+   * our own inode so it can never delete a successor that bound in the window.
+   */
+  private releaseUnixSocket() {
+    if (this.unixSocketPath) removeOwnedSocket(this.unixSocketPath, this.unixSocketIdentity);
+    this.unixSocketIdentity = null;
   }
 
   /**

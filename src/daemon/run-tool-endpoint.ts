@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { z } from "zod";
@@ -8,7 +8,7 @@ import { ensureOwnerOnlyDirectory } from "../runtime/project-state";
 import { redactAndTruncate, redactDeep } from "../runtime/redaction";
 import { runToolCallTimeoutMs } from "../runtime/run-tool-client";
 import { safeJsonParse } from "../runtime/safe-json";
-import { secureUnixListen } from "../runtime/secure-socket";
+import { type BoundSocketIdentity, captureSocketIdentity, removeOwnedSocket, secureUnixListen } from "../runtime/secure-socket";
 
 export const RUN_TOOL_PROTOCOL_VERSION = 1 as const;
 export const MAX_RUN_TOOL_REQUEST_BYTES = 131_072;
@@ -125,6 +125,8 @@ type EndpointRecord = {
   tokenDigest: Buffer;
   scope: RunToolScope;
   server: Server;
+  /** Inode this record's own bind put at socketPath; see removeOwnedSocket. */
+  socketIdentity: BoundSocketIdentity | null;
   sockets: Set<Socket>;
   timer: ReturnType<typeof setTimeout>;
   active: boolean;
@@ -176,6 +178,7 @@ export class RunToolEndpointManager {
       tokenDigest: digest(token),
       scope,
       server,
+      socketIdentity: null as BoundSocketIdentity | null,
       sockets: new Set<Socket>(),
       timer: undefined as unknown as ReturnType<typeof setTimeout>,
       active: true,
@@ -187,14 +190,19 @@ export class RunToolEndpointManager {
     server.on("connection", (socket) => this.accept(record, socket));
     try {
       await secureUnixListen(server, socketPath);
+      record.socketIdentity = captureSocketIdentity(socketPath);
       record.timer = setTimeout(() => { void this.revoke(id); }, Math.max(1, scope.expiresAt - this.now()));
       record.timer.unref?.();
       this.records.set(id, record);
       server.on("error", () => { void this.revoke(id); });
       return { id, socketPath, token, scope: structuredClone(scope), operations: [...allowed] };
     } catch (error) {
+      // secureUnixListen can also fail *after* a successful bind (its post-bind
+      // ownership gate), so claim the entry only while this server is the thing
+      // holding it — a bind that never happened leaves the path to its owner.
+      const identity = server.listening ? captureSocketIdentity(socketPath) : null;
       server.close();
-      rmSync(socketPath, { force: true });
+      removeOwnedSocket(socketPath, identity);
       throw error;
     }
   }
@@ -208,7 +216,9 @@ export class RunToolEndpointManager {
     for (const socket of record.sockets) socket.destroy();
     await new Promise<void>((resolve) => record.server.close(() => resolve())).catch(() => {});
     record.tokenDigest.fill(0);
-    rmSync(record.socketPath, { force: true });
+    // close() already freed the path, so anything there now belongs to whoever
+    // bound it next; only our own inode is ours to remove.
+    removeOwnedSocket(record.socketPath, record.socketIdentity);
     return true;
   }
 

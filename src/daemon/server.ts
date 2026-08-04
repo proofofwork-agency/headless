@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
-import { secureUnixListen } from "../runtime/secure-socket";
+import { type BoundSocketIdentity, captureSocketIdentity, removeOwnedSocket, secureUnixListen } from "../runtime/secure-socket";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { ZodError } from "zod";
@@ -197,6 +197,9 @@ export class HeadlessDaemon {
   private ready = false;
   private ownedStateInitialized = false;
   private server: Server | null = null;
+  // Which inode this daemon's own bind put at socketPath, so teardown can prove
+  // it is reclaiming its own entry and not a successor's (see removeOwnedSocket).
+  private socketIdentity: BoundSocketIdentity | null = null;
   private readonly sockets = new Set<Socket>();
   private routeHandlers!: DaemonRouteHandlerMap;
   private readonly idleTimeoutMs: number;
@@ -236,14 +239,28 @@ export class HeadlessDaemon {
     this.ready = false;
     this.jobAdmission?.dispose();
     if (existsSync(this.state.socketPath)) {
+      const abandoned = captureSocketIdentity(this.state.socketPath);
       if (await socketBecomesAvailable(this.state.socketPath)) throw new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`);
-      rmSync(this.state.socketPath, { force: true });
+      // Clear only the exact entry the probe proved dead. A same-user daemon that
+      // completed its own election while we were probing has already replaced
+      // that inode with a live socket, and unlinking that one would put two
+      // daemons on one project with the EADDRINUSE backstop bypassed.
+      removeOwnedSocket(this.state.socketPath, abandoned);
     }
     const server = createServer((socket) => this.accept(socket));
-    let bound = false;
+    let identity: BoundSocketIdentity | null = null;
     try {
-      await secureUnixListen(server, this.state.socketPath);
-      bound = true;
+      try {
+        await secureUnixListen(server, this.state.socketPath);
+      } catch (error) {
+        // Losing the bind means a racing same-user daemon claimed the path first
+        // (its socket is either live or freshly stale). Report that as the same
+        // refusal the sequential path produces instead of a raw errno.
+        throw isAddressInUse(error)
+          ? new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`, { retryable: true })
+          : error;
+      }
+      identity = captureSocketIdentity(this.state.socketPath);
       this.loadedExtensions = await loadDaemonExtensions(this.extensionConfig);
       this.initializeOwnedState();
       recoverLinkedProviderHolds({ budgets: this.budgets, broker: this.broker, jobs: this.jobs });
@@ -276,6 +293,7 @@ export class HeadlessDaemon {
       this.reconcileTasks();
       this.ready = true;
       this.server = server;
+      this.socketIdentity = identity;
       this.writeMetadata(true);
     } catch (error) {
       this.ready = false;
@@ -285,7 +303,7 @@ export class HeadlessDaemon {
         await closed;
         this.sockets.clear();
       });
-      if (bound) await cleanupWithDiagnostic("daemon.start.socket-remove", () => { rmSync(this.state.socketPath, { force: true }); });
+      await cleanupWithDiagnostic("daemon.start.socket-remove", () => { removeOwnedSocket(this.state.socketPath, identity); });
       await cleanupWithDiagnostic("daemon.start.run-tools-revoke", () => this.runTools?.revokeAll());
       await cleanupWithDiagnostic("daemon.start.goal-runtime-dispose", () => this.goalRuntime?.dispose());
       await cleanupWithDiagnostic("daemon.start.job-admission-dispose", () => this.jobAdmission?.dispose());
@@ -384,12 +402,17 @@ export class HeadlessDaemon {
     if (this.server) {
       this.ready = false;
       const server = this.server;
+      const identity = this.socketIdentity;
       this.server = null;
+      this.socketIdentity = null;
       const closed = new Promise<void>((resolve) => server.close(() => resolve()));
       for (const socket of this.sockets) socket.destroy();
       await closed;
       this.sockets.clear();
-      rmSync(this.state.socketPath, { force: true });
+      // close() already unlinked the path, so by now a replacement daemon may own
+      // it — the deterministic project socket plus idle auto-stop makes that a
+      // plain CLI-arrives-during-shutdown race. Reclaim only our own inode.
+      removeOwnedSocket(this.state.socketPath, identity);
     }
     this.broker?.stop();
     if (this.ownedStateInitialized) {
@@ -1961,6 +1984,11 @@ async function waitForExecutions(executions: Set<Promise<void>>, timeoutMs: numb
     Bun.sleep(timeoutMs).then(() => marker),
   ]);
   return outcome !== marker;
+}
+
+/** EADDRINUSE is the kernel's single-owner verdict, not an internal fault. */
+function isAddressInUse(error: unknown) {
+  return (error as NodeJS.ErrnoException | undefined)?.code === "EADDRINUSE";
 }
 
 async function socketBecomesAvailable(path: string) {
