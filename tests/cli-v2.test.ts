@@ -388,6 +388,22 @@ describe("CLI usage errors are classified as operator input, not runtime faults"
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("Internal error");
   });
+
+  test("tui refuses without a terminal instead of dumping Ink's stack trace", async () => {
+    // Ink puts stdin in raw mode; reaching render() without a TTY threw from
+    // inside React and reached the operator as a framework trace naming
+    // node_modules. Test processes have no TTY, so this exercises the guard.
+    const result = await runCli(["tui"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("interactive terminal");
+    expect(result.stderr).not.toContain("node_modules");
+    expect(result.stderr).not.toContain("Raw mode is not supported");
+    // The remedy must not blame the operating system: this fires on macOS.
+    expect(result.stderr).not.toContain("requires macOS or Linux.");
+
+    const json = await runCli(["tui", "--json"]);
+    expect(JSON.parse(json.stdout).error.code).toBe("UNSUPPORTED_PLATFORM");
+  });
 });
 
 async function runCli(args: string[], extraEnv: Record<string, string> = {}) {
