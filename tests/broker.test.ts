@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProviderBroker, type BrokerLinkedOperation } from "../src/broker/server";
+import { BROKER_UNIX_ONLY_RELAY_PORT, ProviderBroker, type BrokerLinkedOperation } from "../src/broker/server";
 import { getProvider, registerProvider, unregisterProvider } from "../src/broker/providers";
 import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
 import { DurableBrokerQuotaStore } from "../src/runtime/broker-quota-store";
@@ -141,6 +141,174 @@ describe("provider broker", () => {
     });
     expect(response.status).toBe(200);
     expect((await response.json()) as { ok: boolean }).toEqual({ ok: true });
+  });
+
+  test("with unixSocketPath and allowLoopbackTcp=false, host TCP is gated off and lease carries unixSocket", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-tcp-gate-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const socket = join(root, "broker.sock");
+    const broker = new ProviderBroker({
+      unixSocketPath: socket,
+      allowLoopbackTcp: false,
+      credentials: { OPENAI_API_KEY: "parent-key" },
+    });
+    broker.start();
+    closers.push(() => broker.stop());
+    expect(broker.tcpListening).toBe(false);
+    expect(broker.allowLoopbackTcp).toBe(false);
+    const lease = broker.issueLease({
+      runId: "tcp-off",
+      provider: "openai",
+      models: ["gpt-test"],
+      endpointClasses: ["responses"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 1,
+    });
+    expect(lease.unixSocket).toBe(socket);
+    expect(lease.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/openai$/);
+    // Synthetic baseUrl must not be host-reachable when TCP is gated off.
+    await expect(fetch(lease.baseUrl.replace(/\/openai$/, "/"), { signal: AbortSignal.timeout(500) })).rejects.toThrow();
+    const viaUnix = await fetch("http://headless-broker/openai/v1/models", {
+      unix: socket,
+      headers: { authorization: `Bearer ${lease.token}` },
+    });
+    // models may 502 without upstream, but the Unix edge must accept the connection
+    expect([200, 401, 403, 404, 502, 503]).toContain(viaUnix.status);
+  });
+
+  test("with unixSocketPath and allowLoopbackTcp=true, host TCP remains reachable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-tcp-on-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const socket = join(root, "broker.sock");
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ ok: true }) });
+    closers.push(() => upstream.stop(true));
+    const broker = new ProviderBroker({
+      unixSocketPath: socket,
+      allowLoopbackTcp: true,
+      credentials: { OPENAI_API_KEY: "parent-key" },
+      upstreams: { openai: `http://127.0.0.1:${upstream.port}` },
+    });
+    broker.start();
+    closers.push(() => broker.stop());
+    expect(broker.tcpListening).toBe(true);
+    const lease = broker.issueLease({
+      runId: "tcp-on",
+      provider: "openai",
+      models: ["gpt-test"],
+      endpointClasses: ["responses"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 2,
+    });
+    expect(lease.unixSocket).toBe(socket);
+    const viaTcp = await fetch(`${lease.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${lease.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", input: "hello" }),
+    });
+    expect(viaTcp.status).toBe(200);
+    const viaUnix = await fetch("http://headless-broker/openai/v1/responses", {
+      unix: socket,
+      method: "POST",
+      headers: { authorization: `Bearer ${lease.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", input: "hello" }),
+    });
+    expect(viaUnix.status).toBe(200);
+  });
+
+  test("with unixSocketPath and no opt-out, the lease baseUrl has a host TCP owner", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-tcp-default-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const socket = join(root, "broker.sock");
+    const previous = process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP;
+    delete process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP;
+    try {
+      const broker = new ProviderBroker({
+        unixSocketPath: socket,
+        credentials: { OPENAI_API_KEY: "parent-key" },
+      });
+      broker.start();
+      closers.push(() => broker.stop());
+      expect(broker.allowLoopbackTcp).toBe(true);
+      expect(broker.tcpListening).toBe(true);
+      const lease = broker.issueLease({
+        runId: "tcp-default",
+        provider: "openai",
+        models: ["gpt-test"],
+        endpointClasses: ["responses"],
+        expiresAt: Date.now() + 60_000,
+        maxRequests: 1,
+      });
+      expect(new URL(lease.baseUrl).port).not.toBe(String(BROKER_UNIX_ONLY_RELAY_PORT));
+    } finally {
+      if (previous === undefined) delete process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP;
+      else process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP = previous;
+    }
+  });
+
+  test("with unixSocketPath and allowLoopbackTcp omitted, HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=1 enables TCP", async () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-env-tcp-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const socket = join(root, "broker.sock");
+    const previous = process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP;
+    process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP = "1";
+    try {
+      const broker = new ProviderBroker({
+        unixSocketPath: socket,
+        credentials: { OPENAI_API_KEY: "parent-key" },
+      });
+      broker.start();
+      closers.push(() => broker.stop());
+      expect(broker.allowLoopbackTcp).toBe(true);
+      expect(broker.tcpListening).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP;
+      else process.env.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP = previous;
+    }
+  });
+
+  test("reads loopback policy from the supplied environment instead of ambient process state", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-env-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const broker = new ProviderBroker({
+      credentials: { OPENAI_API_KEY: "parent-key" },
+      env: { HEADLESS_BROKER_ALLOW_LOOPBACK_TCP: "0" },
+      unixSocketPath: join(root, "broker.sock"),
+    });
+    expect(broker.allowLoopbackTcp).toBe(false);
+  });
+
+  test("rejects an invalid loopback policy instead of silently enabling TCP", () => {
+    expect(() => new ProviderBroker({
+      env: { HEADLESS_BROKER_ALLOW_LOOPBACK_TCP: "flase" },
+    })).toThrow("HEADLESS_BROKER_ALLOW_LOOPBACK_TCP must be one of");
+  });
+
+  test("without unixSocketPath, loopback TCP behavior is unchanged", async () => {
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ tcp: true }) });
+    closers.push(() => upstream.stop(true));
+    const broker = new ProviderBroker({
+      credentials: { OPENAI_API_KEY: "parent-key" },
+      upstreams: { openai: `http://127.0.0.1:${upstream.port}` },
+    });
+    broker.start();
+    closers.push(() => broker.stop());
+    expect(broker.tcpListening).toBe(true);
+    const lease = broker.issueLease({
+      runId: "tcp-only",
+      provider: "openai",
+      models: ["gpt-test"],
+      endpointClasses: ["responses"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 1,
+    });
+    expect(lease.unixSocket).toBeUndefined();
+    const response = await fetch(`${lease.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${lease.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", input: "hello" }),
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()) as { tcp: boolean }).toEqual({ tcp: true });
   });
 
   test.skipIf(process.platform !== "linux")("the Linux loopback relay forwards only through the designated broker socket", async () => {
@@ -1262,12 +1430,60 @@ describe("provider broker", () => {
     const xai = broker.issueLease({ runId: "x", provider: "xai", models: ["grok-test"], endpointClasses: ["chat"], expiresAt: Date.now() + 60_000, maxRequests: 1 });
 
     await fetch(`${anthropic.baseUrl}/v1/messages`, { method: "POST", headers: { "x-api-key": anthropic.token, "content-type": "application/json" }, body: JSON.stringify({ model: "claude-test" }) });
-    await fetch(`${gemini.baseUrl}/v1beta/models/gemini-test:generateContent?key=${gemini.token}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    await fetch(`${gemini.baseUrl}/v1beta/models/gemini-test:generateContent`, {
+      method: "POST",
+      headers: { "x-goog-api-key": gemini.token, "content-type": "application/json" },
+      body: "{}",
+    });
     await fetch(`${xai.baseUrl}/v1/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${xai.token}`, "content-type": "application/json" }, body: JSON.stringify({ model: "grok-test" }) });
 
     expect(seen[0]?.apiKey).toBe("anthropic-real");
     expect(seen[1]?.googleKey).toBe("gemini-real");
     expect(seen[2]?.authorization).toBe("Bearer xai-real");
+  });
+
+  test("rejects lease tokens supplied only via the key query parameter", async () => {
+    const upstream = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        return Response.json({ ok: true });
+      },
+    });
+    closers.push(() => upstream.stop(true));
+    const base = `http://127.0.0.1:${upstream.port}`;
+    const broker = new ProviderBroker({
+      credentials: { GEMINI_API_KEY: "gemini-real" },
+      upstreams: { gemini: base },
+    });
+    broker.start();
+    closers.push(() => broker.stop());
+
+    const gemini = broker.issueLease({
+      runId: "query-key-rejected",
+      provider: "gemini",
+      models: ["gemini-test"],
+      endpointClasses: ["generate"],
+      expiresAt: Date.now() + 60_000,
+      maxRequests: 1,
+    });
+
+    const rejected = await fetch(
+      `${gemini.baseUrl}/v1beta/models/gemini-test:generateContent?key=${encodeURIComponent(gemini.token)}`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+    );
+    expect(rejected.status).toBe(400);
+    const body = await rejected.json() as { error?: { message?: string } };
+    expect(body.error?.message ?? "").toMatch(/headers/i);
+    expect(body.error?.message ?? "").not.toContain(gemini.token);
+    expect(JSON.stringify(broker.getLogs())).not.toContain(gemini.token);
+
+    const accepted = await fetch(`${gemini.baseUrl}/v1beta/models/gemini-test:generateContent`, {
+      method: "POST",
+      headers: { "x-goog-api-key": gemini.token, "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(accepted.status).toBe(200);
   });
 
   test("allows bounded provider extensions without permitting built-in replacement", () => {

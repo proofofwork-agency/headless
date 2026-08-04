@@ -34,7 +34,8 @@ import { installNativeAuthCapsule, nativeAuthMinimumValidityMs, supportsNativeAu
 import { terminateProcessTree as terminateChildProcessTree } from "../runtime/process-tree";
 import { positiveTimeout } from "../runtime/validation";
 import { cleanupWithDiagnostic, recordRuntimeDiagnostic } from "../runtime/diagnostics";
-import { isHeadlessError } from "../runtime/headless-error";
+import { HeadlessError, isHeadlessError, toHeadlessError } from "../runtime/headless-error";
+import { BROKER_UNIX_ONLY_RELAY_PORT } from "../broker/server";
 import { installRunToolClient, withRunToolInstructions, type RunToolWorkerAccess } from "../runtime/run-tool-client";
 import { executableReadRoots, resolveExecutable } from "../runtime/executable-read-roots";
 import { stageDarwinBunScript } from "../runtime/darwin-bun-stage";
@@ -64,6 +65,28 @@ type SandboxWrap = {
   credentialAccess: "backend-native" | "broker-lease" | "none";
 };
 
+/**
+ * A daemon-issued provider lease as it is handed to one worker.
+ *
+ * `baseUrl` is the only provider endpoint the worker ever learns, and the lease
+ * token travels with it. Whether that URL resolves to anything depends on the
+ * broker's edges, so the issuer must state it rather than let the runner guess.
+ */
+export type BrokerWorkerAccess = {
+  provider: string;
+  baseUrl: string;
+  token: string;
+  unixSocket?: string;
+  /**
+   * False when the issuing broker has NO host loopback TCP listener. `baseUrl`
+   * then names the synthetic relay port, which exists only inside a Linux
+   * worker network namespace where the containment supervisor binds it and
+   * forwards to `unixSocket`. Absent means the caller owns a real host listener
+   * on `baseUrl` (direct library and test callers that serve their own port).
+   */
+  hostLoopbackListener?: boolean;
+};
+
 export type InternalRunOptions = ExecOptions & {
   backend: string;
   jobId?: string;
@@ -71,7 +94,7 @@ export type InternalRunOptions = ExecOptions & {
   authHomeDir?: string;
   resumeNativeSessionId?: string;
   /** Opaque daemon-issued lease; intentionally absent from the public ExecOptions. */
-  broker?: { provider: string; baseUrl: string; token: string; unixSocket?: string };
+  broker?: BrokerWorkerAccess;
   /** Daemon-owned write policy. Direct library callers intentionally cannot set this through ExecOptions. */
   writeIntegration?: WriteIntegrationPolicy;
   /** Daemon-owned durable checkout manifests. */
@@ -160,6 +183,21 @@ async function executeSupervisedRun(
 
   const adapter = getBackendDefinition(options.backend);
   if (!adapter) return failedResult(options.backend, "BACKEND_UNAVAILABLE", `Backend adapter ${options.backend} is not registered.`, Date.now() - started, containment);
+
+  // Gate the lease before any worker environment, credential capsule, sandbox
+  // profile, or process exists: an endpoint nothing will answer must never be
+  // paired with a bearer token in a worker's environment.
+  if (options.broker) {
+    try {
+      assertBrokerEndpointIsServed(options.broker, { containment });
+    } catch (error) {
+      const typed = toHeadlessError(error, {
+        code: "CONTAINMENT_UNAVAILABLE",
+        safeMessage: "The daemon provider broker endpoint cannot be served to this worker.",
+      });
+      return failedResult(options.backend, typed.code, typed.safeMessage, Date.now() - started, containment, "blocked");
+    }
+  }
 
   if (containment === "required") {
     if (authMode === "broker" && adapter.security.strictAuth === "broker-api-key" && !options.broker) {
@@ -600,6 +638,11 @@ function wrapWithSandboxWithoutState(
   supervisor?: ExecutionSupervisorState,
 ): SandboxWrap {
   const containment = containmentRequirement(options);
+  // Second, independent gate for callers that reach the sandbox builder without
+  // going through executeSupervisedRun. It runs before the unsafe-containment
+  // early return so no profile can open the synthetic relay port and no
+  // uncontained command can be built around an unowned endpoint.
+  if (options.broker) assertBrokerEndpointIsServed(options.broker, { containment });
   const authMode = options.authMode ?? "broker";
   // Provider-direct is granted only to an audited backend with a concrete
   // regular-file capsule path. Legacy strictAuth describes broker compatibility;
@@ -822,6 +865,11 @@ function containedProbeExecutor(
 }
 
 function applyBrokerEnvironment(env: NodeJS.ProcessEnv, broker: NonNullable<InternalRunOptions["broker"]>) {
+  // CLI backends speak HTTP BASE_URL only. On Linux strict containment the
+  // supervisor rewrites connectivity: it binds 127.0.0.1:<port> INSIDE the
+  // worker netns and relays to the host AF_UNIX broker socket (unixSocket).
+  // Host-side TCP is not required for this relay and can be explicitly gated
+  // off when a Unix socket is configured (see ProviderBroker.allowLoopbackTcp).
   if (broker.provider === "anthropic") {
     env.ANTHROPIC_API_KEY = broker.token;
     env.ANTHROPIC_BASE_URL = broker.baseUrl;
@@ -837,10 +885,14 @@ function applyBrokerEnvironment(env: NodeJS.ProcessEnv, broker: NonNullable<Inte
     env.OPENAI_BASE_URL = broker.baseUrl;
   }
   env.HEADLESS_BROKER_TOKEN = broker.token;
+  if (broker.unixSocket) env.HEADLESS_BROKER_UNIX_SOCKET = broker.unixSocket;
 }
 
 function brokerPort(broker?: InternalRunOptions["broker"]) {
   if (!broker) return undefined;
+  // Prefer baseUrl port (real TCP listener or synthetic Unix-only relay port).
+  // When unixSocket is set, this port is the in-netns relay listen port on Linux
+  // (host cannot reach it); on Darwin residual-trust it is the host loopback port.
   const url = new URL(broker.baseUrl);
   if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "::1") {
     throw new Error("Strict broker endpoint must be loopback-only.");
@@ -851,7 +903,66 @@ function brokerPort(broker?: InternalRunOptions["broker"]) {
 }
 
 function linuxRunToolRelayPort(providerPort?: number) {
-  return providerPort === 38_471 ? 38_472 : 38_471;
+  return providerPort === BROKER_UNIX_ONLY_RELAY_PORT ? BROKER_UNIX_ONLY_RELAY_PORT + 1 : BROKER_UNIX_ONLY_RELAY_PORT;
+}
+
+/**
+ * Refuse to hand a worker a provider endpoint that nothing will answer.
+ *
+ * A Unix-socket-only broker mints a lease whose `baseUrl` names the synthetic
+ * relay port. That URL is only meaningful inside a Linux worker network
+ * namespace, where the containment supervisor binds the port and forwards to
+ * the broker's AF_UNIX socket. Everywhere else the port has no owner, yet the
+ * worker would still receive the lease bearer token as its provider API key and
+ * (on macOS) a Seatbelt profile that opens exactly that port — so any local
+ * process able to squat it would collect the token.
+ *
+ * The question this answers is "will a relay exist for THIS run", not "what
+ * platform is this": a Linux run with `containment: "unsafe"` gets no namespace
+ * and therefore no relay either.
+ */
+export function assertBrokerEndpointIsServed(
+  broker: BrokerWorkerAccess,
+  context: { containment: "required" | "unsafe"; platform?: NodeJS.Platform },
+): void {
+  const platform = context.platform ?? process.platform;
+  const port = brokerPort(broker)!;
+  // The issuer states it. The reserved relay port is a fail-closed backstop for
+  // any caller that forgets to, since nothing else may bind it (see
+  // linuxRunToolRelayPort, which already treats it as reserved).
+  const relayOnly = broker.hostLoopbackListener === false
+    || (broker.hostLoopbackListener === undefined && port === BROKER_UNIX_ONLY_RELAY_PORT);
+  if (!relayOnly) return;
+
+  const detail = { port, platform, containment: context.containment };
+  if (platform !== "linux") {
+    throw new HeadlessError(
+      "CONTAINMENT_UNAVAILABLE",
+      `The provider broker has no host loopback listener, so its lease endpoint port ${port} has no owner on ${platform}. `
+        + "Only a Linux contained worker can reach that port, through the in-namespace relay. "
+        + "Refusing to hand a worker a lease bearer token addressed to an unowned local port; "
+        + "re-enable the broker loopback listener (clear HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0) or run contained on Linux.",
+      { details: detail },
+    );
+  }
+  if (context.containment !== "required") {
+    throw new HeadlessError(
+      "CONTAINMENT_UNAVAILABLE",
+      `The provider broker has no host loopback listener, so its lease endpoint port ${port} is served only by the Linux `
+        + "in-namespace relay, and unsafe containment creates no namespace and no relay. "
+        + "Refusing to hand an uncontained worker a lease bearer token addressed to an unowned local port; "
+        + "use required containment or re-enable the broker loopback listener.",
+      { details: detail },
+    );
+  }
+  if (!broker.unixSocket || !existsSync(broker.unixSocket)) {
+    throw new HeadlessError(
+      "CONTAINMENT_UNAVAILABLE",
+      `The provider broker has no host loopback listener and its Unix socket is unavailable, so nothing can serve lease `
+        + `endpoint port ${port} inside the worker namespace.`,
+      { details: detail },
+    );
+  }
 }
 
 export { executableReadRoots } from "../runtime/executable-read-roots";

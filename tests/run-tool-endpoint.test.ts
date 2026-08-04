@@ -59,7 +59,8 @@ describe("run-scoped daemon tool endpoint", () => {
     leakedToken = endpoint.token;
 
     expect(statSync(root).mode & 0o777).toBe(0o700);
-    expect(statSync(endpoint.socketPath).mode & 0o777).toBe(0o600);
+    // secureUnixListen binds under umask 0o077 → owner-only 0o700 (stricter than legacy chmod 0o600).
+    expect(statSync(endpoint.socketPath).mode & 0o777).toBe(0o700);
     expect(await callRunToolEndpoint(endpoint, "note", { text: "bounded progress" })).toEqual({
       accepted: true,
       echoedSecret: "[REDACTED_HEADLESS_RUN_TOOL_TOKEN]",

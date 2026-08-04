@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { z } from "zod";
@@ -8,6 +8,7 @@ import { ensureOwnerOnlyDirectory } from "../runtime/project-state";
 import { redactAndTruncate, redactDeep } from "../runtime/redaction";
 import { runToolCallTimeoutMs } from "../runtime/run-tool-client";
 import { safeJsonParse } from "../runtime/safe-json";
+import { secureUnixListen } from "../runtime/secure-socket";
 
 export const RUN_TOOL_PROTOCOL_VERSION = 1 as const;
 export const MAX_RUN_TOOL_REQUEST_BYTES = 131_072;
@@ -185,14 +186,7 @@ export class RunToolEndpointManager {
     } satisfies EndpointRecord;
     server.on("connection", (socket) => this.accept(record, socket));
     try {
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(socketPath, () => {
-          server.off("error", reject);
-          resolve();
-        });
-      });
-      chmodSync(socketPath, 0o600);
+      await secureUnixListen(server, socketPath);
       record.timer = setTimeout(() => { void this.revoke(id); }, Math.max(1, scope.expiresAt - this.now()));
       record.timer.unref?.();
       this.records.set(id, record);

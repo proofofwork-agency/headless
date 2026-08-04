@@ -162,8 +162,8 @@ describe("ledger v2", () => {
   test("verifies each mixed SHA/HMAC record with its declared key and rotates without downgrade", () => {
     const { ledger, ledgerPath, readModelPath, projectId, root } = fixture();
     ledger.append("sha", { value: 1 });
-    const firstKey = "first-ledger-key-material-0001";
-    const secondKey = "second-ledger-key-material-0002";
+    const firstKey = "first-ledger-key-material-0001-extra";
+    const secondKey = "second-ledger-key-material-0002-extra";
     const hmac = new LedgerV2({
       ledgerPath,
       readModelPath: join(root, "hmac-read-model.json"),
@@ -208,7 +208,7 @@ describe("ledger v2", () => {
 
   test("refuses a directly-appended SHA downgrade in the live cache and on cache rebuild", () => {
     const { ledgerPath, readModelPath, projectId, root } = fixture();
-    const hmacKey = "live-downgrade-key-material-0001";
+    const hmacKey = "live-downgrade-key-material-0001-extra";
     const ledger = new LedgerV2({
       ledgerPath,
       readModelPath,
@@ -282,8 +282,8 @@ describe("ledger v2", () => {
 
   test("verifies mixed HMAC key rotations and reports every observed key id", () => {
     const { ledger, ledgerPath, projectId, root } = fixture();
-    const firstKey = "first-ledger-key-material-0001";
-    const secondKey = "second-ledger-key-material-0002";
+    const firstKey = "first-ledger-key-material-0001-extra";
+    const secondKey = "second-ledger-key-material-0002-extra";
     ledger.append("sha", { value: 1 });
     new LedgerV2({
       ledgerPath,
