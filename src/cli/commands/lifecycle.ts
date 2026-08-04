@@ -7,6 +7,7 @@ import {
   flagArgsBeforeSeparator,
   getArg,
   printJson,
+  runningDaemonClient,
   shellCwdArg,
 } from "../shared";
 import { EXEC_PROFILES, profileChoices } from "../profile";
@@ -174,7 +175,7 @@ export async function runDoctorCommand(args: string[]) {
 
 export async function runStatusCommand(args: string[]) {
   const flags = flagArgsBeforeSeparator(args);
-  const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
+  const client = await runningDaemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
   const sessionId = getArg(flags, "--session-id");
   const [ping, tasks, snapshot, orchestration] = await Promise.all([
     client.call("ping"),

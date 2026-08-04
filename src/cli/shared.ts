@@ -1,5 +1,5 @@
 import { backendChoices, normalizeBackend } from "../backends/ids";
-import { connectOrStartDaemon } from "../daemon/connect";
+import { connectExistingDaemon, connectOrStartDaemon } from "../daemon/connect";
 import type { HeadlessDaemonClient } from "../daemon/client";
 import type { Job } from "../contracts/durable";
 import type { RunResult } from "../contracts/run";
@@ -171,6 +171,20 @@ export async function daemonClient(
     extensionModules: getRepeatedArgs(flags, "--extension-module"),
     enableExperimentalSessions: options.enableExperimentalSessions,
   });
+}
+
+/** Connect to a live project daemon without turning an inspection into startup. */
+export async function runningDaemonClient(projectRoot: string, flags: string[] = []) {
+  ensureSupportedPlatform();
+  const client = await connectExistingDaemon({
+    projectRoot,
+    extensionConfigPath: getArg(flags, "--extension-config"),
+    extensionModules: getRepeatedArgs(flags, "--extension-module"),
+  });
+  if (!client) {
+    throw new HeadlessError("DAEMON_UNAVAILABLE", `No Headless daemon is running for ${projectRoot}.`);
+  }
+  return client;
 }
 
 export async function submitAndWait(client: HeadlessDaemonClient, request: Record<string, unknown>) {

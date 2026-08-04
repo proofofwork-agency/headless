@@ -1,15 +1,14 @@
 import { resolveCommandAction } from "../argv";
 import {
   CliUsageError,
-  daemonClient,
   ensureSupportedPlatform,
   flagArgsBeforeSeparator,
   getArg,
   getRepeatedArgs,
   parseIntegerArg,
+  runningDaemonClient,
   setActiveDaemon,
 } from "../shared";
-import { connectExistingDaemon } from "../../daemon/connect";
 import { listDaemonInventory } from "../../runtime/daemon-inventory";
 import { HeadlessError } from "../../runtime/headless-error";
 import { existsSync } from "node:fs";
@@ -42,14 +41,7 @@ export async function runDaemonCommand(args: string[]) {
     return;
   }
   if (action === "stop") {
-    const client = await connectExistingDaemon({
-      projectRoot,
-      extensionConfigPath: getArg(flags, "--extension-config"),
-      extensionModules: getRepeatedArgs(flags, "--extension-module"),
-    });
-    if (!client) {
-      throw new HeadlessError("DAEMON_UNAVAILABLE", `No Headless daemon is running for ${projectRoot}.`);
-    }
+    const client = await runningDaemonClient(projectRoot, flags);
     const ping = await client.call<{ runtime?: { pid?: unknown; entrypoint?: unknown } }>("ping", {}, 2_000);
     const pid = ping.runtime?.pid;
     if (!Number.isSafeInteger(pid) || Number(pid) <= 1 || Number(pid) === process.pid) {
@@ -69,7 +61,7 @@ export async function runDaemonCommand(args: string[]) {
   }
   if (action === "reap") return runDaemonReap(flags);
   if (action !== "status") throw new CliUsageError("Usage: headless daemon <serve|status|stop|reap> [--cwd dir]");
-  const client = await daemonClient(projectRoot, flags);
+  const client = await runningDaemonClient(projectRoot, flags);
   console.log(JSON.stringify(await client.call("ping"), null, 2));
 }
 
