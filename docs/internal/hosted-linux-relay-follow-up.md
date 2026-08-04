@@ -63,6 +63,19 @@ docker run --rm --privileged --platform "$HOST_PLATFORM" --cpus=2 --memory=3g -v
 
 **Why every case is asserted by name instead of trusting the exit code.** A `bun test` run whose cases were all gated out prints `0 pass 4 skip 0 fail` and exits 0, which is indistinguishable from success at a glance — that vacuous pass is what this file used to hand a maintainer. Emulation produces it too: without a correct `--platform`, Docker on Apple Silicon reuses a cached `linux/amd64` image, emulated bubblewrap fails `strictContainmentAvailable()`, and every gated case skips. Hardcoding `linux/arm64` would move the same failure onto x86-64 hosts, so the platform is derived from `uname -m`. Asserting only the late-socket case was not enough either: re-running the suite with `GITHUB_ACTIONS=true HEADLESS_PRIVILEGED_CONTAINMENT_CI=1` skips exactly the four cooperation cases while the late-socket case still passes, and the single-case version of this command printed `OK` and exited 0 on that log. "Read the output carefully" is not fail-loud; the probe and the five anchored assertions are.
 
+**Current off-CI evidence — this command run VERBATIM at `2acb8c3`** (extracted from the fenced block programmatically, not retyped), on Docker 27.4.0, `--platform linux/arm64`, real `bubblewrap 0.11.0`, privileged:
+
+```
+(pass) injects the scoped helper into the contained worker and revokes it at terminal state [484.00ms]
+(pass) runs one depth-one child and omits delegation from the child credential [532.88ms]
+(pass) returns child failure as tool data and lets the parent finish [499.08ms]
+(pass) returns child timeout as tool data inside the parent deadline [1339.95ms]
+ 20 pass  7 skip  0 fail
+OK: all four cooperation cases and the late-socket case executed and passed
+```
+
+Exit 0 — but the exit code is not what makes this evidence. The command's own five anchored assertions are, because a fully gated-out run also exits 0. Anchored to the CURRENT head deliberately: an earlier version of this section recorded a run against `main` @ 93c7928, taken before the late-socket case was split and before either case asserted `socketVisible`, and `tests/containment-v2.test.ts` has moved +107/-6 since. Evidence for a test that no longer exists is a stale claim, not history.
+
 **Do not use emulation as evidence for the seccomp architecture check.** `rejects x32 syscall numbers before native seccomp dispatch` gates on `process.arch === "x64"`, so an arm64 host skips it. Running it under `--platform linux/amd64` on arm64 hardware **fails** (`Expected: true, Received: false`, containment-v2.test.ts:570) — and that is an emulation artifact, not a defect: the same test passes on real x86-64 in hosted Ubuntu CI (`(pass) … 108.24ms`, main @ 93c7928). Emulated x86-64 does not faithfully reproduce x32 syscall tagging, so a pass there would have been worthless and the fail is not a finding.
 
 **Hosted x86-64 status, current.** `.github/workflows/privileged-containment.yml` runs `tests/containment-v2.test.ts` in a privileged `oven/bun:1.3.14` container on `ubuntu-latest` with `CI=true GITHUB_ACTIONS=true` and, deliberately, WITHOUT `HEADLESS_PRIVILEGED_CONTAINMENT_CI`. That combination arms the hosted predicate while leaving the flaky combined case skipped. A representative run:
