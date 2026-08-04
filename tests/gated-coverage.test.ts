@@ -42,11 +42,12 @@ const GATES: GateCoverage[] = [
       "It is a bwrap case, so macOS cannot run it, and the hosted GitHub Linux runner cannot terminalize "
       + "the relay child (see docs/internal/hosted-linux-relay-follow-up.md). The privileged CI step that "
       + "HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 was written for no longer exists, so the only coverage is a "
-      + "local Linux machine or a self-hosted privileged runner that sets that variable. NOTE: as of "
-      + "2026-08-04 this gate IS covered on hosted x86-64 by .github/workflows/privileged-containment.yml, "
-      + "which sets that variable in a privileged container and asserts the case reached (pass) rather than "
-      + "(skip). It stays listed here because that workflow is path-filtered rather than part of the "
-      + "always-on release gate, so an unrelated change still merges without it running.",
+      + "local Linux machine or a self-hosted privileged runner that sets that variable. A privileged "
+      + "hosted job (.github/workflows/privileged-containment.yml) now runs it on x86-64, but it is "
+      + "INTERMITTENT there — one pass then one fail on a docs-only commit, probe exit 82 — so it stays "
+      + "uncovered rather than being promoted on a single green sample. Measured reliably only off-CI on "
+      + "Linux arm64. What stays covered in CI is the general AF_UNIX denial, via probeLinuxBwrap on ubuntu "
+      + "and the pre-existing-socket linuxBwrapTest; what is uncovered is the late-CREATED host socket.",
   },
   { gate: "darwinTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },
   { gate: "realDarwinNetworkTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },

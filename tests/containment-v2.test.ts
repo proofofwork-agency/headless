@@ -528,7 +528,12 @@ describe("Linux bubblewrap profiles", () => {
         new Response(child.stdout).text(),
         new Response(child.stderr).text(),
       ]);
-      expect(exitCode, stderr).toBe(0);
+      // stdout carries the probe's own observations and is the ONLY thing that
+      // says WHICH of its four conditions failed — a connectable late socket is
+      // a containment breach, while an unreachable broker or run-tool is a
+      // relay-lifecycle problem, and exit 82 covers both. Reporting stderr
+      // alone made a real hosted-CI failure undiagnosable from the log.
+      expect(exitCode, `stdout: ${stdout}\nstderr: ${stderr}`).toBe(0);
       const observed = JSON.parse(stdout) as { unixError: string; brokerStatus: number; brokerBody: string; toolCode: number; toolOutput: string };
       expect(observed.unixError).not.toBe("CONNECTED");
       expect(observed.brokerStatus).toBe(200);
