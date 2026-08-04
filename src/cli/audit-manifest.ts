@@ -1,4 +1,5 @@
 import { COMMAND_SPECS, type CliCommandName } from "./command-specs";
+import { POSITIONAL_GRAMMAR, type PositionalGrammar } from "./positional-grammar";
 
 export type AuditStatus = "PASS" | "FAIL" | "BLOCKED" | "EXPECTED_REJECTION" | "DEFERRED";
 
@@ -11,23 +12,41 @@ export type CliAuditCase = {
   risk: "safe" | "cost" | "destructive";
 };
 
-const subcommands: Partial<Record<CliCommandName, readonly string[]>> = {
-  daemon: ["serve", "start", "status", "stop"],
-  project: ["trust status", "trust grant", "trust revoke"],
-  fleet: ["health", "profile create", "profile upsert", "profile get", "profile list", "profile remove"],
-  goal: ["start", "run", "send", "follow", "status", "list", "cancel", "result"],
-  collaboration: ["turns", "messages", "acknowledge", "ack", "transfer-synthesizer"],
-  approval: ["list", "resolve"],
-  candidate: ["inspect", "integrate", "reject"],
-  session: ["create", "send", "resume", "cancel", "status", "result"],
-  workflow: ["run", "validate", "draft-create", "draft-list", "draft-get", "draft-launch", "list", "status", "wait", "pause", "resume", "cancel"],
-  autonomy: ["on", "start", "off", "stop", "status", "ask", "more", "ask-for-work", "backup"],
-  mcp: ["serve", "install codex", "install grok", "install claude", "install opencode", "remove codex", "remove grok", "remove claude", "remove opencode", "status codex", "status grok", "status claude", "status opencode"],
-  skill: ["list", "inspect", "import", "enable", "use", "revoke"],
-  loop: ["start", "list", "status", "pause", "resume", "cancel"],
-  ledger: ["verify", "repair-tail"],
-  budget: ["list", "upsert", "linked-hold inspect", "linked-hold quarantine"],
+/**
+ * Which operand values are worth auditing is the only genuinely audit-specific
+ * part of a subcommand row: the grammar declares that `mcp install` takes a
+ * host, not which hosts this inventory should enumerate.
+ */
+const MCP_HOSTS = ["codex", "grok", "claude", "opencode"] as const;
+const AUDIT_OPERANDS: Readonly<Record<string, readonly string[]>> = {
+  "mcp install": MCP_HOSTS,
+  "mcp remove": MCP_HOSTS,
+  "mcp status": MCP_HOSTS,
 };
+
+/**
+ * Every action path the grammar declares, deepest-first, as space-joined
+ * subcommands: `trust grant`, `linked-hold quarantine`, `reap`.
+ *
+ * Derived rather than hand-listed because the hand-listed catalog was a second
+ * source of truth and had already drifted: `lead` and `receipt` had no rows at
+ * all, `daemon` was missing reap, and `mcp` was missing the server alias — all
+ * four invisible to a coverage test that only compared command names.
+ */
+function grammarActionPaths(grammar: PositionalGrammar, prefix: readonly string[] = []): string[][] {
+  if (grammar.kind !== "actions") return prefix.length ? [[...prefix]] : [];
+  return Object.entries(grammar.actions).flatMap(([action, child]) => grammarActionPaths(child, [...prefix, action]));
+}
+
+function subcommandsFor(command: CliCommandName): string[] {
+  const grammar = POSITIONAL_GRAMMAR[command];
+  if (!grammar) return [];
+  return grammarActionPaths(grammar).flatMap((path) => {
+    const joined = path.join(" ");
+    const operands = AUDIT_OPERANDS[`${command} ${joined}`];
+    return operands ? operands.map((operand) => `${joined} ${operand}`) : [joined];
+  });
+}
 
 /** Read-only inventory used by the black-box audit and CI coverage checks. */
 export const CLI_AUDIT_MANIFEST: readonly CliAuditCase[] = COMMAND_SPECS.flatMap((spec) => {
@@ -41,7 +60,7 @@ export const CLI_AUDIT_MANIFEST: readonly CliAuditCase[] = COMMAND_SPECS.flatMap
     risk: commandRisk(spec.name),
   }];
   for (const alias of aliases) rows.push({ id: alias, command: spec.name, argv: [alias], description: `alias for ${spec.name}`, expected: "DEFERRED", risk: commandRisk(spec.name) });
-  for (const subcommand of subcommands[spec.name] ?? []) rows.push({
+  for (const subcommand of subcommandsFor(spec.name)) rows.push({
     id: `${spec.name}:${subcommand}`,
     command: spec.name,
     argv: [spec.name, ...subcommand.split(" ")],
@@ -70,7 +89,10 @@ function subcommandRisk(command: CliCommandName, subcommand: string): CliAuditCa
   if (command === "approval" && subcommand === "resolve") return "destructive";
   if (command === "candidate" && (subcommand === "integrate" || subcommand === "reject")) return "destructive";
   if (command === "project" || command === "fleet") return "destructive";
-  if (command === "daemon" && (subcommand === "serve" || subcommand === "start")) return "destructive";
+  // reap kills resident daemons; use/release rewrite the configured foreground
+  // lead. Both were unreachable while the catalog was hand-maintained.
+  if (command === "daemon") return ["serve", "start", "reap"].includes(subcommand) ? "destructive" : "safe";
+  if (command === "lead") return subcommand === "status" ? "safe" : "destructive";
   if (["exec", "launch", "council"].includes(command)) return "cost";
   if (["session", "goal", "workflow"].includes(command) && ["create", "send", "resume", "run", "start"].includes(subcommand)) return "cost";
   if (command === "autonomy" && ["on", "start"].includes(subcommand)) return "cost";

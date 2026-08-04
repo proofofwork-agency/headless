@@ -5,8 +5,7 @@ import type { Job } from "../contracts/durable";
 import type { RunResult } from "../contracts/run";
 import { redactAndTruncate } from "../runtime/redaction";
 import { HeadlessError, toStructuredError } from "../runtime/headless-error";
-import { VALUE_FLAGS } from "./command-specs";
-import { CliUsageError, flagArgsBeforeSeparator, readFlagValue } from "./argv";
+import { CliUsageError, flagArgsBeforeSeparator, parseCommandArgv, readFlagValue } from "./argv";
 import { parseExecProfile } from "./profile";
 import { printRemedy } from "./remedy";
 
@@ -61,26 +60,31 @@ export function getRepeatedArgs(argv: string[], name: string) {
 export function parseIntegerArg(argv: string[], name: string, maximum = MAX_TIMEOUT_MS) {
   const index = argv.indexOf(name);
   if (index < 0) return undefined;
-  const value = argv[index + 1];
-  if (value === undefined) throw new CliUsageError(`Missing value for ${name}.`);
+  // Reading argv[index + 1] raw made `--limit --json` and `--limit --` report
+  // "Invalid value", blaming a number the operator never wrote. Every other
+  // reader routes through readFlagValue; this was the last holdout.
+  const value = readFlagValue(argv, name, index);
   if (!/^\d+$/.test(value.trim())) throw invalidInteger(name, maximum);
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > maximum) throw invalidInteger(name, maximum);
   return parsed;
 }
 
+/**
+ * Free-text operand for the command in argv[0].
+ *
+ * The scan is delegated to parseCommandArgv so the prompt the handler runs is
+ * exactly the operand the grammar validated. A private scanner using
+ * token.startsWith("-") and the GLOBAL flag union disagreed with it on a bare
+ * `-`, on negative numerics, and on flags belonging to other commands: `council
+ * -1` passed validation with `-1` as the question, then returned undefined here
+ * and silently ran the DEFAULT council instead — a different, quota-spending run
+ * than the operator asked for.
+ */
 export function getPrompt(argv: string[]) {
   const separator = argv.indexOf("--");
   if (separator >= 0) return argv.slice(separator + 1).join(" ") || undefined;
-  const positionals: string[] = [];
-  for (let index = 1; index < argv.length; index += 1) {
-    const token = argv[index];
-    if (token.startsWith("-")) {
-      if (VALUE_FLAGS.has(token)) index += 1;
-      continue;
-    }
-    positionals.push(token);
-  }
+  const positionals = parseCommandArgv(argv).positionalEntries.map((entry) => entry.value);
   if (positionals.length > 1) {
     throw new CliUsageError(`Unexpected extra prompt argument${positionals.length === 2 ? "" : "s"}: ${positionals.slice(1).join(" ")}`);
   }

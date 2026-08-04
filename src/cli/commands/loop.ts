@@ -1,4 +1,4 @@
-import { resolveCommandAction } from "../argv";
+import { missingOperandError, resolveCommandAction } from "../argv";
 import { renderCommandUsage } from "../command-specs";
 import { CliUsageError, daemonClient, flagArgsBeforeSeparator, getApprovalPolicy, getArg, getAuthMode, getMode, getPrompt, getRepeatedArgs, parseIntegerArg, requiredArg } from "../shared";
 
@@ -68,7 +68,7 @@ function repairPolicy(flags: string[]) {
 
 function goalPolicy(argvWithoutAction: string[], flags: string[]) {
   const objective = getPrompt(argvWithoutAction);
-  if (!objective) throw new CliUsageError("A loop objective or --file policy is required.");
+  if (!objective) throw missingOperandError("loop", "objective", { actionPath: ["start"], alternativeFlags: ["--file", "--repair"] });
   const deadlineMs = parseIntegerArg(flags, "--deadline-ms") ?? 7_200_000;
   const maxIterations = parseIntegerArg(flags, "--max-iterations", 1_000) ?? 5;
   const perCost = Number(getArg(flags, "--per-iteration-cost-usd") ?? "1");

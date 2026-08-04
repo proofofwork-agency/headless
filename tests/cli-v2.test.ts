@@ -439,6 +439,28 @@ describe("CLI usage errors are classified as operator input, not runtime faults"
     expect(parsed.error.message).toBe("Unknown flag for tui: --json.");
   });
 
+  test("the real CLI rejects surplus and missing positionals, not only direct calls", async () => {
+    // validateCommandFlags was pinned end-to-end by the `tui --json` case above,
+    // but every positional assertion called validateCommandPositionals directly:
+    // deleting its call in src/cli.ts left the whole suite green while `mcp
+    // status codex EXTRA` silently ran the status it was not asked for.
+    // `mcp status` and a prompt-less `exec` both resolve without a daemon, so
+    // this stays cheap.
+    const accepted = await runCli(["mcp", "status", "codex"]);
+    expect(accepted.exitCode).toBe(0);
+
+    const surplus = await runCli(["mcp", "status", "codex", "EXTRA"]);
+    expect(surplus.exitCode).toBe(1);
+    expect(surplus.stderr).toContain('mcp status received an unexpected extra argument "EXTRA".');
+
+    const missing = await runCli(["exec"]);
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain("exec requires prompt.");
+
+    const missingJson = await runCli(["exec", "--json"]);
+    expect(JSON.parse(missingJson.stdout).error).toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
   test("gate validation failures remain one parseable JSON document", async () => {
     const project = trackDaemonProjectRoot(mkdtempSync(join(tmpdir(), "headless-cli-gate-project-")));
     const state = mkdtempSync(join(tmpdir(), "headless-cli-gate-state-"));

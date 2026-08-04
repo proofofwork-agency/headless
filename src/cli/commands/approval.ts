@@ -1,5 +1,5 @@
 import type { DaemonMethod } from "../../daemon/protocol";
-import { resolveCommandAction } from "../argv";
+import { missingOperandError, resolveCommandAction } from "../argv";
 import { renderCommandUsage } from "../command-specs";
 import {
   CliUsageError,
@@ -34,7 +34,7 @@ export function parseApprovalCommand(args: string[]): ApprovalCommandCall {
       throw new CliUsageError("Invalid --decision. Expected approved or rejected.");
     }
     const resolution = getArg(flags, "--resolution") ?? getPrompt(argvWithoutAction);
-    if (!resolution) throw new CliUsageError("A resolution is required via --resolution or a positional argument.");
+    if (!resolution) throw missingOperandError("approval", "resolution", { actionPath: ["resolve"], alternativeFlags: ["--resolution"] });
     return {
       method: "approval.resolve",
       params: { approvalId: requiredArg(flags, "--approval-id"), decision, resolution },
