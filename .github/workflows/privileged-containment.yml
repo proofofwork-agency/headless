@@ -1,0 +1,73 @@
+name: Privileged containment
+
+# The late-socket relay case (`linuxRelayLifecycleTest`) ran on NO CI leg at
+# all: macOS skips it as Linux-only, and the ordinary hosted-Linux job skips it
+# because it is unprivileged. It was accurately declared uncovered and then left
+# that way, which is not the same as being safe.
+#
+# A privileged container on the hosted runner is known to work for THIS file —
+# docs/internal/hosted-linux-relay-follow-up.md records that the
+# tests/containment-v2.test.ts cases passed there while the four
+# tests/daemon-run-tool.test.ts cooperation cases did not. So this job covers
+# exactly the former on real x86-64 Linux, and deliberately does not attempt the
+# latter, whose hosted incompatibility is a separate open investigation.
+#
+# Not on every pull request: it pulls an image and builds a sandbox, and the
+# ordinary gates already cover the unprivileged surface. Run it on demand, and
+# on any change to the containment surface it exists to prove.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/runtime/os-sandbox.ts"
+      - "src/runtime/secure-socket.ts"
+      - "src/broker/linux-relay.ts"
+      - "src/daemon/run-tool-endpoint.ts"
+      - "tests/containment-v2.test.ts"
+      - ".github/workflows/privileged-containment.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privileged-containment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  late-socket:
+    name: x86-64 privileged bubblewrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run containment suite under privileged bubblewrap
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged -v "$PWD:/repo:ro" oven/bun:1.3.14 bash -lc '
+            set -euo pipefail
+            apt-get update -qq
+            apt-get install -y -qq bubblewrap
+            cp -r /repo /work
+            cd /work
+            bun install --frozen-lockfile --ignore-scripts
+            echo "arch=$(uname -m) bwrap=$(bwrap --version)"
+            HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 bun test tests/containment-v2.test.ts
+          ' 2>&1 | tee containment.log
+
+      - name: Refuse a vacuous pass
+        run: |
+          set -euo pipefail
+          # The whole point of this job is the ONE case no other leg runs, and a
+          # skipped suite reports "0 fail" exactly like a passing one. That is
+          # not hypothetical: the documented local command silently skipped
+          # everything on Apple Silicon and printed 0 pass / 4 skip / 0 fail.
+          # Assert the case RAN, on this architecture, or fail the job.
+          grep -q 'x86_64' containment.log \
+            || { echo "::error::not x86-64; this job exists to cover that architecture"; exit 1; }
+          grep -qE '\(pass\).*denies a host Unix socket created after launch' containment.log \
+            || { echo "::error::late-socket case did not PASS — it was skipped or failed, so this job proved nothing"; exit 1; }
+          grep -qE '\(pass\).*rejects x32 syscall numbers before native seccomp dispatch' containment.log \
+            || { echo "::error::x32 alternate-ABI case did not PASS on x86-64"; exit 1; }
+          echo "late-socket and x32 cases both executed and passed on x86-64"
