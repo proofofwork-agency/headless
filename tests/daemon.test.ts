@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection, createServer } from "node:net";
@@ -32,6 +32,7 @@ import { parseGrokJsonl } from "../src/backends/grok";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
 import { exec as headlessExec } from "../src/index";
 import { schedulingAttempts, schedulingDeadline, schedulingWindow } from "./support/timing";
+import { withSocketElection } from "../src/runtime/socket-election";
 
 setDefaultTimeout(20_000);
 
@@ -99,6 +100,33 @@ describe("authenticated project daemon", () => {
     const ping = await client.call<{ projectId: string }>("ping");
     expect(ping.projectId).toBe(winner.state.projectId);
     expect(existsSync(winner.state.socketPath)).toBe(true);
+  });
+
+  test("does not enter stale-socket recovery while another election owns the database", async () => {
+    const fixture = createFixture();
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, principal: "coordinator" });
+    daemons.push(daemon);
+
+    // Drive the real stale-socket branch without racing the scheduler: rename a
+    // bound donor before closing it, then hold the persistent election while
+    // start() tries to recover that entry. Removing start()'s election wrapper
+    // makes it probe, unlink, bind, and fulfill, so this regression fails.
+    const donorPath = join(daemon.state.daemonRuntimeDir, "daemon-donor.sock");
+    const donor = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve, reject) => {
+      donor.once("error", reject);
+      donor.listen(donorPath, resolve);
+    });
+    renameSync(donorPath, daemon.state.socketPath);
+    await new Promise<void>((resolve) => donor.close(() => resolve()));
+    const staleIdentity = lstatSync(daemon.state.socketPath).ino;
+
+    await withSocketElection(daemon.state.socketPath, { busyMessage: "Test owns the election." }, async () => {
+      const failure = await daemon.start().then(() => null, (error: unknown) => error);
+      expect(failure).toBeInstanceOf(HeadlessError);
+      expect(failure).toMatchObject({ code: "DAEMON_ALREADY_RUNNING", retryable: true });
+      expect(lstatSync(daemon.state.socketPath).ino).toBe(staleIdentity);
+    });
   });
 
   test("binds one owner-only socket to one canonical project and derives the principal", async () => {

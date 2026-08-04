@@ -19,6 +19,7 @@ import {
   type ProjectStatePaths,
 } from "./project-state";
 import { secureUnixListen } from "./secure-socket";
+import { withSocketElection } from "./socket-election";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const MAX_STORE_BYTES = 32 * 1024 * 1024;
@@ -149,23 +150,26 @@ function inspectLocked(paths: ProjectStatePaths, linkId: string) {
 }
 
 async function withOfflineStateLock<T>(paths: ProjectStatePaths, operation: () => T | Promise<T>) {
-  if (existsSync(paths.socketPath)) {
-    if (await socketAcceptsConnections(paths.socketPath)) {
-      throw new HeadlessError("DAEMON_ALREADY_RUNNING", "Offline linked-hold recovery refuses while a daemon owns the project state.");
-    }
-    // secureUnixListen never unlinks — EADDRINUSE is the kernel-level backstop
-    // that keeps this check-then-bind a single-owner election — so clearing a
-    // socket we just proved dead stays this caller's policy. This carries the
-    // same unclosed probe→unlink race as HeadlessDaemon.start and needs the
-    // same cross-process election lock; see the note there.
-    rmSync(paths.socketPath, { force: true });
-  }
   const server = createServer((socket) => socket.destroy());
   try {
-    // Binds under a restrictive umask so the lock socket is owner-only at
-    // creation, then verifies it; a refused socket must still be torn down,
-    // hence the server.listening check below rather than a success flag.
-    await secureUnixListen(server, paths.socketPath);
+    await withSocketElection(
+      paths.socketPath,
+      { busyMessage: "Offline linked-hold recovery refuses while a daemon owns the project state." },
+      async () => {
+        if (existsSync(paths.socketPath)) {
+          if (await socketAcceptsConnections(paths.socketPath)) {
+            throw new HeadlessError("DAEMON_ALREADY_RUNNING", "Offline linked-hold recovery refuses while a daemon owns the project state.");
+          }
+          // HeadlessDaemon.start uses this same persistent election database.
+          // Only its exclusive holder may replace a socket proven stale.
+          rmSync(paths.socketPath, { force: true });
+        }
+        // Binds under a restrictive umask so the lock socket is owner-only at
+        // creation, then verifies it; a refused socket must still be torn down,
+        // hence the server.listening check below rather than a success flag.
+        await secureUnixListen(server, paths.socketPath);
+      },
+    );
     return await operation();
   } finally {
     if (server.listening) {

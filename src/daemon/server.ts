@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 import { secureUnixListen } from "../runtime/secure-socket";
+import { withSocketElection } from "../runtime/socket-election";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { ZodError } from "zod";
@@ -248,36 +249,38 @@ export class HeadlessDaemon {
     this.stopping = false;
     this.ready = false;
     this.jobAdmission?.dispose();
-    if (existsSync(this.state.socketPath)) {
-      if (await socketBecomesAvailable(this.state.socketPath)) throw new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`);
-      // KNOWN RACE, not yet closed: a same-user daemon that completes its own
-      // election while we are probing has a live socket here by now, and this
-      // unlink deletes it, bypassing the EADDRINUSE backstop and leaving two
-      // daemons on one project. It needs a prior crash (a stale socket only
-      // exists if a daemon died without cleanup) plus two concurrent starts.
-      // Filesystem identity cannot guard it — ext4 reuses a freed inode number
-      // immediately — so closing it requires serializing probe→unlink→bind
-      // under a crash-released cross-process lock, tracked separately.
-      rmSync(this.state.socketPath, { force: true });
-    }
     const server = createServer((socket) => this.accept(socket));
     try {
-      try {
-        await secureUnixListen(server, this.state.socketPath);
-      } catch (error) {
-        // Losing the bind means a racing same-user daemon claimed the path first
-        // (its socket is either live or freshly stale). Report that as the same
-        // refusal the sequential path produces instead of a raw errno.
-        throw isAddressInUse(error)
-          ? new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`, { retryable: true })
-          : error;
-      }
-      // secureUnixListen removes its own bind-time 'error' handler once the
-      // bind resolves, leaving listenerCount('error') at zero. EventEmitter
-      // *throws* an unhandled 'error', so any post-bind transport fault the OS
-      // reports (EMFILE, ENFILE, an accept failure) would crash the daemon
-      // process rather than surface as a diagnostic. Install a persistent one.
-      server.on("error", (error) => recordRuntimeDiagnostic("transport", "daemon.server", error, "error"));
+      await withSocketElection(
+        this.state.socketPath,
+        { busyMessage: `A Headless daemon already owns ${this.state.canonicalProjectRoot}.` },
+        async () => {
+          if (existsSync(this.state.socketPath)) {
+            if (await socketBecomesAvailable(this.state.socketPath)) {
+              throw new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`);
+            }
+            // Only the SQLite election holder may clear a socket proven stale.
+            // The transaction stays exclusive through the replacement bind, so
+            // no cooperating starter can bind inside this check-then-act window.
+            rmSync(this.state.socketPath, { force: true });
+          }
+          try {
+            await secureUnixListen(server, this.state.socketPath);
+          } catch (error) {
+            // EADDRINUSE means a non-cooperating same-user process claimed the
+            // path. Preserve the public single-owner refusal instead of leaking
+            // a raw errno; the election database itself is never removed.
+            throw isAddressInUse(error)
+              ? new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`, { retryable: true })
+              : error;
+          }
+          // secureUnixListen removes its own bind-time 'error' handler once the
+          // bind resolves, leaving listenerCount('error') at zero. EventEmitter
+          // *throws* an unhandled 'error', so any post-bind transport fault the
+          // OS reports would crash the daemon instead of surfacing a diagnostic.
+          server.on("error", (error) => recordRuntimeDiagnostic("transport", "daemon.server", error, "error"));
+        },
+      );
       this.loadedExtensions = await loadDaemonExtensions(this.extensionConfig);
       this.initializeOwnedState();
       recoverLinkedProviderHolds({ budgets: this.budgets, broker: this.broker, jobs: this.jobs });
