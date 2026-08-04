@@ -74,9 +74,11 @@ jobs:
             # HEADLESS_PRIVILEGED_CONTAINMENT_CI is deliberately NOT set. That
             # override would additionally enable the COMBINED late-socket case,
             # which also requires the run-tool relay to be reachable — and that
-            # leg is intermittent on hosted x86-64 (measured 2 failures in 6
-            # runs, each reporting unixError=ENOENT with toolCode=1, i.e.
-            # containment held and only availability broke). Gating a security
+            # leg is repeatedly intermittent on hosted x86-64. Every diagnosed
+            # failure reported unixError=ENOENT with toolCode=1: containment
+            # held, only availability broke. Raw sample counts and run IDs live
+            # in docs/internal/hosted-linux-relay-follow-up.md, deliberately not
+            # here, so a changing sample never rots this comment. Gating a security
             # assertion behind a flaky availability check produces a red that
             # people learn to re-run, which is how a real breach gets waved
             # through. The pure denial case below runs without the override.

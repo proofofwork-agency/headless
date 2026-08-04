@@ -443,7 +443,8 @@ describe("Linux bubblewrap profiles", () => {
    *
    * Split out of the combined case below deliberately. That one also requires
    * the broker relay and the run-tool helper to be reachable, and on hosted
-   * x86-64 the run-tool leg is intermittent — one observed failure reported
+   * x86-64 the run-tool leg is repeatedly intermittent — 3 of 9 sampled hosted
+   * runs failed, and every diagnosed one reported
    * `{"unixError":"ENOENT", "brokerStatus":200, "toolCode":1}`, i.e. containment
    * held and only availability broke. Gating the security property behind an
    * availability check means a flaky relay makes the security gate red, which
@@ -471,8 +472,15 @@ describe("Linux bubblewrap profiles", () => {
       `writeFileSync(${JSON.stringify(marker)},'ready');`,
       `for(let i=0;i<500&&!existsSync(${JSON.stringify(proceed)});i++)await Bun.sleep(10);`,
       `if(!existsSync(${JSON.stringify(proceed)}))process.exit(81);`,
+      // Record VISIBILITY before attempting the connect. Without this the case
+      // passes on ENOENT, which is what an absent path returns — so a mount
+      // change that simply hid the socket would silently substitute for the
+      // seccomp denial and the gate would still be green. Asserting both makes
+      // every run prove its own prerequisite instead of trusting one host's
+      // mutation check to hold on another.
+      `const socketVisible=existsSync(${JSON.stringify(lateSocket)});`,
       `const unixError=await new Promise((resolve)=>{const socket=createConnection(${JSON.stringify(lateSocket)});socket.once('connect',()=>resolve('CONNECTED'));socket.once('error',(error)=>resolve(error.code));});`,
-      "console.log(JSON.stringify({unixError}));",
+      "console.log(JSON.stringify({socketVisible,unixError}));",
     ].join("");
     const wrapped = maybeWrapWithSandbox(
       ["bun", "-e", script],
@@ -490,7 +498,9 @@ describe("Linux bubblewrap profiles", () => {
       const readyDeadline = Date.now() + schedulingWindow(5_000);
       while (!existsSync(marker) && child.exitCode === null && Date.now() < readyDeadline) await Bun.sleep(10);
       expect(existsSync(marker)).toBe(true);
-      // Created only now: the sandbox's mount snapshot predates it entirely.
+      // Created only now, after launch: the project bind existed before this
+      // dentry did, and the visibility assertion below is what proves the new
+      // dentry propagated into the namespace rather than assuming it.
       await listenUnix(forbidden, lateSocket);
       forbiddenListening = true;
       writeFileSync(proceed, "go");
@@ -500,7 +510,10 @@ describe("Linux bubblewrap profiles", () => {
         new Response(child.stderr).text(),
       ]);
       expect(exitCode, `stdout: ${stdout}\nstderr: ${stderr}`).toBe(0);
-      const observed = JSON.parse(stdout) as { unixError: string };
+      const observed = JSON.parse(stdout) as { socketVisible: boolean; unixError: string };
+      // Prerequisite first: if the dentry never propagated, a denial proves
+      // nothing about seccomp.
+      expect(observed.socketVisible, `late socket never became visible inside the sandbox, so its denial proves nothing: ${stdout}`).toBe(true);
       expect(observed.unixError, `late socket was reachable from inside the sandbox: ${stdout}`).not.toBe("CONNECTED");
     } finally {
       if (forbiddenListening) await new Promise<void>((resolve) => forbidden.close(() => resolve()));

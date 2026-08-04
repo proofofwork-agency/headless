@@ -6,9 +6,14 @@ GitHub-hosted Ubuntu 24.04 leaves a bubblewrap run-tool relay child alive until 
 
 **A privileged-container CI step was tried and disproven.** Running the same files inside a `--privileged` `oven/bun:1.3.14` container *on the GitHub hosted runner* still failed the four `tests/daemon-run-tool.test.ts` cooperation cases (the `tests/containment-v2.test.ts` cases passed). The identical container passes locally. Therefore the incompatibility is GitHub's hosted-runner kernel/virtualization itself, **not the privilege level**, and no in-CI environment currently runs these four reliably.
 
-The hosted-Linux test process therefore skips the four `tests/daemon-run-tool.test.ts` cooperation cases on **all** GitHub Linux (`process.platform === "linux" && process.env.GITHUB_ACTIONS === "true"`), and the one `tests/containment-v2.test.ts` late-socket case on unprivileged hosted Linux. There is no privileged-container CI step.
+The hosted-Linux test process therefore skips the four `tests/daemon-run-tool.test.ts` cooperation cases on **all** GitHub Linux (`process.platform === "linux" && process.env.GITHUB_ACTIONS === "true"`), and the COMBINED `tests/containment-v2.test.ts` late-socket case on unprivileged hosted Linux.
 
-Because there is no privileged step, the late-socket case runs on **no CI leg at all**: its gate is `linuxBwrapTest`, so macOS skips it as Linux-only, and hosted Linux skips it as unprivileged. `HEADLESS_PRIVILEGED_CONTAINMENT_CI` is set by no workflow. That is recorded as an uncovered gate in `tests/gated-coverage.test.ts`; the four cooperation cases are different — they do run on macOS CI.
+A privileged hosted-x86-64 workflow now exists — `.github/workflows/privileged-containment.yml` — and the late-socket surface is split across it deliberately:
+
+- The **standalone late-created-socket denial** (`denies a host Unix socket created after launch`) is REQUIRED there and asserted non-vacuously, together with the x32 alternate-ABI case. It depends only on bubblewrap and the inherited seccomp filter. It is mutation-proved: disabling the `prctl(SECCOMP)` install in `src/broker/linux-relay.ts` makes it fail, so it can detect its own control being removed.
+- The **combined** case (`… while broker and run tools remain reachable`) is intentionally SKIPPED on hosted Linux, because its run-tool leg is repeatedly intermittent there. Raw evidence, not a rate: 3 of 9 hosted samples failed, and every diagnosed failure reported `unixError` ENOENT with `brokerStatus` 200 and `toolCode` 1 — containment held, only run-tool availability broke (runs 30941830730, 30942404411, 30942472935). Nine samples do not establish a probability, so none is claimed. It remains measured off-CI on native Linux arm64.
+- The four `tests/daemon-run-tool.test.ts` cooperation cases remain macOS-CI plus off-CI arm64 evidence. They are NOT integrated x86-64 evidence.
+- `HEADLESS_PRIVILEGED_CONTAINMENT_CI` remains a manual/self-hosted override and is deliberately UNSET in the required workflow — setting it would re-enable the flaky combined case. The workflow asserts that case appears as `(skip)`, which is only true when the hosted predicate actually reached the container.
 
 Coverage for the four cooperation cases: macOS CI, local dev, and a documented local command a maintainer can run against real bubblewrap:
 
@@ -43,7 +48,7 @@ which is indistinguishable from success at a glance. That is a vacuous pass, and
 **Recorded evidence, 2026-08-04, against `main` @ 93c7928.** Run on Docker 27.4.0, `--platform linux/arm64`, real `bubblewrap 0.11.0`, a genuine Linux kernel via the Docker VM:
 
 - `tests/daemon-run-tool.test.ts` — **4 pass / 0 fail**. All four cooperation/delegation cases that hosted Linux skips.
-- `tests/containment-v2.test.ts` — **15 pass / 0 fail**, including `denies a host Unix socket created after launch while broker and run tools remain reachable` (156ms). That is the `linuxRelayLifecycleTest` case which runs on no CI leg at all.
+- `tests/containment-v2.test.ts` — **15 pass / 0 fail**, including `denies a host Unix socket created after launch while broker and run tools remain reachable` (156ms). That is the `linuxRelayLifecycleTest` case, which is skipped on hosted Linux and covered here.
 
 The privileged escape hatch is proven in both directions on the same host, so the documented override is known to work rather than assumed:
 
