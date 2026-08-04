@@ -10,8 +10,12 @@ name: Hosted relay diagnostic
 #      bwrap supervisor or filtered child does not terminalize, so the run
 #      hangs to the deadline (observed up to 105s);
 #   2. `Unknown goal: goal_…` errors emitted by background goal-delegation
-#      work, which are not produced by run-tool routing and should not cross
-#      test/runtime ownership boundaries.
+#      work — FIXED AT SOURCE, so this job no longer targets it. The cause was
+#      a fire-and-forget autonomy scan surviving dispose() and reporting its own
+#      teardown as a runtime fault (see GoalRuntimeService.dispose). This job
+#      runs one test file that creates no goals and starts no autonomy, so it
+#      could never have reproduced that anyway — it is here for fault 1 only,
+#      and the `Unknown goal` grep below is a leftover tripwire, not coverage.
 #
 # Raising timeouts 15 -> 30 -> 60s did not converge, so this does NOT retry.
 # It forces the guarded cases to run, then captures the process tree, relay
