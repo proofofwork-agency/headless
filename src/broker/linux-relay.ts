@@ -1,9 +1,11 @@
 import { dlopen, ptr, type Library } from "bun:ffi";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
-import { createConnection, createServer } from "node:net";
+import { createConnection, createServer, type Socket } from "node:net";
 
 const RUN_TOOL_RELAY_PORT = 38_471;
+/** Caps what a client may buffer in the relay before its upstream connects. */
+const MAX_RELAY_PENDING_BYTES = 1_048_576;
 const activeProxyServers = new Set<object>();
 
 type ProxyHandle = { server?: object; close: () => void };
@@ -145,12 +147,62 @@ async function startHttpProxy(socketPath: string, port: number): Promise<ProxyHa
   };
 }
 
-async function startStreamProxy(socketPath: string, port: number): Promise<ProxyHandle> {
+/**
+ * Forwards one accepted client to its upstream socket.
+ *
+ * The consumer is attached SYNCHRONOUSLY here, before the upstream connect
+ * resolves. Pausing the client and piping only from the connect callback left a
+ * window — the upstream connect latency — in which the worker's request could
+ * arrive with no consumer attached, and those bytes were then silently
+ * discarded: no error on any side, the daemon holding an accepted connection
+ * that never received a frame, and the worker waiting out its full deadline.
+ *
+ * Measured on GitHub-hosted x86-64, where all four run-tool cooperation cases
+ * failed at ~5.4s while every arm64 Linux leg passed, because there the
+ * upstream connect won the race. It is a race, not an architecture property,
+ * which is why raising the run-tool timeout from 15 to 30 to 60s never
+ * converged: the request was already gone.
+ *
+ * Split out and exported because the window cannot be hit reliably through a
+ * real socket — the loss needs bytes to land after accept but before the pipe
+ * attaches, and a test that races for that passes on hosts where the defect is
+ * live. Driving the upstream's connect edge directly makes it deterministic.
+ */
+export function bridgeStreamConnection(client: Socket, upstream: Socket, close: () => void) {
+  let upstreamReady = false;
+  let pendingBytes = 0;
+  const pending: Buffer[] = [];
+  client.on("data", (chunk) => {
+    const bytes = chunk as Buffer;
+    if (upstreamReady) {
+      if (!upstream.write(bytes)) client.pause();
+      return;
+    }
+    pendingBytes += bytes.byteLength;
+    // Bounded: an unconnected upstream must never let a client grow this buffer
+    // without limit. The daemon rejects anything past its own request limit
+    // anyway, so refusing here loses nothing a valid caller needed.
+    if (pendingBytes > MAX_RELAY_PENDING_BYTES) {
+      close();
+      return;
+    }
+    pending.push(bytes);
+  });
+  upstream.on("drain", () => client.resume());
+  upstream.once("connect", () => {
+    for (const chunk of pending) upstream.write(chunk);
+    pending.length = 0;
+    pendingBytes = 0;
+    upstreamReady = true;
+    upstream.pipe(client);
+  });
+}
+
+export async function startStreamProxy(socketPath: string, port: number): Promise<ProxyHandle> {
   const connections = new Set<ReturnType<typeof createConnection>>();
   const server = createServer((client) => {
     connections.add(client);
     client.once("close", () => connections.delete(client));
-    client.pause();
     const upstream = createConnection(socketPath);
     connections.add(upstream);
     upstream.once("close", () => connections.delete(upstream));
@@ -160,11 +212,7 @@ async function startStreamProxy(socketPath: string, port: number): Promise<Proxy
     };
     client.once("error", close);
     upstream.once("error", close);
-    upstream.once("connect", () => {
-      client.pipe(upstream);
-      upstream.pipe(client);
-      client.resume();
-    });
+    bridgeStreamConnection(client, upstream, close);
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
