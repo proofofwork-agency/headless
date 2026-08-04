@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -357,12 +357,15 @@ describe("assertSecureSocket", () => {
     } finally {
       process.umask(previous);
     }
+    // Do NOT depend on umask having produced permissive bits. This used to
+    // `return` when the platform created the socket owner-only anyway, which
+    // reports as a PASS with zero assertions — the same invisible vacuity class
+    // the coverage registry exists to catch, and invisible to it too because an
+    // early return is not skip syntax. chmod the mode we need instead, so the
+    // rejection is always exercised.
+    chmodSync(socketPath, 0o777);
     const mode = lstatSync(socketPath).mode & 0o777;
-    // On most platforms umask 0o000 yields 0o777 for the socket.
-    if ((mode & 0o077) === 0) {
-      // Platform already created owner-only despite umask — nothing to reject; skip.
-      return;
-    }
+    expect(mode & 0o077, "chmod could not make the socket permissive, so the rejection below would prove nothing").not.toBe(0);
     expect(() => assertSecureSocket(socketPath)).toThrow(HeadlessError);
     expect(() => assertSecureSocket(socketPath)).toThrow(/permissive mode/i);
   });

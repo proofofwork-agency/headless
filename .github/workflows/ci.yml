@@ -97,6 +97,43 @@ jobs:
           test -x /usr/bin/sandbox-exec
           bun -e 'const { probeDarwinSandboxWriteDenial } = await import("./src/runtime/os-sandbox.ts"); const result = probeDarwinSandboxWriteDenial(); console.log(result); if (!result.ok) process.exit(1)'
 
+      # Git is a hard product prerequisite, yet every worktree, candidate, and
+      # write-integration test hides behind `gitAvailable ? test : test.skip`.
+      # Measured on a PATH without git, those files report `2 pass, 53 skip,
+      # 0 fail` and exit 0: 54 tests disappear and CI still goes green. The
+      # ubuntu/macos legs that tests/gated-coverage.test.ts claims for `gitTest`
+      # are therefore a claim about this runner, not something the suite can
+      # check itself, so execute the gate's own predicate here and fail the job
+      # when it is false — before `bun run check` gets the chance to skip past
+      # it. `--version` alone would only prove presence, and the predicate can
+      # also go false with git installed (runGitStrict fails closed on a
+      # repository-integrity or prohibited-config error), so this also runs the
+      # init/add/commit sequence the gated tests use, through the same sanitized
+      # daemon Git environment (HOME=/var/empty, GIT_CONFIG_GLOBAL=/dev/null)
+      # they run under. Local runs still skip when git is genuinely absent;
+      # only CI hard-fails.
+      - name: Verify Git is present and usable
+        run: |
+          bun -e '
+          const { mkdtempSync, realpathSync, writeFileSync } = await import("node:fs");
+          const { tmpdir } = await import("node:os");
+          const { join } = await import("node:path");
+          const { runGitStrict } = await import("./src/runtime/git.ts");
+          const fail = (what, result) => {
+            console.error("git gate witness FAILED at " + what + ": " + (result.stderr || "").trim());
+            process.exit(1);
+          };
+          const version = runGitStrict(["--version"], process.cwd());
+          if (!version.ok) fail("the gate predicate runGitStrict([--version])", version);
+          const repo = realpathSync(mkdtempSync(join(tmpdir(), "git-gate-witness-")));
+          writeFileSync(join(repo, "witness.txt"), "witness\n");
+          for (const args of [["init", "-b", "main"], ["add", "-A"], ["-c", "user.name=CI Witness", "-c", "user.email=ci@example.test", "commit", "--no-gpg-sign", "-m", "witness"]]) {
+            const result = runGitStrict(args, repo);
+            if (!result.ok) fail("git " + args.join(" "), result);
+          }
+          console.log("git gate witness OK: " + version.stdout.trim() + ", committed " + runGitStrict(["rev-parse", "HEAD"], repo).stdout.trim());
+          '
+
       - name: Typecheck and test
         run: bun run check
 

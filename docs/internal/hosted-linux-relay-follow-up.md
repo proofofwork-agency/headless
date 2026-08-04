@@ -15,7 +15,7 @@ The late-socket surface is now split, and the security property is covered by th
 - The four `tests/daemon-run-tool.test.ts` cooperation cases remain macOS-CI plus off-CI arm64 evidence. They are NOT integrated x86-64 evidence.
 - `HEADLESS_PRIVILEGED_CONTAINMENT_CI` remains a manual/self-hosted override and is deliberately UNSET in the privileged workflow — setting it would re-enable the flaky combined case. The workflow asserts that case appears as `(skip)`, which is only true when the hosted predicate actually reached the container.
 
-Coverage for the four cooperation cases: macOS CI, local dev, and a documented local command a maintainer can run against real bubblewrap:
+Coverage for the four cooperation cases: macOS CI, local dev, and a documented local command a maintainer can run against real bubblewrap. The same command is the only coverage the `tests/containment-v2.test.ts` late-socket case has anywhere, so it asserts all five cases by name:
 
 ```bash
 # Derives the platform from THIS host, refuses to run under emulation, and
@@ -30,32 +30,38 @@ docker run --rm --privileged --platform "$HOST_PLATFORM" --cpus=2 --memory=3g -v
   # Fail closed BEFORE the suite: without real bubblewrap every gated case
   # skips and the run still exits 0.
   bun -e "import {probeLinuxBwrap} from \"./src/runtime/os-sandbox\"; const r = probeLinuxBwrap(); if (!r.ok) { console.error(\"bubblewrap unusable: \" + r.reason); process.exit(1); }"
-  bun test tests/daemon-run-tool.test.ts tests/containment-v2.test.ts 2>&1 | tee /tmp/out.log
-  grep -qE "\(pass\).*denies a host Unix socket created after launch" /tmp/out.log \
-    || { echo "late-socket case did not PASS (skipped or failed) — this run proved nothing"; exit 1; }
-  echo "OK: late-socket case executed and passed"
+  # NO_COLOR=1 is what makes the result lines assertable: with a terminal
+  # attached (add -t and you have one) bun prints a colored check-mark line
+  # instead of "(pass) <name>", and every pattern below would then miss a case
+  # that really passed. Measured on bun 1.3.14; NO_COLOR does not override
+  # FORCE_COLOR, so do not set that.
+  NO_COLOR=1 bun test tests/daemon-run-tool.test.ts tests/containment-v2.test.ts 2>&1 | tee /tmp/out.log
+  # Assert EVERY case this command is the coverage for, not just one of them.
+  # The suite exit code cannot do it: a gated-out case prints "(skip) <name>"
+  # and the run still exits 0. Measured: with the daemon-run-tool gate armed
+  # (GITHUB_ACTIONS=true HEADLESS_PRIVILEGED_CONTAINMENT_CI=1) all four
+  # cooperation cases skipped, bun exited 0, and the earlier version of this
+  # command -- which grepped only the late-socket case -- still printed OK.
+  # Anchor to the start of the line so "(skip)"/"(fail)" cannot satisfy it, and
+  # require the trailing " [" duration so a longer name that merely starts the
+  # same way cannot either: containment-v2 has both "denies a host Unix socket
+  # created after launch" and the "... while broker and run tools remain
+  # reachable" case asserted here.
+  for case_name in \
+    "daemon-owned worker cooperation > injects the scoped helper into the contained worker and revokes it at terminal state" \
+    "daemon-owned worker cooperation > runs one depth-one child and omits delegation from the child credential" \
+    "daemon-owned worker cooperation > returns child failure as tool data and lets the parent finish" \
+    "daemon-owned worker cooperation > returns child timeout as tool data inside the parent deadline" \
+    "Linux bubblewrap profiles > denies a host Unix socket created after launch while broker and run tools remain reachable"
+  do
+    grep -qE "^\(pass\) $case_name \[" /tmp/out.log \
+      || { echo "NOT A PASS (skipped or failed): $case_name"; exit 1; }
+  done
+  echo "OK: all four cooperation cases and the late-socket case executed and passed"
 '
 ```
 
-**Why the platform is derived and the result is asserted rather than eyeballed.** Without a correct pin, Docker on an Apple Silicon machine reuses a cached `linux/amd64` image and runs under emulation; emulated bubblewrap fails `strictContainmentAvailable()`, every gated case skips, and the run reports
-
-```
-0 pass  4 skip  0 fail
-```
-
-which is indistinguishable from success at a glance. That is a vacuous pass, and it is exactly what this file produced for a maintainer on the most common developer hardware. Hardcoding `--platform linux/arm64` would simply move the same failure onto x86-64 hosts, so the command derives it from `uname -m`. And "read the output carefully" is not fail-loud: the probe and the `grep` above make a skipped case exit non-zero, because this command is the only coverage these cases have.
-
-**Recorded evidence, 2026-08-04, against `main` @ 93c7928.** Run on Docker 27.4.0, `--platform linux/arm64`, real `bubblewrap 0.11.0`, a genuine Linux kernel via the Docker VM:
-
-- `tests/daemon-run-tool.test.ts` — **4 pass / 0 fail**. All four cooperation/delegation cases that hosted Linux skips.
-- `tests/containment-v2.test.ts` — **15 pass / 0 fail**, including `denies a host Unix socket created after launch while broker and run tools remain reachable` (156ms). That is the `linuxRelayLifecycleTest` case, which is skipped on hosted Linux and covered here.
-
-The privileged escape hatch is proven in both directions on the same host, so the documented override is known to work rather than assumed:
-
-```
-GITHUB_ACTIONS=true HEADLESS_PRIVILEGED_CONTAINMENT_CI=1  →  1 pass
-GITHUB_ACTIONS=true (override unset)                      →  1 skip
-```
+**Why every case is asserted by name instead of trusting the exit code.** A `bun test` run whose cases were all gated out prints `0 pass 4 skip 0 fail` and exits 0, which is indistinguishable from success at a glance — that vacuous pass is what this file used to hand a maintainer. Emulation produces it too: without a correct `--platform`, Docker on Apple Silicon reuses a cached `linux/amd64` image, emulated bubblewrap fails `strictContainmentAvailable()`, and every gated case skips. Hardcoding `linux/arm64` would move the same failure onto x86-64 hosts, so the platform is derived from `uname -m`. Asserting only the late-socket case was not enough either: re-running the suite with `GITHUB_ACTIONS=true HEADLESS_PRIVILEGED_CONTAINMENT_CI=1` skips exactly the four cooperation cases while the late-socket case still passes, and the single-case version of this command printed `OK` and exited 0 on that log. "Read the output carefully" is not fail-loud; the probe and the five anchored assertions are.
 
 **Do not use emulation as evidence for the seccomp architecture check.** `rejects x32 syscall numbers before native seccomp dispatch` gates on `process.arch === "x64"`, so an arm64 host skips it. Running it under `--platform linux/amd64` on arm64 hardware **fails** (`Expected: true, Received: false`, containment-v2.test.ts:570) — and that is an emulation artifact, not a defect: the same test passes on real x86-64 in hosted Ubuntu CI (`(pass) … 108.24ms`, main @ 93c7928). Emulated x86-64 does not faithfully reproduce x32 syscall tagging, so a pass there would have been worthless and the fail is not a finding.
 

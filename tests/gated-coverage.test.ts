@@ -14,13 +14,26 @@ import { join } from "node:path";
  * against the gate's own predicate: a leg that the predicate rules out was the
  * original hole here, where a bwrap (Linux-only) test claimed macOS coverage
  * and the guard accepted it because the claim was merely non-empty.
+ *
+ * A gate that runs nowhere must additionally name every test it silences. A
+ * count of gates is a statement about gates, and it stays true while tests
+ * accumulate underneath them: adding a third never-run case under
+ * realGrokInspectTest moves no number here, so a test that executes on no
+ * machine in CI lands as one more green line. Naming the cases turns that
+ * addition into a failing assertion instead of something to remember.
  */
 type Leg = "ubuntu" | "macos";
 
 const LEG_PLATFORM: Record<Leg, string> = { ubuntu: "linux", macos: "darwin" };
 
+/** One test a gate can silence: its file and its exact `test(...)` name. */
+type GateCase = { file: string; name: string };
+
 type GateCoverage = {
-  /** Identifier, or `skipIf(<predicate>)` for a gate written inline on a test. */
+  /**
+   * Identifier, `skipIf(<predicate>)` for a gate written inline on a test, or
+   * `guard(<predicate>)` for an early return written inside a test body.
+   */
   gate: string;
   /** Test files that declare it; a gate of the same name elsewhere is separate. */
   files: string[];
@@ -28,6 +41,11 @@ type GateCoverage = {
   legs: Leg[];
   /** Required when `legs` is empty: why CI cannot cover it. */
   undeclaredReason?: string;
+  /**
+   * Required when `legs` is empty: the exact tests that therefore assert nothing
+   * anywhere in CI. Verified against the source, so it cannot drift into prose.
+   */
+  cases?: GateCase[];
 };
 
 const GATES: GateCoverage[] = [
@@ -47,9 +65,17 @@ const GATES: GateCoverage[] = [
       + "reachable; that availability leg is repeatedly intermittent on hosted x86-64 (3 of 9 samples "
       + "failed, every diagnosed one with unixError ENOENT and toolCode 1 — containment held), so it is "
       + "deliberately skipped there and measured off-CI on native Linux. The SECURITY property it used to "
-      + "carry is not uncovered: the standalone `denies a host Unix socket created after launch` case is "
-      + "run on the ordinary ubuntu leg and again by .github/workflows/privileged-containment.yml — advisory, + since main has no branch protection so no check here is enforced — asserts the socket was "
-      + "visible before trusting its denial, and is mutation-proved against removal of the seccomp filter.",
+      + "carry is NOT uncovered: the standalone `denies a host Unix socket created after launch` case runs "
+      + "on the ordinary ubuntu leg and again in the privileged workflow, asserts the socket was visible "
+      + "before trusting its denial, and is mutation-proved against removal of the seccomp filter. Note "
+      + "that no check in this repository is ENFORCED — main has no branch protection, rules or rulesets — "
+      + "so every leg named here is advisory.",
+    cases: [
+      {
+        file: "tests/containment-v2.test.ts",
+        name: "denies a host Unix socket created after launch while broker and run tools remain reachable",
+      },
+    ],
   },
   { gate: "darwinTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },
   { gate: "realDarwinNetworkTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },
@@ -74,6 +100,13 @@ const GATES: GateCoverage[] = [
       "Requires a locally installed grok CLI with a working `grok inspect`, which needs a real "
       + "subscription login. CI installs no provider CLIs, so this runs only on an operator machine, "
       + "in the same category as the credentialed smoke scripts.",
+    cases: [
+      { file: "tests/grok-isolation.test.ts", name: "attests a gated-config-free project through the trust-gate canary" },
+      {
+        file: "tests/grok-isolation.test.ts",
+        name: "real inspect sees no project instructions, skills, hooks, MCP, plugins, LSP, or startup config",
+      },
+    ],
   },
   {
     gate: "installedCodexTest",
@@ -99,34 +132,118 @@ const GATES: GateCoverage[] = [
   },
   { gate: "skipIf(!strictContainmentAvailable())", files: ["tests/runtime-fault-audit.test.ts"], legs: ["ubuntu", "macos"] },
   { gate: 'skipIf(process.platform !== "darwin")', files: ["tests/run-tool-endpoint.test.ts"], legs: ["macos"] },
+  { gate: 'skipIf(process.platform !== "linux")', files: ["tests/broker.test.ts"], legs: ["ubuntu"] },
+  {
+    gate: 'skipIf(process.platform !== "darwin" && process.platform !== "linux")',
+    files: ["tests/control-plane-utils.test.ts", "tests/daemon.test.ts"],
+    legs: ["ubuntu", "macos"],
+  },
+  {
+    gate: "skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())",
+    files: ["tests/daemon-run-tool.test.ts"],
+    legs: ["macos"],
+  },
+  { gate: "skipIf(!strictContainmentAvailable())", files: ["tests/runtime-fault-audit.test.ts"], legs: ["ubuntu", "macos"] },
+  { gate: 'skipIf(process.platform !== "darwin")', files: ["tests/run-tool-endpoint.test.ts"], legs: ["macos"] },
+  { gate: 'guard(typeof process.getuid !== "function")', files: ["tests/owner-only-path.test.ts"], legs: ["ubuntu", "macos"] },
 ];
 
 /**
  * How a gate's predicate reads: a `const x = cond ? test : test.skip` binding
- * runs when the condition holds, while `test.skipIf(cond)` runs when it does
- * not. The polarity is what makes a platform literal mean "only here" or
- * "anywhere but here".
+ * runs when the condition holds, while `test.skipIf(cond)` and an in-body
+ * `if (cond) return;` run when it does not. The polarity is what makes a
+ * platform literal mean "only here" or "anywhere but here".
  */
 type Polarity = "runs-when" | "skips-when";
 
-type FoundGate = { gate: string; file: string; predicate: string; polarity: Polarity };
+type FoundGate = {
+  gate: string;
+  file: string;
+  predicate: string;
+  polarity: Polarity;
+  /** How many tests the gate is applied to, counted without reading their names. */
+  uses: number;
+  /** The tests it is applied to. Shorter than `uses` means a name was unreadable. */
+  cases: GateCase[];
+};
+
+/** The leading `"name"` argument of a gated test call. */
+const CASE_NAME = String.raw`\s*"((?:[^"\\]|\\.)*)"`;
+
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const normalize = (predicate: string) => predicate.replace(/\s+/g, " ").trim();
 
 function scanGates(file: string, source: string): FoundGate[] {
   const bindings = new Map<string, string>();
   for (const match of source.matchAll(/^const (\w+)(?::[^=]+)? = ([^;]*);$/gm)) bindings.set(match[1]!, match[2]!);
-  const found: FoundGate[] = [];
+  const found = new Map<string, FoundGate>();
+  const record = (gate: string, predicate: string, polarity: Polarity) => {
+    const existing = found.get(gate);
+    if (existing) return existing;
+    const entry: FoundGate = { gate, file, predicate: expand(predicate, bindings), polarity, uses: 0, cases: [] };
+    found.set(gate, entry);
+    return entry;
+  };
+
   for (const [name, definition] of bindings) {
     if (!/\btest\.skip\b/.test(definition)) continue;
-    found.push({ gate: name, file, predicate: expand(definition, bindings), polarity: "runs-when" });
+    const entry = record(name, definition, "runs-when");
+    const call = String.raw`(?:^|[^.\w])` + literal(name) + String.raw`\(`;
+    entry.uses += [...source.matchAll(new RegExp(call, "g"))].length;
+    for (const match of source.matchAll(new RegExp(call + CASE_NAME, "g"))) entry.cases.push({ file, name: match[1]! });
   }
   // Inline gates were invisible to this registry: `\btest\.skip\b` cannot match
   // `test.skipIf`, so a platform gate written on the test itself registered
   // nothing and inherited no coverage claim at all.
   for (const match of source.matchAll(/\btest\.skipIf\(([\s\S]*?)\)\(/g)) {
-    const predicate = match[1]!.replace(/\s+/g, " ").trim();
-    found.push({ gate: `skipIf(${predicate})`, file, predicate: expand(predicate, bindings), polarity: "skips-when" });
+    const predicate = normalize(match[1]!);
+    record(`skipIf(${predicate})`, predicate, "skips-when").uses += 1;
   }
-  return found;
+  for (const match of source.matchAll(new RegExp(String.raw`\btest\.skipIf\(([\s\S]*?)\)\(` + CASE_NAME, "g"))) {
+    const predicate = normalize(match[1]!);
+    record(`skipIf(${predicate})`, predicate, "skips-when").cases.push({ file, name: match[2]! });
+  }
+  for (const guard of scanBodyGuards(source)) {
+    const entry = record(`guard(${guard.predicate})`, guard.predicate, "skips-when");
+    entry.uses += 1;
+    entry.cases.push({ file, name: guard.test });
+  }
+  return [...found.values()];
+}
+
+/**
+ * An early return inside a test body is the same vacuity as a skipped test with
+ * none of the evidence: bun prints it as a pass and counts zero assertions.
+ * tests/backend-hardening.test.ts:186 returns when codex is absent, which is
+ * every CI run, and no `test.skip` token exists there for the scan above to
+ * find — so "exactly two gates are knowingly uncovered" counted neither exit
+ * from that body and no assertion here could have caught it. Measured: with
+ * this scan removed, planting a fresh `if (…) return;` in a test body left
+ * this file at 5 pass / 0 fail. Only a top-level `if (…) return;`
+ * counts: one nested a level deeper is ordinary control flow, and the cleanup
+ * guards in afterEach hooks and polling helpers are not test bodies at all.
+ */
+function scanBodyGuards(source: string) {
+  // Any `test(`, `it(`, or gated `gitTest(`/`darwinTest(` opener, so a guard
+  // hidden inside an already-gated body is not missed either.
+  const opener = new RegExp(String.raw`^(\s*)(?:\w*(?:test|Test)|it)(?:\.\w+\([\s\S]*?\))?\(` + CASE_NAME);
+  const guards: { predicate: string; test: string }[] = [];
+  let open: { indent: number; name: string } | undefined;
+  for (const line of source.split("\n")) {
+    const opened = line.match(opener);
+    if (opened) {
+      open = { indent: opened[1]!.length, name: opened[2]! };
+      continue;
+    }
+    if (!open) continue;
+    const guard = line.match(/^(\s*)if \((.*)\) return;\s*$/);
+    if (guard && guard[1]!.length === open.indent + 2) {
+      guards.push({ predicate: normalize(guard[2]!), test: open.name });
+      continue;
+    }
+    if (new RegExp(String.raw`^\s{0,${open.indent}}\}\)`).test(line)) open = undefined;
+  }
+  return guards;
 }
 
 /** Inlines referenced module bindings so a delegating gate carries their predicates. */
@@ -159,6 +276,7 @@ const FOUND = readdirSync("tests")
   .flatMap((name) => scanGates(join("tests", name), readFileSync(join("tests", name), "utf8")));
 
 const key = (file: string, gate: string) => `${file}:${gate}`;
+const caseKey = (gate: string, entry: GateCase) => `${gate} | ${entry.file} | ${entry.name}`;
 
 describe("capability gate coverage", () => {
   test("every gate either runs on a CI leg or declares why it cannot", () => {
