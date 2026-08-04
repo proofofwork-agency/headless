@@ -1,27 +1,24 @@
 name: Hosted relay diagnostic
 
-# Characterises the ONE gap this repository cannot otherwise close: the four
-# tests/daemon-run-tool.test.ts cooperation cases fail on GitHub-hosted Linux
-# and pass everywhere else, so depth-one contained delegation has never been
-# executed on x86-64. docs/internal/hosted-linux-relay-follow-up.md scopes two
-# concrete faults behind that, and both need a hosted reproducer:
+# RESOLVED 2026-08-04 — kept as a regression probe, no longer a reproducer.
 #
-#   1. the relay/descendant lifecycle — the helper response completes but the
-#      bwrap supervisor or filtered child does not terminalize, so the run
-#      hangs to the deadline (observed up to 105s);
-#   2. `Unknown goal: goal_…` errors emitted by background goal-delegation
-#      work — FIXED AT SOURCE, so this job no longer targets it. The cause was
-#      a fire-and-forget autonomy scan surviving dispose() and reporting its own
-#      teardown as a runtime fault (see GoalRuntimeService.dispose). This job
-#      runs one test file that creates no goals and starts no autonomy, so it
-#      could never have reproduced that anyway — it is here for fault 1 only,
-#      and the `Unknown goal` grep below is a leftover tripwire, not coverage.
+# This job existed because the four tests/daemon-run-tool.test.ts cooperation
+# cases failed on GitHub-hosted Linux and passed everywhere else, which was
+# attributed to a hosted-runner incompatibility and a relay child that would not
+# terminalize. Both attributions were wrong. The instrumented runs this job
+# produced (30951464184, 30953476478) showed every stage succeeding while the
+# daemon received ZERO complete frames: the Linux relay was discarding any
+# request that arrived before its upstream Unix connect resolved. Fast hosts won
+# that race, which is why only the hosted x86-64 leg failed. See
+# bridgeStreamConnection in src/broker/linux-relay.ts, and
+# docs/internal/hosted-linux-relay-follow-up.md for the full record.
 #
-# Raising timeouts 15 -> 30 -> 60s did not converge, so this does NOT retry.
-# It forces the guarded cases to run, then captures the process tree, relay
-# sockets and daemon inventory at the moment of failure. It exists to produce
-# EVIDENCE, so it never gates a merge: continue-on-error keeps a red diagnostic
-# from blocking anyone, and the artifact is the deliverable.
+# Those four now run unguarded on the ordinary ubuntu leg, so this job is no
+# longer the only place they execute. It is retained because it is the only
+# place that samples the process tree and sockets WHILE they run, which is what
+# made the fault findable at all. It still does NOT retry, and it still never
+# gates a merge: continue-on-error keeps a red diagnostic from blocking anyone,
+# and the artifact is the deliverable.
 #
 # Manual only. It deliberately reproduces a known failure and would otherwise
 # burn a runner on every push for a result we already expect.

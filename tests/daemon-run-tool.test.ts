@@ -22,26 +22,17 @@ const SIMPLE_RUN_TIMEOUT_MS = process.platform === "linux" ? 60_000 : 10_000;
 const DELEGATION_PARENT_TIMEOUT_MS = process.platform === "linux" ? 180_000 : 30_000;
 const DELEGATION_CHILD_TIMEOUT_MS = process.platform === "linux" ? 120_000 : 10_000;
 const COOPERATION_TEST_TIMEOUT_MS = process.platform === "linux" ? 240_000 : 45_000;
-// GitHub-hosted Linux — privileged OR unprivileged — cannot terminalize the
-// bwrap loopback->Unix relay child after its tool response, hanging these
-// cooperation tests for 60-105s. Proven: the hosted privileged-container CI
-// step failed these same four while a local privileged Docker passes them.
-// The incompatibility is GitHub's hosted-runner kernel/virtualization itself,
-// not the privilege level, so we skip on ALL GitHub Linux. Coverage remains on
-// macOS CI, local dev, and the documented local privileged-Docker command in
-// docs/internal/hosted-linux-relay-follow-up.md. This is a tracked CI
-// incompatibility, not a containment waiver.
-// The `!== "1"` clause mirrors tests/containment-v2.test.ts and is what lets a
-// privileged/self-hosted runner opt IN to executing these. Without it the skip
-// was unconditional on hosted Linux, so the diagnostic workflow written to
-// reproduce this very failure set an environment variable the suite ignored and
-// would have reported four skips as a clean run.
-const HOSTED_LINUX_RELAY_INCOMPATIBLE = process.platform === "linux"
-  && process.env.GITHUB_ACTIONS === "true"
-  && process.env.HEADLESS_PRIVILEGED_CONTAINMENT_CI !== "1";
-if (HOSTED_LINUX_RELAY_INCOMPATIBLE) {
-  console.warn("Skipping daemon run-tool cooperation on GitHub-hosted Linux (privileged and unprivileged both hang relay child terminalization). Runs on macOS CI, local dev, and the documented local privileged-Docker command. Tracked in docs/internal/hosted-linux-relay-follow-up.md.");
-}
+// These were skipped on all GitHub Linux until 2026-08-04 under a predicate
+// that blamed the hosted runner's kernel/virtualization. They did have off-CI
+// arm64 Linux coverage through the documented privileged-Docker command, but
+// none on x86-64 Linux, which is the leg that was failing.
+//
+// The cause was ours, not the runner's: the Linux relay discarded any request
+// that arrived before its upstream Unix connect resolved (see
+// bridgeStreamConnection). Fast hosts win that race, which is why arm64 passed
+// and this looked like a hosted incompatibility. With the relay fixed these
+// pass on GitHub-hosted x86-64 in 0.6-1.4s each, so they are no longer gated on
+// anything but the containment capability itself.
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];
 
@@ -58,7 +49,7 @@ afterEach(async () => {
 describe("daemon-owned worker cooperation", () => {
   // The internal submit/wait budgets alone exceed bun's 5s default test
   // timeout; the Linux relay path needs the full window on slower CI hosts.
-  test.skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())("injects the scoped helper into the contained worker and revokes it at terminal state", async () => {
+  test.skipIf(!strictContainmentAvailable())("injects the scoped helper into the contained worker and revokes it at terminal state", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-daemon-run-tool-"));
     roots.push(root);
     const project = join(root, "project");
@@ -108,7 +99,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(readdirSync(daemon.state.daemonRuntimeDir).filter((name) => name.endsWith(".tool.sock"))).toEqual([]);
   }, COOPERATION_TEST_TIMEOUT_MS);
 
-  test.skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())("runs one depth-one child and omits delegation from the child credential", async () => {
+  test.skipIf(!strictContainmentAvailable())("runs one depth-one child and omits delegation from the child credential", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-"));
     roots.push(root);
     const project = join(root, "project");
@@ -149,7 +140,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(ledger).not.toContain("Child must inspect");
   }, COOPERATION_TEST_TIMEOUT_MS);
 
-  test.skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())("returns child failure as tool data and lets the parent finish", async () => {
+  test.skipIf(!strictContainmentAvailable())("returns child failure as tool data and lets the parent finish", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-failure-"));
     roots.push(root);
     const project = join(root, "project");
@@ -172,7 +163,7 @@ describe("daemon-owned worker cooperation", () => {
     expect(daemon.jobs.get(reply.childJobId)?.state).toBe("failed");
   }, COOPERATION_TEST_TIMEOUT_MS);
 
-  test.skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())("returns child timeout as tool data inside the parent deadline", async () => {
+  test.skipIf(!strictContainmentAvailable())("returns child timeout as tool data inside the parent deadline", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-run-delegate-timeout-"));
     roots.push(root);
     const project = join(root, "project");

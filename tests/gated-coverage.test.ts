@@ -141,12 +141,17 @@ const GATES: GateCoverage[] = [
     files: ["tests/control-plane-utils.test.ts", "tests/daemon.test.ts"],
     legs: ["ubuntu", "macos"],
   },
+  // daemon-run-tool joined this gate on 2026-08-04. It previously carried an
+  // extra HOSTED_LINUX_RELAY_INCOMPATIBLE clause and declared only macos, so
+  // depth-one contained delegation had never executed on any Linux. The relay
+  // defect that caused those hosted failures is fixed (bridgeStreamConnection),
+  // and the four cases now pass on GitHub-hosted x86-64, so ubuntu is a real
+  // leg here rather than an aspiration.
   {
-    gate: "skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())",
-    files: ["tests/daemon-run-tool.test.ts"],
-    legs: ["macos"],
+    gate: "skipIf(!strictContainmentAvailable())",
+    files: ["tests/runtime-fault-audit.test.ts", "tests/daemon-run-tool.test.ts"],
+    legs: ["ubuntu", "macos"],
   },
-  { gate: "skipIf(!strictContainmentAvailable())", files: ["tests/runtime-fault-audit.test.ts"], legs: ["ubuntu", "macos"] },
   { gate: 'skipIf(process.platform !== "darwin")', files: ["tests/run-tool-endpoint.test.ts"], legs: ["macos"] },
   { gate: 'guard(typeof process.getuid !== "function")', files: ["tests/owner-only-path.test.ts"], legs: ["ubuntu", "macos"] },
 ];
