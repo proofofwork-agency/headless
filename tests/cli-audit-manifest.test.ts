@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { CLI_AUDIT_MANIFEST, COMMAND_SPECS, resolveCommand } from "../src/cli";
+import { POSITIONAL_GRAMMAR, type PositionalGrammar } from "../src/cli/positional-grammar";
+
+/** The grammar's action paths, read independently of how the manifest builds them. */
+function declaredActionPaths(grammar: PositionalGrammar, prefix: string[] = []): string[] {
+  if (grammar.kind !== "actions") return prefix.length ? [prefix.join(" ")] : [];
+  return Object.entries(grammar.actions).flatMap(([action, child]) => declaredActionPaths(child, [...prefix, action]));
+}
 
 describe("CLI audit manifest", () => {
   test("covers every canonical command and declared alias exactly once", () => {
@@ -19,6 +26,34 @@ describe("CLI audit manifest", () => {
     expect(CLI_AUDIT_MANIFEST.some((row) => row.risk === "safe")).toBe(true);
   });
 
+  test("covers every subcommand the positional grammar declares", () => {
+    // The manifest used to be a second, hand-maintained action catalog, and the
+    // coverage test above only compared COMMAND names — so `lead` and `receipt`
+    // had no subcommand rows at all, `daemon` was missing reap, and `mcp` was
+    // missing the server alias, all four of them green.
+    const rowsFor = (command: string) => CLI_AUDIT_MANIFEST
+      .filter((row) => row.command === command && row.id.startsWith(`${command}:`))
+      .map((row) => row.argv.slice(1).join(" "));
+    for (const spec of COMMAND_SPECS) {
+      const declared = declaredActionPaths(POSITIONAL_GRAMMAR[spec.name]!);
+      // mcp rows carry an audited host operand, so compare on the action prefix.
+      const covered = new Set(rowsFor(spec.name).map((row) => declared.find((path) => row === path || row.startsWith(`${path} `)) ?? row));
+      expect({ command: spec.name, missing: declared.filter((path) => !covered.has(path)) })
+        .toEqual({ command: spec.name, missing: [] });
+    }
+  });
+
+  test("names the four subcommands the hand-maintained catalog had lost", () => {
+    const ids = new Set(CLI_AUDIT_MANIFEST.map((row) => row.id));
+    for (const id of ["lead:use", "lead:status", "lead:release", "receipt:show", "receipt:diff", "daemon:reap", "mcp:server"]) {
+      expect({ id, present: ids.has(id) }).toEqual({ id, present: true });
+    }
+    // And the host expansions that were already there are not lost in the swap.
+    for (const id of ["mcp:serve", "mcp:install codex", "mcp:status opencode"]) {
+      expect({ id, present: ids.has(id) }).toEqual({ id, present: true });
+    }
+  });
+
   test("classifies cost and destructive rows conservatively", () => {
     const risk = (id: string) => CLI_AUDIT_MANIFEST.find((row) => row.id === id)?.risk;
     for (const id of ["exec", "run", "council", "goal:start", "goal:run", "session:send", "session:resume", "workflow:run", "autonomy:start"]) {
@@ -29,8 +64,12 @@ describe("CLI audit manifest", () => {
       "mcp:install codex", "mcp:install claude", "mcp:install grok", "mcp:install opencode",
       "mcp:remove codex", "mcp:remove claude", "mcp:remove grok", "mcp:remove opencode",
       "budget:upsert",
+      // Newly reachable rows: reap kills resident daemons, and lead use/release
+      // rewrite the configured foreground lead.
+      "daemon:reap", "lead:use", "lead:release",
     ]) {
       expect(risk(id)).toBe("destructive");
     }
+    for (const id of ["lead:status", "receipt:list", "receipt:show", "mcp:server"]) expect(risk(id)).toBe("safe");
   });
 });

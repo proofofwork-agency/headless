@@ -1,5 +1,5 @@
 import type { DurableSession, Job } from "../../contracts/durable";
-import { resolveCommandAction } from "../argv";
+import { missingOperandError, resolveCommandAction } from "../argv";
 import { renderCommandUsage } from "../command-specs";
 import {
   DEFAULT_RUN_TIMEOUT_MS,
@@ -44,7 +44,7 @@ export async function runSessionCommand(args: string[]) {
   const sessionId = requiredArg(flags, "--session-id");
   if (action === "send" || action === "resume") {
     const prompt = getPrompt(argvWithoutAction);
-    if (!prompt) throw new CliUsageError("A session prompt is required.");
+    if (!prompt) throw missingOperandError("session", "prompt", { actionPath: [action] });
     const timeoutMs = parseIntegerArg(flags, "--timeout-ms") ?? DEFAULT_RUN_TIMEOUT_MS;
     const response = await client.call<{ session: DurableSession; job: Job; replay: { truncated: boolean; bytes: number } }>(
       action === "send" ? "session.send" : "session.resume",

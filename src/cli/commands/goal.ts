@@ -1,7 +1,7 @@
 import type { Goal } from "../../contracts/collaboration";
 import type { DaemonMethod } from "../../daemon/protocol";
 import type { HeadlessDaemonClient } from "../../daemon/client";
-import { resolveCommandAction } from "../argv";
+import { missingOperandError, resolveCommandAction } from "../argv";
 import { renderCommandUsage } from "../command-specs";
 import {
   CliUsageError,
@@ -34,7 +34,7 @@ export function parseGoalCommand(args: string[]): GoalCommandCall {
   const flags = flagArgsBeforeSeparator(args);
   if (action === "start" || action === "run") {
     const objective = getPrompt(resolved.argvWithoutAction);
-    if (!objective) throw new CliUsageError(`A goal objective is required for goal ${action}.`);
+    if (!objective) throw missingOperandError("goal", "objective", { actionPath: [action] });
     const timeoutMs = parseIntegerArg(flags, "--timeout-ms") ?? GOAL_DEFAULT_TIMEOUT_MS;
     return {
       action,
@@ -55,7 +55,7 @@ export function parseGoalCommand(args: string[]): GoalCommandCall {
   }
   if (action === "send") {
     const text = getPrompt(resolved.argvWithoutAction);
-    if (!text) throw new CliUsageError("A goal message is required for goal send.");
+    if (!text) throw missingOperandError("goal", "message", { actionPath: ["send"] });
     return {
       action,
       method: "goal.send",
