@@ -117,14 +117,14 @@ describe("bootstrapped daemon lifecycle", () => {
 
   test("stays resident while a client keeps using it", async () => {
     const fixture = idleFixture("headless-idle-busy-");
-    const daemon = spawnDaemon(fixture, ["--idle-timeout-ms", String(IDLE_MS)]);
+    const daemon = spawnDaemon(fixture, ["--idle-timeout-ms", String(BUSY_IDLE_MS)]);
     await waitForDaemonReady(daemon);
     // Outlast the idle window while pinging: activity must reset the deadline.
-    const deadline = Date.now() + IDLE_MS * 3;
+    const deadline = Date.now() + BUSY_IDLE_MS * 3;
     while (Date.now() < deadline) {
       const ping = await runCli(["daemon", "status", "--cwd", fixture.project], fixture.env);
       expect(ping.exitCode, ping.stderr).toBe(0);
-      await Bun.sleep(IDLE_MS / 4);
+      await Bun.sleep(BUSY_IDLE_MS / 4);
     }
     expect(daemon.killed).toBe(false);
     daemon.kill("SIGTERM");
@@ -157,6 +157,22 @@ describe("bootstrapped daemon lifecycle", () => {
 });
 
 const IDLE_MS = 2_000;
+
+/**
+ * The busy-loop test's daemon has to outlive a single ping, and every ping is a
+ * cold `bun src/cli.ts` process — roughly 500ms locally and several times that
+ * on a loaded or CI machine. Against a flat 2s deadline, one slow ping lets the
+ * daemon idle out between pings and the next reports "No Headless daemon is
+ * running": a real product-failure signature produced entirely by machine load.
+ * Scaling the deadline keeps what the test actually asserts — that activity
+ * resets it — while giving each ping the same headroom everywhere.
+ *
+ * Capped because the loop runs for three of these and has to finish inside the
+ * test's own budget — scaling without a ceiling is how a widened window becomes
+ * unreachable, which is the defect this file's sibling fix exists for. Beyond a
+ * few seconds of headroom a ping is not slow, the machine is broken.
+ */
+const BUSY_IDLE_MS = Math.min(schedulingWindow(2_000), 6_000);
 
 function idleFixture(prefix: string) {
   const root = mkdtempSync(join(tmpdir(), prefix));
