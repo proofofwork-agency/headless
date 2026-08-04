@@ -48,6 +48,16 @@ type GateCoverage = {
   cases?: GateCase[];
 };
 
+const CI_WORKFLOW = join(".github", "workflows", "ci.yml");
+const RELEASE_GATE_JOB = "platform-gate";
+const GIT_WITNESS_STEP = "Verify Git is present and usable";
+/** The expression all five `gitTest` files use to decide run-vs-skip. */
+const GIT_PREDICATE = 'runGitStrict(["--version"], process.cwd())';
+
+type CiStep = { name?: string; run?: string; if?: string };
+type CiJob = { strategy?: { matrix?: { os?: string[] } }; steps?: CiStep[] };
+type CiWorkflow = { jobs?: Record<string, CiJob> };
+
 const GATES: GateCoverage[] = [
   { gate: "darwinTest", files: ["tests/containment-v2.test.ts"], legs: ["macos"] },
   { gate: "linuxBwrapTest", files: ["tests/containment-v2.test.ts"], legs: ["ubuntu"] },
@@ -388,6 +398,80 @@ describe("capability gate coverage", () => {
     // fail any other assertion here — five of them shipped unnoticed.
     const keys = GATES.flatMap((gate) => gate.files.map((file) => key(file, gate.gate)));
     expect(keys.filter((entry, index) => keys.indexOf(entry) !== index)).toEqual([]);
+  });
+
+  /**
+   * A declared leg is a claim about the CI runner, and nothing inside the suite
+   * can check it — which for `gitTest` is the dangerous case. Measured with git
+   * off PATH, its five files report `2 pass, 53 skip, 0 fail` and exit 0: all
+   * 54 tests vanish and CI stays green, indistinguishable from a gate that runs
+   * nowhere, except the registry above asserts it runs on both legs. Git is a
+   * hard product prerequisite, so .github/workflows/ci.yml executes the gate's
+   * own predicate and fails the job when it is false. This pins that witness in
+   * place; deleting it, gating it to one OS, or letting it drift after the test
+   * step would quietly return the claim above to being unverified.
+   */
+  test("the gitTest legs rest on a fail-closed Git witness in the release gate", () => {
+    const gate = GATES.find((entry) => entry.gate === "gitTest");
+    expect(gate?.legs, "gitTest must still claim both CI legs").toEqual(["ubuntu", "macos"]);
+
+    const workflow = Bun.YAML.parse(readFileSync(CI_WORKFLOW, "utf8")) as CiWorkflow;
+    const job = workflow.jobs?.[RELEASE_GATE_JOB];
+    const steps = job?.steps ?? [];
+    const witness = steps.findIndex((step) => step.name === GIT_WITNESS_STEP);
+    const suite = steps.findIndex((step) => step.run?.trim() === "bun run check");
+    expect(witness, `${CI_WORKFLOW} must keep the "${GIT_WITNESS_STEP}" step`).toBeGreaterThanOrEqual(0);
+    expect(suite, `${CI_WORKFLOW} must still run the gated suite`).toBeGreaterThanOrEqual(0);
+    expect(witness, "the witness must run before the suite can skip past it").toBeLessThan(suite);
+
+    // A witness behind `if:` would leave the other leg's claim resting on
+    // nothing, exactly like the bwrap gate that once claimed macOS coverage.
+    expect(steps[witness]?.if, "the witness must run on every declared leg").toBeUndefined();
+    const runners = job?.strategy?.matrix?.os ?? [];
+    for (const leg of gate?.legs ?? []) {
+      expect(runners.some((os) => os.startsWith(leg)), `${RELEASE_GATE_JOB} has no ${leg} runner`).toBe(true);
+    }
+
+    // It must execute the gate's own expression, not a shell `git --version`:
+    // runGitStrict also returns ok: false with git installed, when repository
+    // integrity or a prohibited config key fails closed first.
+    const body = steps[witness]?.run ?? "";
+    expect(body, "the witness must exercise the gate predicate itself").toContain(GIT_PREDICATE);
+    expect(body, "the witness must fail the job, not merely report").toContain("process.exit(1)");
+    for (const file of gate?.files ?? []) {
+      expect(readFileSync(file, "utf8"), `${file} no longer uses the predicate the witness proves`)
+        .toContain(GIT_PREDICATE);
+    }
+  });
+
+
+  /**
+   * Direct fixtures for the guard grammar, so the supported shapes are pinned
+   * by this file rather than by whatever the corpus happens to contain today.
+   * The brace-form case is here because the scanner originally matched only the
+   * brace-less one-liner while the live defect it was written for — a
+   * zero-assertion return in tests/secure-socket.test.ts — was brace-form. A
+   * corpus-only proof would have gone green on that gap.
+   *
+   * The negatives are the honest half: this is a line scanner, not a semantic
+   * analyser. It cannot see a guard that returns a VALUE, one hidden inside a
+   * helper the test calls, or a conditional assertion path. No live instance of
+   * any of those exists today (verified by an AST sweep over every *.test.ts),
+   * but they are stated here so the grammar is not mistaken for a proof about
+   * arbitrary test semantics.
+   */
+  test("the guard scanner detects both supported early-return shapes", () => {
+    const braceless = scanBodyGuards('  test("a", () => {\n    if (!thing) return;\n    expect(1).toBe(1);\n  });\n');
+    expect(braceless.map((guard) => guard.test)).toEqual(["a"]);
+    expect(braceless[0]?.predicate).toBe("!thing");
+
+    const braced = scanBodyGuards('  test("b", () => {\n    if (!thing) {\n      return;\n    }\n    expect(1).toBe(1);\n  });\n');
+    expect(braced.map((guard) => guard.test), "brace-form guards must be detected too").toEqual(["b"]);
+
+    // Documented blind spots, asserted so they cannot be silently "fixed" in
+    // prose while the scanner still misses them.
+    expect(scanBodyGuards('  test("c", () => {\n    if (!thing) return false;\n  });\n'), "returns-a-value is a known blind spot").toEqual([]);
+    expect(scanBodyGuards('  test("d", () => {\n    bail();\n  });\n'), "guards inside a helper are a known blind spot").toEqual([]);
   });
 
   test("registry names no gate the suite has stopped declaring", () => {
