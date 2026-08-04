@@ -116,6 +116,42 @@ jobs:
 
           kill "$(cat sampler.pid)" 2>/dev/null || true
 
+      - name: Sample the combined late-socket case
+        continue-on-error: true
+        run: |
+          # `set +e` is load-bearing: GitHub runs `run:` steps as `bash -e {0}`,
+          # so a non-zero `bun test` aborts the step. The first version of this
+          # sampler collected ONE iteration instead of ten and printed it as a
+          # clean result. For a race, a truncated sample is not a weaker result,
+          # it is a false one — hence the iteration count and the hard error.
+          set +e
+          set -uo pipefail
+          # This case was skipped on hosted Linux until the relay fix, because
+          # its run-tool leg was intermittent there: 3 of 9 samples failed, every
+          # diagnosed one with brokerStatus 200 and toolCode 1 — the broker leg
+          # healthy, only the run-tool leg broken. Only that leg traversed the
+          # discard window. Kept as a standing re-sampler so the 10-of-10 result
+          # stays reproducible rather than being a number in a document.
+          : > combined.log
+          pass=0; fail=0; absent=0
+          for i in $(seq 1 10); do
+            CI=true NO_COLOR=1 bun test tests/containment-v2.test.ts 2>&1 | tee -a combined.log > run.log
+            if grep -qE '^\(pass\) .*denies a host Unix socket created after launch while broker and run tools remain reachable \[' run.log; then
+              pass=$((pass+1))
+            elif grep -qE '^\(fail\) .*denies a host Unix socket created after launch while broker and run tools remain reachable' run.log; then
+              fail=$((fail+1))
+            else
+              absent=$((absent+1))
+            fi
+          done
+          iterations=$((pass+fail+absent))
+          echo "combined-late-socket samples: pass=$pass fail=$fail absent=$absent iterations=$iterations" | tee combined-summary.txt
+          if [ "$iterations" -ne 10 ]; then echo "::error::sampler collected $iterations of 10 iterations" | tee -a combined-summary.txt; fi
+          # Any other failing case in this file is reported too. This is where
+          # the missing bun visibility step showed up as "execvp bun".
+          echo "other failing cases:" | tee -a combined-summary.txt
+          grep -E '^\(fail\)' combined.log | sort -u | tee -a combined-summary.txt
+
       - name: Refuse a vacuous reproducer
         run: |
           set -euo pipefail
@@ -161,4 +197,6 @@ jobs:
             cooperation.log
             process-tree.log
             findings.txt
+            combined.log
+            combined-summary.txt
           retention-days: 30
