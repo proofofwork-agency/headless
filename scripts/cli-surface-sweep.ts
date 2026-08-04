@@ -232,4 +232,21 @@ bad += fail(parity, "TEXT/JSON CLASSIFICATION DIVERGENCE");
 bad += fail(silentFailures, "FAILED WITH NO MESSAGE");
 console.log(bad === 0 ? "\nALL INVARIANTS HELD" : `\nINVARIANT VIOLATIONS: ${bad}`);
 
+// Some invocations legitimately autostart a daemon, and it outlives the sweep.
+// Removing the directories first would strand it on a root that no longer
+// exists, which is precisely what `check:daemons` reports as a stray — the
+// sweep would then fail the next gate run on this machine, from a mess it made
+// itself. Reap through this sweep's own HEADLESS_STATE_HOME so the scan can
+// only ever see daemons the sweep started, never the operator's real ones.
+const reaped = Bun.spawnSync({
+  cmd: ["bun", CLI, "experimental", "daemon", "reap", "--confirm", "--all"],
+  cwd: project,
+  env: { ...process.env, NO_COLOR: "1", CI: "1", HEADLESS_STATE_HOME: stateHome, HEADLESS_RUNTIME_HOME: runtimeHome },
+  stdout: "pipe",
+  stderr: "pipe",
+});
+if (reaped.exitCode !== 0) {
+  console.log(`\nWARNING: could not reap sweep-owned daemons (exit ${reaped.exitCode}). Run: bun run check:daemons`);
+}
+
 for (const dir of [stateHome, runtimeHome, project]) { try { rmSync(dir, { recursive: true, force: true }); } catch {} }

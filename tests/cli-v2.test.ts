@@ -446,8 +446,14 @@ describe("CLI usage errors are classified as operator input, not runtime faults"
     // status codex EXTRA` silently ran the status it was not asked for.
     // `mcp status` and a prompt-less `exec` both resolve without a daemon, so
     // this stays cheap.
+    // Assert the CLASSIFICATION, not the exit code. Whether `mcp status codex`
+    // succeeds depends on a locally installed codex CLI: macOS CI has one and
+    // exits 0, Linux CI has none and exits 1. Neither says anything about the
+    // positional grammar. What must hold on every host is that this shape is
+    // not rejected AS A USAGE ERROR, and that adding one token is.
     const accepted = await runCli(["mcp", "status", "codex"]);
-    expect(accepted.exitCode).toBe(0);
+    expect(accepted.stderr).not.toContain("unexpected extra argument");
+    expect(accepted.stderr).not.toContain("requires a subcommand");
 
     const surplus = await runCli(["mcp", "status", "codex", "EXTRA"]);
     expect(surplus.exitCode).toBe(1);
