@@ -1,6 +1,8 @@
 import type { DaemonMethod } from "../../daemon/protocol";
 import { inspectLinkedHoldOffline, quarantineLinkedHoldOffline } from "../../runtime/linked-hold-quarantine";
-import { CliUsageError, daemonClient, flagArgsBeforeSeparator, getArg, printJson } from "../shared";
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
+import { CliUsageError, daemonClient, flagArgsBeforeSeparator, getArg, getRepeatedArgs, printJson } from "../shared";
 
 export type BudgetCommandCall = {
   method: Extract<DaemonMethod, `budget.${string}`>;
@@ -17,9 +19,9 @@ export type BudgetCommandCall = {
 };
 
 export function parseBudgetCommand(args: string[]): BudgetCommandCall {
-  const action = args[1] ?? "list";
+  const { action, operands } = resolveCommandAction(args, "list");
   if (action === "list") return { method: "budget.list", params: {} };
-  if (action === "linked-hold") return parseLinkedHoldRecovery(args);
+  if (action === "linked-hold") return parseLinkedHoldRecovery(args, operands[0]);
   if (action !== "upsert") throw new CliUsageError(budgetUsage());
   const id = getArg(args, "--id");
   if (!id) throw new CliUsageError(budgetUsage());
@@ -65,13 +67,12 @@ export async function runBudgetCommand(args: string[]) {
   printJson(await client.call(call.method, call.params));
 }
 
-function parseLinkedHoldRecovery(args: string[]): BudgetCommandCall {
-  const action = args[2];
-  const linkIds = repeated(args, "--link-id");
+function parseLinkedHoldRecovery(args: string[], action: string | undefined): BudgetCommandCall {
+  const linkIds = getRepeatedArgs(args, "--link-id");
   if (linkIds.length !== 1 || /[*?,]/.test(linkIds[0]!)) throw new CliUsageError("Linked-hold recovery requires one literal --link-id.");
   if (action === "inspect") return { offline: "inspect", linkId: linkIds[0]! };
   if (action !== "quarantine") throw new CliUsageError(budgetUsage());
-  const expected = repeated(args, "--expected-digest");
+  const expected = getRepeatedArgs(args, "--expected-digest");
   if (expected.length !== 1) throw new CliUsageError("Linked-hold quarantine requires one --expected-digest.");
   const resolution = getArg(args, "--resolution");
   if (resolution !== "exhaust" && resolution !== "release") {
@@ -84,17 +85,6 @@ function parseLinkedHoldRecovery(args: string[]): BudgetCommandCall {
     resolution,
     confirm: args.includes("--confirm"),
   };
-}
-
-function repeated(args: string[], flag: string) {
-  const values: string[] = [];
-  for (let index = 0; index < args.length; index += 1) {
-    if (args[index] !== flag) continue;
-    const value = args[index + 1];
-    if (!value || value.startsWith("-")) throw new CliUsageError(`Missing value for ${flag}.`);
-    values.push(value);
-  }
-  return values;
 }
 
 function positiveInteger(args: string[], flag: string) {
@@ -131,5 +121,5 @@ function compact(value: Record<string, unknown>) {
 }
 
 function budgetUsage() {
-  return "Usage: headless experimental budget <list|upsert|linked-hold inspect|linked-hold quarantine> [options] [--cwd dir]";
+  return renderCommandUsage("budget");
 }

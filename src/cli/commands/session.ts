@@ -1,4 +1,6 @@
 import type { DurableSession, Job } from "../../contracts/durable";
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
 import {
   DEFAULT_RUN_TIMEOUT_MS,
   CliUsageError,
@@ -19,7 +21,7 @@ import {
 const sessionActions = new Set(["send", "resume", "cancel", "status", "result"]);
 
 export async function runSessionCommand(args: string[]) {
-  const action = args[1] || "status";
+  const { action, argvWithoutAction } = resolveCommandAction(args, "status");
   const flags = flagArgsBeforeSeparator(args);
   const projectRoot = getArg(flags, "--cwd") || process.cwd();
   const client = await daemonClient(projectRoot, flags, { enableExperimentalSessions: true });
@@ -37,11 +39,11 @@ export async function runSessionCommand(args: string[]) {
     return;
   }
   if (!sessionActions.has(action)) {
-    throw new CliUsageError("Usage: headless session <create|send|resume|cancel|status|result> [options]");
+    throw new CliUsageError(renderCommandUsage("session"));
   }
   const sessionId = requiredArg(flags, "--session-id");
   if (action === "send" || action === "resume") {
-    const prompt = getPrompt(["session", ...args.slice(2)]);
+    const prompt = getPrompt(argvWithoutAction);
     if (!prompt) throw new CliUsageError("A session prompt is required.");
     const timeoutMs = parseIntegerArg(flags, "--timeout-ms") ?? DEFAULT_RUN_TIMEOUT_MS;
     const response = await client.call<{ session: DurableSession; job: Job; replay: { truncated: boolean; bytes: number } }>(

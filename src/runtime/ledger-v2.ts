@@ -16,10 +16,14 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import { ProjectIdSchema } from "../contracts/common";
+import { HeadlessError } from "./headless-error";
 import { redactDeep } from "./redaction";
 import { safeJsonParse } from "./safe-json";
 import { atomicAppendFile, atomicWriteFile } from "./atomic-write";
 import { verifyReleaseEvidenceAnchors, type ReleaseEvidenceVerification } from "./release-evidence-anchor";
+
+/** Minimum HMAC key material for ledger tamper-evidence (UTF-8 bytes or decoded base64). */
+const MIN_LEDGER_HMAC_KEY_BYTES = 32;
 
 const MAX_LEDGER_EVENT_BYTES = 1_000_000;
 const LOCK_TIMEOUT_MS = 10_000;
@@ -109,6 +113,11 @@ export type LedgerV2Options = {
   hmacKeyring?: Readonly<Record<string, string>>;
   /** Selects the keyring entry used for new records. */
   activeHmacKeyId?: string;
+  /**
+   * Key id → the configuration surface that supplied it, so a weak-key refusal
+   * can name the variable the operator actually set. Never holds key material.
+   */
+  hmacKeyOrigins?: Readonly<Record<string, string>>;
 };
 
 export type LedgerVerificationVerdict = {
@@ -119,11 +128,16 @@ export type LedgerVerificationVerdict = {
   firstBreakAt?: { sequence: number; reason: string };
   reason?: string;
   evidence?: ReleaseEvidenceVerification;
+  /**
+   * Configured keys below the write floor. The chain still verifies against
+   * them — the operator is told the evidence is weak, not denied their history.
+   */
+  weakKeys?: { keyIds: string[]; reason: string };
 };
 
 type LedgerVerificationKeys = Pick<
   LedgerV2Options,
-  "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId"
+  "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId" | "hmacKeyOrigins"
 >;
 
 export type LedgerVerificationOptions = LedgerVerificationKeys & {
@@ -134,22 +148,48 @@ export type LedgerVerificationOptions = LedgerVerificationKeys & {
   | { records: readonly LedgerRecordV2[]; ledgerPath?: never }
 );
 
+/** Structural only. Key strength is a write-time property, not a parse-time one. */
+const LedgerHmacKeySchema = z.string().min(1, "Ledger HMAC keys must be non-empty secrets.");
+
+const LedgerHmacKeyringSchema = z.record(LedgerHmacKeySchema);
+
+/**
+ * Read the configured keys without judging their strength. Refusing to parse a
+ * weak key would deny the operator every read of their own history — including
+ * `headless verify` — while doing nothing to stop forgery. The floor is applied
+ * where it earns its keep: signing new records (`assertLedgerWriteKeyStrength`).
+ */
 export function ledgerIntegrityOptionsFromEnv(env: NodeJS.ProcessEnv = process.env) {
+  const hmacKeyOrigins: Record<string, string> = {};
   let hmacKeyring: Record<string, string> | undefined;
   if (env.HEADLESS_LEDGER_KEYS) {
-    hmacKeyring = z.record(z.string().min(16)).parse(safeJsonParse(env.HEADLESS_LEDGER_KEYS));
+    try {
+      const parsed = safeJsonParse(env.HEADLESS_LEDGER_KEYS);
+      hmacKeyring = LedgerHmacKeyringSchema.parse(parsed);
+    } catch (error) {
+      throw unusableLedgerHmacKeyError("HEADLESS_LEDGER_KEYS", error);
+    }
+    for (const id of Object.keys(hmacKeyring)) hmacKeyOrigins[id] = "HEADLESS_LEDGER_KEYS";
   }
+  const rawHmacKey = env.HEADLESS_LEDGER_KEY;
+  const hmacKey = rawHmacKey !== undefined && rawHmacKey.length > 0 ? rawHmacKey : undefined;
+  if (hmacKey) hmacKeyOrigins[env.HEADLESS_LEDGER_KEY_ID ?? derivedLedgerKeyId(hmacKey)] = "HEADLESS_LEDGER_KEY";
   return {
-    hmacKey: env.HEADLESS_LEDGER_KEY,
+    hmacKey,
     hmacKeyId: env.HEADLESS_LEDGER_KEY_ID,
     hmacKeyring,
     activeHmacKeyId: env.HEADLESS_LEDGER_ACTIVE_KEY_ID,
+    hmacKeyOrigins,
   };
 }
 
 type LedgerIntegrityKeys = {
   active: { id: string; key: string } | null;
   keyring: ReadonlyMap<string, string>;
+  /** Key id → why it is below the write floor. Verification still uses these keys. */
+  weak: ReadonlyMap<string, string>;
+  /** Key id → the configuration surface that supplied it. Never key material. */
+  origins: ReadonlyMap<string, string>;
 };
 
 export class LedgerV2IntegrityError extends Error {
@@ -169,6 +209,8 @@ export class LedgerV2 {
   readonly principal: string;
   readonly hmacKey?: string;
   readonly hmacKeyId?: string;
+  /** Configured key ids below the write floor. Reads work; `append` refuses. */
+  readonly weakIntegrityKeyIds: readonly string[];
   private readonly integrityKeys: LedgerIntegrityKeys;
   private cache: ReadCache;
   private fullEvents: LedgerRecordV2[] | null = null;
@@ -185,6 +227,7 @@ export class LedgerV2 {
     this.integrityKeys = ledgerIntegrityKeys(options);
     this.hmacKey = this.integrityKeys.active?.key;
     this.hmacKeyId = this.integrityKeys.active?.id;
+    this.weakIntegrityKeyIds = [...this.integrityKeys.weak.keys()].sort();
     mkdirPrivate(dirname(this.ledgerPath));
     mkdirPrivate(dirname(this.readModelPath));
     // Persisted read models are bounded projections, never authority. Their
@@ -201,6 +244,7 @@ export class LedgerV2 {
 
   appendWithDisposition(type: string, payload: Record<string, unknown>, eventId: string = randomUUID()) {
     const parsedEventId = z.string().uuid().parse(eventId);
+    assertLedgerWriteKeyStrength(this.integrityKeys);
     return withOwnedLock(`${this.ledgerPath}.lock`, () => {
       this.refresh();
       if (this.cache.partial.length > 0) {
@@ -603,6 +647,9 @@ export function repairLedgerPartialTail(options: LedgerV2Options & { backupPath?
     if (trailingBytes === 0) throw new LedgerV2IntegrityError("Ledger has no partial trailing bytes to repair.");
 
     const keys = ledgerIntegrityKeys(options);
+    // Repair rewrites the ledger and then appends a recovery record. Refuse
+    // before touching bytes rather than after truncating and failing to sign.
+    assertLedgerWriteKeyStrength(keys);
     scanVerifiedLedgerText(completeBytes.toString("utf8"), options.projectId, keys);
     const backupPath = options.backupPath ?? `${options.ledgerPath}.partial-tail-${Date.now()}.bak`;
     if (existsSync(backupPath)) throw new LedgerV2IntegrityError(`Ledger repair backup already exists: ${backupPath}`);
@@ -644,7 +691,7 @@ export function verifyLedgerChain(
   const sourceRecords = options.records;
   const ledgerPath = options.ledgerPath;
   if (sourceRecords === undefined && ledgerPath !== undefined && !existsSync(ledgerPath)) {
-    return intactLedgerVerdict([], options.evidenceRoot);
+    return intactLedgerVerdict([], options.evidenceRoot, keys);
   }
 
   const lines = sourceRecords !== undefined
@@ -656,14 +703,31 @@ export function verifyLedgerChain(
     scanVerifiedLedgerLines(lines, options.projectId, keys, (record) => records.push(record));
   } catch (error) {
     if (!(error instanceof LedgerV2IntegrityError)) {
-      return brokenLedgerVerdict(records, records.length + 1, messageOf(error));
+      return brokenLedgerVerdict(records, records.length + 1, messageOf(error), keys);
     }
-    return brokenLedgerVerdict(records, error.breakSequence ?? records.length + 1, error.message);
+    return brokenLedgerVerdict(records, error.breakSequence ?? records.length + 1, error.message, keys);
   }
   if (partial.length > 0) {
-    return brokenLedgerVerdict(records, records.length + 1, "Ledger ends with an incomplete JSON line.");
+    return brokenLedgerVerdict(records, records.length + 1, "Ledger ends with an incomplete JSON line.", keys);
   }
-  return intactLedgerVerdict(records, options.evidenceRoot);
+  return intactLedgerVerdict(records, options.evidenceRoot, keys);
+}
+
+/**
+ * An intact chain signed with a weak key is still intact — the operator is told
+ * how strong the evidence is rather than being refused their own history.
+ */
+function weakKeyVerdictField(keys?: LedgerIntegrityKeys) {
+  if (!keys || keys.weak.size === 0) return {};
+  const keyIds = [...keys.weak.keys()].sort();
+  return {
+    weakKeys: {
+      keyIds,
+      reason: `Ledger HMAC key ids below the ${MIN_LEDGER_HMAC_KEY_BYTES}-byte / entropy floor: ${keyIds.join(", ")}. `
+        + "Records signed with them carry weak tamper-evidence, and no new record will be signed with them. "
+        + "Rotate to the output of: openssl rand -base64 32",
+    },
+  };
 }
 
 /**
@@ -680,7 +744,11 @@ export function verifyUnkeyedLedgerRecordHash(value: unknown): boolean {
   return hash === hashRecord(withoutHash);
 }
 
-function intactLedgerVerdict(records: LedgerRecordV2[], evidenceRoot?: string): LedgerVerificationVerdict {
+function intactLedgerVerdict(
+  records: LedgerRecordV2[],
+  evidenceRoot?: string,
+  keys?: LedgerIntegrityKeys,
+): LedgerVerificationVerdict {
   const evidence = evidenceRoot === undefined ? undefined : verifyReleaseEvidenceAnchors(records, evidenceRoot);
   const evidenceOk = evidence === undefined
     || (evidence.mismatched === 0 && evidence.missing === 0 && evidence.malformed === 0);
@@ -691,10 +759,16 @@ function intactLedgerVerdict(records: LedgerRecordV2[], evidenceRoot?: string): 
     integrity: ledgerIntegritySummary(records),
     ...(evidence ? { evidence } : {}),
     ...(!evidenceOk ? { reason: "One or more release-evidence files do not match their latest durable ledger anchor." } : {}),
+    ...weakKeyVerdictField(keys),
   };
 }
 
-function brokenLedgerVerdict(records: LedgerRecordV2[], sequence: number, reason: string): LedgerVerificationVerdict {
+function brokenLedgerVerdict(
+  records: LedgerRecordV2[],
+  sequence: number,
+  reason: string,
+  keys?: LedgerIntegrityKeys,
+): LedgerVerificationVerdict {
   return {
     ok: false,
     recordsChecked: records.length,
@@ -702,6 +776,7 @@ function brokenLedgerVerdict(records: LedgerRecordV2[], sequence: number, reason
     integrity: ledgerIntegritySummary(records),
     firstBreakAt: { sequence, reason },
     reason,
+    ...weakKeyVerdictField(keys),
   };
 }
 
@@ -815,33 +890,160 @@ function integrityKey(
   return key;
 }
 
-function ledgerIntegrityKeys(options: Pick<LedgerV2Options, "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId">): LedgerIntegrityKeys {
+function ledgerIntegrityKeys(
+  options: Pick<LedgerV2Options, "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId" | "hmacKeyOrigins">,
+): LedgerIntegrityKeys {
   const keyring = new Map<string, string>();
-  for (const [id, key] of Object.entries(options.hmacKeyring ?? {})) {
-    keyring.set(ledgerKeyId(id), ledgerKey(key));
+  const weak = new Map<string, string>();
+  const origins = new Map<string, string>();
+  for (const [rawId, rawOrigin] of Object.entries(options.hmacKeyOrigins ?? {})) {
+    origins.set(ledgerKeyId(rawId), z.string().min(1).max(128).parse(rawOrigin));
+  }
+  const admit = (id: string, key: string) => {
+    keyring.set(id, usableLedgerKey(key, id));
+    const failure = ledgerHmacKeyFailure(key);
+    if (failure) weak.set(id, failure);
+  };
+  for (const [rawId, key] of Object.entries(options.hmacKeyring ?? {})) {
+    admit(ledgerKeyId(rawId), key);
   }
   if (options.hmacKey) {
-    const id = ledgerKeyId(options.hmacKeyId ?? createHash("sha256").update(options.hmacKey).digest("hex").slice(0, 16));
-    const key = ledgerKey(options.hmacKey);
+    const id = ledgerKeyId(options.hmacKeyId ?? derivedLedgerKeyId(options.hmacKey));
     const existing = keyring.get(id);
-    if (existing && existing !== key) throw new TypeError(`Ledger key id ${id} resolves to multiple keys.`);
-    keyring.set(id, key);
+    if (existing && existing !== options.hmacKey) throw new TypeError(`Ledger key id ${id} resolves to multiple keys.`);
+    admit(id, options.hmacKey);
   }
-  const activeId = options.activeHmacKeyId ?? (options.hmacKey ? options.hmacKeyId ?? createHash("sha256").update(options.hmacKey).digest("hex").slice(0, 16) : undefined);
-  if (!activeId) return { active: null, keyring };
+  const activeId = options.activeHmacKeyId
+    ?? (options.hmacKey ? options.hmacKeyId ?? derivedLedgerKeyId(options.hmacKey) : undefined);
+  if (!activeId) return { active: null, keyring, weak, origins };
   const id = ledgerKeyId(activeId);
   const key = keyring.get(id);
   if (!key) throw new TypeError(`Active ledger HMAC key id ${id} is absent from the keyring.`);
-  return { active: { id, key }, keyring };
+  return { active: { id, key }, keyring, weak, origins };
+}
+
+function derivedLedgerKeyId(key: string) {
+  return createHash("sha256").update(key).digest("hex").slice(0, 16);
+}
+
+/**
+ * The floor's job is to stop new records being written under false
+ * tamper-evidence, so it is enforced here — at the signing boundary — and not
+ * when a ledger is merely opened or verified. A weak key that only sits in the
+ * keyring to verify historical records is left alone.
+ */
+function assertLedgerWriteKeyStrength(keys: LedgerIntegrityKeys) {
+  const active = keys.active;
+  if (!active) return;
+  const failure = keys.weak.get(active.id);
+  if (!failure) return;
+  throw weakLedgerHmacKeyError(active.id, failure, keys.origins.get(active.id));
 }
 
 function ledgerKeyId(value: string) {
   return z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/).parse(value);
 }
 
-function ledgerKey(value: string) {
-  if (Buffer.byteLength(value) < 16) throw new TypeError("Ledger HMAC keys must contain at least 16 bytes.");
+/**
+ * Structural admission only, and it names the key by id — never by content, so
+ * the message is safe to put in an operator-visible verdict or a daemon log.
+ */
+function usableLedgerKey(value: string, keyId: string) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(`Ledger HMAC key id ${keyId} has no key material.`);
+  }
   return value;
+}
+
+/** Why a key is unfit to sign NEW records. Returns null for a key that meets the floor. */
+function ledgerHmacKeyFailure(value: string): string | null {
+  if (typeof value !== "string" || value.length === 0) {
+    return "has no key material";
+  }
+  const utf8Bytes = Buffer.byteLength(value, "utf8");
+  const decoded = tryDecodeBase64Key(value);
+  const meetsFloor = utf8Bytes >= MIN_LEDGER_HMAC_KEY_BYTES || (decoded !== null && decoded.length >= MIN_LEDGER_HMAC_KEY_BYTES);
+  if (!meetsFloor) {
+    return `is shorter than the ${MIN_LEDGER_HMAC_KEY_BYTES}-byte floor`;
+  }
+  // Entropy checks apply to the operator-supplied string (and decoded bytes when base64).
+  if (isLowEntropyLedgerKey(value) || (decoded !== null && isLowEntropyBytes(decoded))) {
+    return "is below the entropy floor";
+  }
+  return null;
+}
+
+function tryDecodeBase64Key(value: string): Buffer | null {
+  // Accept std/base64url without requiring padding; reject binary garbage.
+  if (!/^[A-Za-z0-9_+/=\n\r-]+$/.test(value) || value.length < 16) return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/").replace(/\s+/g, "");
+    const decoded = Buffer.from(normalized, "base64");
+    // Round-trip check avoids treating arbitrary text as base64.
+    if (decoded.length === 0) return null;
+    const reencoded = decoded.toString("base64").replace(/=+$/, "");
+    const input = normalized.replace(/=+$/, "");
+    if (reencoded !== input) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+function isLowEntropyLedgerKey(value: string): boolean {
+  if (/^(.)\1+$/u.test(value)) return true;
+  if (/^\d+$/u.test(value)) return true;
+  if (/^[A-Za-z]+$/u.test(value) && new Set(value.toLowerCase()).size <= 4) return true;
+  const lower = value.toLowerCase();
+  if (
+    /^(password|passw0rd|secret|changeme|headless|ledger|test|admin|default|qwerty|letmein|abc123)[\d!@._-]*$/u.test(
+      lower,
+    )
+  ) {
+    return true;
+  }
+  const unique = new Set(value).size;
+  if (value.length >= MIN_LEDGER_HMAC_KEY_BYTES && unique < 8) return true;
+  return false;
+}
+
+function isLowEntropyBytes(bytes: Buffer): boolean {
+  if (bytes.length === 0) return true;
+  const first = bytes[0]!;
+  if (bytes.every((b) => b === first)) return true;
+  if (bytes.every((b) => b >= 0x30 && b <= 0x39)) return true;
+  const unique = new Set(bytes).size;
+  return bytes.length >= MIN_LEDGER_HMAC_KEY_BYTES && unique < 8;
+}
+
+/**
+ * A weak key still verifies history; it may not sign new records. The message
+ * identifies the key by id and by the variable that supplied it — never by any
+ * part of the secret, because this text reaches operator output and daemon logs.
+ */
+function weakLedgerHmacKeyError(keyId: string, failure: string, origin?: string): HeadlessError {
+  const from = origin ? ` (from ${origin})` : "";
+  return new HeadlessError(
+    "INVALID_REQUEST",
+    `Ledger HMAC key id ${keyId}${from} ${failure} — refusing to sign new records with a weak tamper-evidence key. `
+    + "Rotate it to the output of: openssl rand -base64 32. "
+    + "Existing records stay verifiable while the old key remains in HEADLESS_LEDGER_KEYS.",
+  );
+}
+
+/**
+ * The configured value cannot be used as key material at all. The offending
+ * variable is a parameter so the operator is never sent to one they never set.
+ */
+function unusableLedgerHmacKeyError(variable: string, cause?: unknown): HeadlessError {
+  const shape = variable === "HEADLESS_LEDGER_KEYS"
+    ? " It must be a JSON object of non-empty key-id → secret entries."
+    : "";
+  return new HeadlessError(
+    "INVALID_REQUEST",
+    `${variable} could not be read as ledger HMAC key material.${shape} Generate a secret with: openssl rand -base64 32`,
+    { cause },
+  );
 }
 
 function withOwnedLock<T>(lockPath: string, operation: () => T) {

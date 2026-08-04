@@ -1,3 +1,5 @@
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
 import {
   CliUsageError,
   daemonClient,
@@ -57,7 +59,7 @@ export async function runCooperationProofCommand(args: string[] = []) {
 }
 
 export async function runAutonomyCommand(args: string[]) {
-  const action = args[1] || "status";
+  const { action, argvWithoutAction } = resolveCommandAction(args, "status");
   const flags = flagArgsBeforeSeparator(args);
   if (flags.includes("--unsafe-no-sandbox")) throw new CliUsageError("Autonomy prohibits --unsafe-no-sandbox.");
   const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
@@ -70,16 +72,16 @@ export async function runAutonomyCommand(args: string[]) {
     return;
   }
   if (action === "ask" || action === "more" || action === "ask-for-work") {
-    const reason = getPrompt(["autonomy", ...args.slice(2)]) || "CLI manual ask for more work";
+    const reason = getPrompt(argvWithoutAction) || "CLI manual ask for more work";
     console.log(JSON.stringify(await client.call("ledger.event", { type: "ask_for_more_work", payload: { content: reason } }), null, 2));
     return;
   }
   if (action === "backup") {
-    const problem = getPrompt(["autonomy", ...args.slice(2)]) || "CLI requested backup";
+    const problem = getPrompt(argvWithoutAction) || "CLI requested backup";
     console.log(JSON.stringify(await client.call("ledger.event", { type: "ask_for_backup", payload: { content: problem, meta: { neededStrength: "any" } } }), null, 2));
     return;
   }
-  if (action !== "status") throw new CliUsageError("Usage: headless autonomy <start|stop|status|ask|backup>");
+  if (action !== "status") throw new CliUsageError(renderCommandUsage("autonomy"));
   console.log(JSON.stringify(await client.call("orchestrator.status"), null, 2));
 }
 

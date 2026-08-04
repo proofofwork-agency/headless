@@ -1,4 +1,6 @@
 import type { DaemonMethod } from "../../daemon/protocol";
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
 import {
   CliUsageError,
   daemonClient,
@@ -14,7 +16,7 @@ export type ApprovalCommandCall = {
 };
 
 export function parseApprovalCommand(args: string[]): ApprovalCommandCall {
-  const action = args[1] ?? "list";
+  const { action, argvWithoutAction } = resolveCommandAction(args, "list");
   const flags = flagArgsBeforeSeparator(args);
   if (action === "list") {
     const status = getArg(flags, "--status");
@@ -31,14 +33,14 @@ export function parseApprovalCommand(args: string[]): ApprovalCommandCall {
     if (decision !== "approved" && decision !== "rejected") {
       throw new CliUsageError("Invalid --decision. Expected approved or rejected.");
     }
-    const resolution = getArg(flags, "--resolution") ?? getPrompt(["approval", ...args.slice(2)]);
+    const resolution = getArg(flags, "--resolution") ?? getPrompt(argvWithoutAction);
     if (!resolution) throw new CliUsageError("A resolution is required via --resolution or a positional argument.");
     return {
       method: "approval.resolve",
       params: { approvalId: requiredArg(flags, "--approval-id"), decision, resolution },
     };
   }
-  throw new CliUsageError("Usage: headless approval <list|resolve> [options]");
+  throw new CliUsageError(renderCommandUsage("approval"));
 }
 
 export async function runApprovalCommand(args: string[]) {

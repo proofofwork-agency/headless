@@ -272,11 +272,21 @@ export class RunExecutionService {
                 approvalPolicy: controls.coderToolApproved ? "auto" : request.approvalPolicy,
                 jobId,
                 resumeNativeSessionId: resumableNativeSessionId(request, durableSession, adapter),
+                // unixSocket is authoritative when present (Linux relay dials AF_UNIX).
+                // baseUrl remains for env BASE_URL + in-netns relay port selection;
+                // in explicitly configured Unix-socket-only mode it may be a
+                // synthetic loopback URL that is not host-reachable.
+                // hostLoopbackListener reports that fact from the one component
+                // that knows it, so the runner can refuse to hand a worker a
+                // bearer token addressed to a port with no owner. Both the
+                // directly issued and the linked/delegated lease carry the same
+                // broker edges, so one instance-level fact covers both.
                 broker: brokerLease ? {
                   provider: brokerLease.provider,
                   baseUrl: brokerLease.baseUrl,
                   token: brokerLease.token,
-                  unixSocket: this.options.broker.unixSocketPath ?? undefined,
+                  unixSocket: this.options.broker.unixSocketPath ?? brokerLease.unixSocket,
+                  hostLoopbackListener: this.options.broker.tcpListening,
                 } : undefined,
                 runTool: runToolEndpoint ? {
                   socketPath: runToolEndpoint.socketPath,

@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Breaking
+
+- **Ledger HMAC keys used to sign new records must be at least 32 bytes and pass an entropy floor.** Shorter or low-entropy keys (repeated characters, pure digits, common password shapes) are refused at the signing boundary: `append` and ledger tail repair fail closed, naming the key id and the variable that supplied it. A human-memorable 16-character secret provides false tamper-evidence, so it is rejected rather than accepted. **Rotate**: generate with `openssl rand -base64 32`, keep the old key in `HEADLESS_LEDGER_KEYS` so historical records stay verifiable, and point `HEADLESS_LEDGER_ACTIVE_KEY_ID` at the new one.
+- **Unix control sockets are created `0o700`, not `0o600`.** They are bound under `umask 0o077` instead of being chmod-ed after `listen`, which closes the window where the socket existed at the ambient umask. Owner-only either way; only the observed mode changed.
+- **The whole `HEADLESS_LEDGER_*` family is denied to worker environments**, by prefix rather than by name. A worker that could read the keyring could forge ledger entries, which is the property the HMAC exists to provide.
+- **Unknown flags are rejected instead of silently ignored.** Validation is per command, from each command's own declared flags, so a flag valid for one command no longer passes for another. A typo'd or removed flag now fails fast rather than being dropped. `--flag=value` is not accepted; pass `--flag value`. Validated against 261 documented invocations across the docs, website, scripts and README with no failures, but wrappers that append one flag set to every command will need adjusting.
+
+### Fixed
+
+- The ledger key floor no longer blocks reading an existing chain. It was enforced while parsing `HEADLESS_LEDGER_KEY` / `HEADLESS_LEDGER_KEYS`, so an operator holding a 16–31 byte key could not start a daemon at all and `headless verify` failed with `Timed out waiting for the detached Headless daemon` instead of anything about keys. Verification now proceeds and reports the weak key in the verdict (`weakKeys`, printed by `headless verify`); only signing is refused. A weak key kept solely for verifying history no longer blocks a strong active key, which is what makes the documented rotation possible.
+- A weak singular `HEADLESS_LEDGER_KEY` no longer reports `HEADLESS_LEDGER_KEYS` as the offending variable. The refusal names the key id and the variable that actually supplied it.
+- Ledger key failures no longer embed the first four characters of the key. That preview reached the `headless verify` verdict, which is printed and routinely pasted into bug reports; keys are now identified only by id.
+- Broker leases no longer point unsafe or host-side runs at an unowned synthetic loopback port. The default dual-edge broker preserves the existing Linux unsafe/extension contract while required-contained Linux workers continue to relay through the owner-only Unix socket. An explicit `HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0` still selects AF_UNIX-only mode, and Headless refuses any run for which no in-namespace relay will exist.
+- Restored Unix-socket bind exclusivity. The bind helper cleared the socket path before every bind, so `listen()` could never raise `EADDRINUSE` — the kernel backstop that made each caller's check-then-bind safe. Stale-socket policy belongs to the caller, and every caller already implements it.
+- Concurrent socket binds no longer corrupt the process umask. The window is reference-counted and await-spanning binds are serialized, so the baseline is restored exactly once.
+- A Bun listener refused by post-bind ownership verification is now disposed instead of leaked; the caller never receives that handle and so cannot close it.
+- `process.getuid` is guarded and fails closed where unavailable. The uid comparison is the only defence against a foreign-owned socket, so an unverifiable platform refuses rather than skipping the check.
+- The offline linked-hold lock now binds through the same verified helper as every other socket.
+- **CLI actions are resolved from grammar rather than from a physical argv index.** Every handler read its subcommand as `args[1]`, so a global flag became the action: `headless daemon --cwd DIR` and `headless lead --cwd DIR` failed with a usage error, and `headless mcp --cwd DIR` consumed the flag *and its value* and then reported the operator's own project path as `Unknown MCP host`. One scanner now consumes each registered value flag together with its value as a single unit; 27 index reads across 18 handlers went through it.
+- **Usage errors are no longer reported as internal faults.** A `CliUsageError` was classified as `INVALID_REQUEST` only under `--json`; text mode fell through to `INTERNAL_ERROR`, so a typo printed "the daemon or runner hit an unexpected failure" and sent the operator to `headless daemon status` to debug a healthy daemon. Classified once now, before the output-mode split, so the two modes cannot diverge again.
+- Usage strings name the namespace the operator has to type: experimental commands print `headless experimental <command>` instead of a stable form that the top-level gate rejects.
+- `--after-sequence -1` and other negative numeric values report the range error from the semantic parser instead of "Missing value", which blamed the flag for being absent.
+- `headless experimental events --errors --activity` keeps its actionable conflict message under `--json` instead of degrading to a generic `INTERNAL_ERROR`.
+- `headless experimental launch` requires its backend before starting a daemon, instead of consuming `--cwd` as the backend name.
+- `headless tui` refuses without a terminal instead of reaching Ink's renderer, which threw from inside React and printed a framework stack trace citing `node_modules`.
+- The `UNSUPPORTED_PLATFORM` remedy no longer blames the operating system for failures that are not about the operating system.
+
 ## 0.2.0-beta.6 — 2026-07-31
 
 Package publication remains blocked. Both package manifests are private at `0.2.0-beta.6`; npm publication and repository visibility remain separate human-authority decisions. This tree is an unpublished private beta (not alpha).

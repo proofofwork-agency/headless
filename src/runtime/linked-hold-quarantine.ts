@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
 import { userInfo } from "node:os";
 import { basename, join } from "node:path";
@@ -18,6 +18,7 @@ import {
   type ProjectStateOptions,
   type ProjectStatePaths,
 } from "./project-state";
+import { secureUnixListen } from "./secure-socket";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const MAX_STORE_BYTES = 32 * 1024 * 1024;
@@ -152,23 +153,20 @@ async function withOfflineStateLock<T>(paths: ProjectStatePaths, operation: () =
     if (await socketAcceptsConnections(paths.socketPath)) {
       throw new HeadlessError("DAEMON_ALREADY_RUNNING", "Offline linked-hold recovery refuses while a daemon owns the project state.");
     }
+    // secureUnixListen never unlinks — EADDRINUSE is the kernel-level backstop
+    // that keeps this check-then-bind a single-owner election — so clearing a
+    // socket we just proved dead stays this caller's policy.
     rmSync(paths.socketPath, { force: true });
   }
   const server = createServer((socket) => socket.destroy());
-  let bound = false;
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(paths.socketPath, () => {
-        bound = true;
-        server.off("error", reject);
-        resolve();
-      });
-    });
-    chmodSync(paths.socketPath, 0o600);
+    // Binds under a restrictive umask so the lock socket is owner-only at
+    // creation, then verifies it; a refused socket must still be torn down,
+    // hence the server.listening check below rather than a success flag.
+    await secureUnixListen(server, paths.socketPath);
     return await operation();
   } finally {
-    if (bound) {
+    if (server.listening) {
       await closeServer(server);
       rmSync(paths.socketPath, { force: true });
     }

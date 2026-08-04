@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { atomicWriteFile } from "../../runtime/atomic-write";
+import { resolveCommandAction } from "../argv";
 import { CliUsageError, ensureSupportedPlatform, flagArgsBeforeSeparator, getArg } from "../shared";
 
 export type McpHost = "codex" | "grok" | "claude" | "opencode";
@@ -15,12 +16,12 @@ export type McpInstallOptions = {
 };
 
 export async function runMcpCommand(args: string[]) {
-  const action = args[1] || "serve";
+  const { action, operands } = resolveCommandAction(args, "serve");
   const flags = flagArgsBeforeSeparator(args);
   const checkoutRoot = getArg(flags, "--cwd") || process.cwd();
   if (action === "serve" || action === "server") {
     ensureSupportedPlatform();
-    const host = normalizeMcpHost(args[2] && !args[2].startsWith("-") ? args[2] : "codex");
+    const host = normalizeMcpHost(operands[0] ?? "codex");
     // Prefer env so nested resolution and any residual entrypoint probes agree.
     process.env.HEADLESS_LEAD_HOST = host;
     if (!process.env.HEADLESS_PROJECT_ROOT) {
@@ -31,7 +32,7 @@ export async function runMcpCommand(args: string[]) {
     await import("../../mcp/server.js").then((module) => module.startMcpServer({ host }));
     return;
   }
-  const host = normalizeMcpHost(args[2] && !args[2].startsWith("-") ? args[2] : "codex");
+  const host = normalizeMcpHost(operands[0] ?? "codex");
   if (action === "install") return runMcpInstall(host, { checkoutRoot });
   if (action === "remove") return runMcpRemove(host);
   if (action === "status") return runMcpStatus(host);

@@ -1,4 +1,5 @@
 import type { Job } from "../../contracts/durable";
+import { HeadlessError } from "../../runtime/headless-error";
 import type { BrokerEnvReadiness } from "../../runtime/broker-env";
 import {
   daemonClient,
@@ -26,8 +27,23 @@ export type InitCommandDependencies = {
 
 export async function runTuiCommand(args: string[]) {
   ensureSupportedPlatform();
+  ensureInteractiveTerminal();
   const { runTui } = await import("../../tui/App.js");
   await runTui({ projectRoot: tuiProjectRoot(args) });
+}
+
+/**
+ * Ink puts stdin into raw mode, which is unavailable when stdin is a pipe, a
+ * redirect, or a CI runner. Reaching render() there throws from inside React
+ * and reaches the operator as a framework stack trace citing node_modules.
+ * Refuse before rendering so a non-interactive caller gets one actionable line.
+ */
+function ensureInteractiveTerminal() {
+  if (process.stdin.isTTY && process.stdout.isTTY) return;
+  throw new HeadlessError(
+    "UNSUPPORTED_PLATFORM",
+    "The observer TUI needs an interactive terminal, so it cannot run through a pipe, a redirect, or a CI runner. For non-interactive output use `headless status --json`, `headless doctor --json`, or `headless experimental events`.",
+  );
 }
 
 export function tuiProjectRoot(args: string[], fallback = process.cwd()) {
