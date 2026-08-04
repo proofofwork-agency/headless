@@ -28,6 +28,15 @@ operator must mint the real token before that machine can produce Claude live
 evidence. Grok remains experimental and is excluded from the published Gate A
 required set.
 
+"Green on macOS and Linux" does not mean every containment case ran on both
+legs. Two are skipped on GitHub-hosted Linux by a declared, tracked
+incompatibility: the daemon run-tool cooperation and depth-one delegation cases
+(covered on macOS CI and real Linux), and the late-created-host-socket relay
+lifecycle case, which runs on no CI leg and is covered only on an operator's
+Linux machine. The in-repo `tests/gated-coverage.test.ts` registry is the
+authoritative record of which leg runs each capability gate, and it fails when a
+gate is uncovered without a stated reason.
+
 ## Gate B: orchestration
 
 Gate B adds durable collaboration contracts and real multi-agent behavior. The
