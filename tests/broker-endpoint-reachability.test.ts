@@ -16,6 +16,7 @@ import { isHeadlessError } from "../src/runtime/headless-error";
 import { backendDefinitions } from "../src/backends/registry";
 
 const closers: Array<() => void> = [];
+let leaseSequence = 0;
 
 afterEach(() => {
   while (closers.length) closers.pop()?.();
@@ -43,7 +44,7 @@ function unixOnlyBroker() {
 /** Build the worker lease the way RunExecutionService does, from broker facts. */
 function workerAccess(broker: ProviderBroker, provider = "openai"): BrokerWorkerAccess {
   const lease = broker.issueLease({
-    runId: `reachability-${provider}-${Math.random().toString(16).slice(2)}`,
+    runId: `reachability-${provider}-${++leaseSequence}`,
     provider,
     models: ["gpt-test"],
     endpointClasses: ["responses"],
