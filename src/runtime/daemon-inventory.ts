@@ -11,6 +11,15 @@ import { basename, resolve, sep } from "node:path";
  */
 const MAX_PROCESS_TABLE_BYTES = 4_000_000;
 const PROCESS_TABLE_TIMEOUT_MS = 5_000;
+/**
+ * Matching is by basename, so this proves SHAPE, not PROVENANCE: an unrelated
+ * same-user program genuinely launched as `bun /elsewhere/cli.ts daemon serve`
+ * matches too. Combined with the argv[1] anchor below that is enough to reject
+ * a process merely quoting a daemon command line, which is the false positive
+ * that was actually observed — but it is not identity. Anything that acts on
+ * this inventory destructively must stay behind explicit human confirmation
+ * until an entrypoint can be verified rather than name-matched.
+ */
 const DAEMON_ENTRYPOINTS = new Set(["cli.js", "cli.ts"]);
 
 export type DaemonReapReason = "missing-root" | "disposable-root" | "resident";
@@ -27,9 +36,16 @@ export type DaemonInventoryEntry = DaemonProcessEntry & {
 };
 
 /**
- * Parses `ps -eo pid=,uid=,command=` output into the daemons this user owns.
- * Only our own `daemon serve` entrypoints match, so an unrelated process that
- * merely mentions the words is never a reap candidate.
+ * Parses `ps -eo pid=,uid=,command=` output into candidate daemons this user
+ * owns.
+ *
+ * The argv[1]/argv[2] anchor rejects a process that merely QUOTES a daemon
+ * command line — a shell echoing the string, or a message containing it, which
+ * was observed producing a "project root" full of backticks and a newline. It
+ * does NOT prove identity: matching is by basename, so an unrelated same-user
+ * program genuinely launched as `bun /elsewhere/cli.ts daemon serve` matches
+ * too. See the note on DAEMON_ENTRYPOINTS; anything acting on this list
+ * destructively must stay behind explicit human confirmation.
  */
 export function parseDaemonProcessTable(output: string, uid: number, selfPid: number): DaemonProcessEntry[] {
   const entries: DaemonProcessEntry[] = [];

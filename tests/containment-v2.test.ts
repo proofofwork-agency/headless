@@ -437,6 +437,90 @@ describe("Linux bubblewrap profiles", () => {
     }
   });
 
+  /**
+   * The SECURITY invariant on its own: a host Unix socket created AFTER the
+   * sandbox launched must still be unreachable from inside it.
+   *
+   * Split out of the combined case below deliberately. That one also requires
+   * the broker relay and the run-tool helper to be reachable, and on hosted
+   * x86-64 the run-tool leg is repeatedly intermittent — 3 of 9 sampled hosted
+   * runs failed, and every diagnosed one reported
+   * `{"unixError":"ENOENT", "brokerStatus":200, "toolCode":1}`, i.e. containment
+   * held and only availability broke. Gating the security property behind an
+   * availability check means a flaky relay makes the security gate red, which
+   * teaches people to re-run it, which is how a real breach would be waved
+   * through. This case depends on nothing but bubblewrap and the seccomp
+   * filter, so it can be required on hosted Linux and mean what it says.
+   */
+  linuxBwrapTest("denies a host Unix socket created after launch", async () => {
+    const project = temporaryDirectory("headless-late-socket-pure-");
+    mkdirSync(join(project, ".git"));
+    const runtime = temporaryDirectory("headless-late-socket-pure-runtime-");
+    // Under `project`, NOT under `runtime`. project is re-exposed into the mount
+    // namespace with --ro-bind, so a socket created there after launch is
+    // VISIBLE inside the sandbox and only the inherited AF_UNIX seccomp filter
+    // stops the connect — which is the property under test. A path outside
+    // worker.root is simply absent behind the private /tmp tmpfs, so it would
+    // return ENOENT even with seccomp removed entirely: a test that cannot fail.
+    const lateSocket = join(project, "late-host-pure.sock");
+    const worker = createWorkerEnvironment({ baseDir: runtime });
+    const marker = join(worker.temp, "worker-ready");
+    const proceed = join(worker.temp, "host-socket-ready");
+    const script = [
+      "const {existsSync,writeFileSync}=require('node:fs');",
+      "const {createConnection}=require('node:net');",
+      `writeFileSync(${JSON.stringify(marker)},'ready');`,
+      `for(let i=0;i<500&&!existsSync(${JSON.stringify(proceed)});i++)await Bun.sleep(10);`,
+      `if(!existsSync(${JSON.stringify(proceed)}))process.exit(81);`,
+      // Record VISIBILITY before attempting the connect. Without this the case
+      // passes on ENOENT, which is what an absent path returns — so a mount
+      // change that simply hid the socket would silently substitute for the
+      // seccomp denial and the gate would still be green. Asserting both makes
+      // every run prove its own prerequisite instead of trusting one host's
+      // mutation check to hold on another.
+      `const socketVisible=existsSync(${JSON.stringify(lateSocket)});`,
+      `const unixError=await new Promise((resolve)=>{const socket=createConnection(${JSON.stringify(lateSocket)});socket.once('connect',()=>resolve('CONNECTED'));socket.once('error',(error)=>resolve(error.code));});`,
+      "console.log(JSON.stringify({socketVisible,unixError}));",
+    ].join("");
+    const wrapped = maybeWrapWithSandbox(
+      ["bun", "-e", script],
+      { backend: "opencode", prompt: "late socket", cwd: project, containment: "required" },
+      backendDefinitions.opencode,
+      project,
+      undefined,
+      worker,
+    );
+    const forbidden = createServer((socket) => socket.end("host control\n"));
+    let forbiddenListening = false;
+    try {
+      expect(wrapped.sandboxed, wrapped.reason).toBe(true);
+      const child = Bun.spawn(wrapped.cmd, { cwd: project, env: worker.env, stdout: "pipe", stderr: "pipe" });
+      const readyDeadline = Date.now() + schedulingWindow(5_000);
+      while (!existsSync(marker) && child.exitCode === null && Date.now() < readyDeadline) await Bun.sleep(10);
+      expect(existsSync(marker)).toBe(true);
+      // Created only now, after launch: the project bind existed before this
+      // dentry did, and the visibility assertion below is what proves the new
+      // dentry propagated into the namespace rather than assuming it.
+      await listenUnix(forbidden, lateSocket);
+      forbiddenListening = true;
+      writeFileSync(proceed, "go");
+      const [exitCode, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(exitCode, `stdout: ${stdout}\nstderr: ${stderr}`).toBe(0);
+      const observed = JSON.parse(stdout) as { socketVisible: boolean; unixError: string };
+      // Prerequisite first: if the dentry never propagated, a denial proves
+      // nothing about seccomp.
+      expect(observed.socketVisible, `late socket never became visible inside the sandbox, so its denial proves nothing: ${stdout}`).toBe(true);
+      expect(observed.unixError, `late socket was reachable from inside the sandbox: ${stdout}`).not.toBe("CONNECTED");
+    } finally {
+      if (forbiddenListening) await new Promise<void>((resolve) => forbidden.close(() => resolve()));
+      worker.cleanup();
+    }
+  });
+
   linuxRelayLifecycleTest("denies a host Unix socket created after launch while broker and run tools remain reachable", async () => {
     const project = temporaryDirectory("headless-linux-late-socket-project-");
     const runtime = temporaryDirectory("headless-linux-late-socket-runtime-");
@@ -489,12 +573,23 @@ describe("Linux bubblewrap profiles", () => {
       `writeFileSync(${JSON.stringify(marker)},'ready');`,
       `for(let i=0;i<500&&!existsSync(${JSON.stringify(proceed)});i++)await Bun.sleep(10);`,
       `if(!existsSync(${JSON.stringify(proceed)}))process.exit(81);`,
+      // Same premise the pure case asserts: an ABSENT path also refuses, with
+      // ENOENT, so without this a mount change that merely hid the socket would
+      // read as a seccomp denial here too.
+      `const socketVisible=existsSync(${JSON.stringify(lateSocket)});`,
       `const unixError=await new Promise((resolve)=>{const socket=createConnection(${JSON.stringify(lateSocket)});socket.once('connect',()=>resolve('CONNECTED'));socket.once('error',(error)=>resolve(error.code));});`,
       `const response=await fetch(${JSON.stringify(`${relayUrl}/openai/v1/responses`)},{method:'POST',headers:{authorization:${JSON.stringify(`Bearer ${lease.token}`)},'content-type':'application/json'},body:JSON.stringify({model:'gpt-test',input:'hello'})});`,
       "const tool=Bun.spawnSync(['headless-run-tool','task_status','{}'],{env:process.env,stdout:'pipe',stderr:'pipe'});",
-      "const observed={unixError,brokerStatus:response.status,brokerBody:await response.text(),toolCode:tool.exitCode,toolOutput:tool.stdout.toString()};",
+      "const observed={socketVisible,unixError,brokerStatus:response.status,brokerBody:await response.text(),toolCode:tool.exitCode,toolOutput:tool.stdout.toString(),toolError:tool.stderr.toString()};",
       "console.log(JSON.stringify(observed));",
-      "if(unixError==='CONNECTED'||!response.ok||tool.exitCode!==0||!observed.toolOutput.includes('run-tool-ok'))process.exit(82);",
+      // Deliberately NO aggregate failure exit here. This used to exit 82 when
+      // any observation was wrong, which collapsed four distinct outcomes into
+      // one opaque code AND short-circuited the parent's per-field assertions
+      // below, because the parent checks the exit code first. A real hosted-CI
+      // failure was therefore unclassifiable: exit 82 covers both a connectable
+      // late socket — a containment BREACH — and a merely unreachable broker or
+      // run-tool, which is a relay-availability problem. The child now reports
+      // and exits 0; the parent decides, and names which property failed.
     ].join("");
     const wrapped = maybeWrapWithSandbox(
       ["bun", "-e", script],
@@ -528,12 +623,23 @@ describe("Linux bubblewrap profiles", () => {
         new Response(child.stdout).text(),
         new Response(child.stderr).text(),
       ]);
-      expect(exitCode, stderr).toBe(0);
-      const observed = JSON.parse(stdout) as { unixError: string; brokerStatus: number; brokerBody: string; toolCode: number; toolOutput: string };
-      expect(observed.unixError).not.toBe("CONNECTED");
+      // A non-zero exit now means the child crashed or never reported, which is
+      // a distinct failure from any observation being wrong. Both streams are in
+      // the message because this runs on hosted CI where the log is all there is.
+      expect(exitCode, `stdout: ${stdout}\nstderr: ${stderr}`).toBe(0);
+      const observed = JSON.parse(stdout) as { socketVisible: boolean; unixError: string; brokerStatus: number; brokerBody: string; toolCode: number; toolOutput: string; toolError: string };
+      expect(observed.socketVisible, `late socket never became visible inside the sandbox, so its denial proves nothing: ${stdout}`).toBe(true);
+      // THE SECURITY PROPERTY, asserted first and on its own. A connectable
+      // late socket is a containment breach; everything below it is
+      // availability. Keeping them separate means a flaky relay can never
+      // obscure — or be mistaken for — a sandbox that leaked.
+      expect(observed.unixError, `late socket was reachable from inside the sandbox: ${stdout}`).not.toBe("CONNECTED");
       expect(observed.brokerStatus).toBe(200);
       expect(observed.brokerBody).toContain('"broker":"ok"');
-      expect(observed.toolCode).toBe(0);
+      // toolError is in the message because a hosted failure reported toolCode 1
+      // with an empty toolOutput and nothing said WHY — the run-tool stderr was
+      // captured by the child and then dropped from the report.
+      expect(observed.toolCode, `run-tool failed: ${observed.toolError}`).toBe(0);
       expect(observed.toolOutput).toContain("run-tool-ok");
     } finally {
       if (forbiddenListening) await new Promise<void>((resolve) => forbidden.close(() => resolve()));

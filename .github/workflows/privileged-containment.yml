@@ -1,0 +1,145 @@
+name: Privileged containment
+
+# ADVISORY, INDEPENDENT, DUPLICATE evidence for the containment invariants —
+# not their only coverage, and NOT enforced.
+#
+# Nothing in this repository is a required check. Measured, not assumed:
+# `gh api repos/.../branches/main/protection` returns 404 "Branch not
+# protected", and both `/rules/branches/main` and `/rulesets` return []. So a
+# red result here does not block a merge; a human has to look. Saying
+# "required" anywhere would be the same false claim this job exists to prevent.
+# If enforcement is wanted, it is a repository-settings decision for the owner,
+# not something a workflow file can assert about itself. Be precise about that: the ordinary ubuntu release gate
+# installs bubblewrap, runs probeLinuxBwrap fail-closed, and already executes
+# both the standalone late-created-socket denial and the x32 alternate-ABI case
+# on real x86-64. Splitting the security property out of the combined case is
+# what covered it; this job did not create that coverage.
+#
+# What this job adds that the ordinary gate does not:
+#   - the privileged-container shape, exercising the same invariants under
+#     --privileged rather than the runner's default capabilities;
+#   - per-CASE anti-vacuity. The ordinary gate does fail-close on capability:
+#     it runs probeLinuxBwrap and exits non-zero if bubblewrap is unusable. What
+#     it does not do is witness individual cases — bun's summary reads "0 fail"
+#     whether a given case ran or skipped. Here the architecture is asserted by
+#     whole-line sentinel, each case name is anchored to (pass), and the
+#     combined case is required to appear as (skip), which is the only proof
+#     that GITHUB_ACTIONS reached the container and armed the hosted predicate.
+#
+# It deliberately does NOT cover the combined
+# "denied while broker and run tools remain reachable" case: that one also
+# depends on the run-tool relay, and that leg is repeatedly intermittent on
+# hosted runners with containment holding in every diagnosed failure. Gating a
+# security assertion behind a flaky availability check produces a red people
+# learn to re-run, which is how a real breach gets waved through. Nor does it
+# attempt the four tests/daemon-run-tool.test.ts cooperation cases, whose
+# hosted incompatibility is reproduced and unresolved.
+# See docs/internal/hosted-linux-relay-follow-up.md.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    # Directory scopes, not a hand-listed file set. A hand list goes stale
+    # silently and the failure mode is this job NOT running on a change that
+    # breaks the exact path it exists to prove — src/runner/simple.ts wraps the
+    # sandbox and launches the relay, worker-environment and run-tool-client
+    # build what crosses it, and a dependency bump changes the runtime under all
+    # of it.
+    paths:
+      - "src/runtime/**"
+      - "src/broker/**"
+      - "src/runner/**"
+      - "src/backends/**"
+      - "src/daemon/run-tool-endpoint.ts"
+      - "tests/containment-v2.test.ts"
+      - "tests/support/timing.ts"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/privileged-containment.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privileged-containment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  late-socket:
+    name: x86-64 privileged bubblewrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # This checkout is mounted into a PRIVILEGED container running
+          # pull-request code. Without this, the persisted GITHUB_TOKEN
+          # extraheader travels with it. Nothing here needs to talk to git.
+          persist-credentials: false
+
+      - name: Run containment suite under privileged bubblewrap
+        run: |
+          set -euo pipefail
+          # --cpus/--memory match the recorded evidence in the follow-up doc.
+          # GITHUB_ACTIONS must be passed EXPLICITLY: docker run does not inherit
+          # the runner environment, so relying on it being "already true" left it
+          # unset inside the container and silently un-armed the hosted predicate.
+          # CI=true selects the slow-Linux timing context and NO_COLOR keeps the
+          # result lines anchorable below.
+          docker run --rm --privileged --cpus=2 --memory=3g -v "$PWD:/repo:ro" oven/bun:1.3.14 bash -lc '
+            set -euo pipefail
+            apt-get update -qq
+            apt-get install -y -qq bubblewrap
+            cp -r /repo /work
+            cd /work
+            bun install --frozen-lockfile --ignore-scripts
+            echo "HEADLESS_TEST_ARCH=$(uname -m)"
+            bwrap --version
+            # HEADLESS_PRIVILEGED_CONTAINMENT_CI is deliberately NOT set. That
+            # override would additionally enable the COMBINED late-socket case,
+            # which also requires the run-tool relay to be reachable — and that
+            # leg is repeatedly intermittent on hosted x86-64. Every diagnosed
+            # failure reported unixError=ENOENT with toolCode=1: containment
+            # held, only availability broke. Raw sample counts and run IDs live
+            # in docs/internal/hosted-linux-relay-follow-up.md, deliberately not
+            # here, so a changing sample never rots this comment. Gating a security
+            # assertion behind a flaky availability check produces a red that
+            # people learn to re-run, which is how a real breach gets waved
+            # through. The pure denial case below runs without the override.
+            CI=true GITHUB_ACTIONS=true NO_COLOR=1 bun test tests/containment-v2.test.ts
+          ' 2>&1 | tee containment.log
+
+      - name: Refuse a vacuous pass
+        run: |
+          set -euo pipefail
+          # A skipped suite reports "0 fail" exactly like a passing one. That is
+          # not hypothetical: the documented local command silently skipped
+          # everything on Apple Silicon and printed 0 pass / 4 skip / 0 fail.
+          # So assert the architecture and the individual cases, anchored, or
+          # fail. A coverage check must not be able to certify its own absence.
+          grep -qx 'HEADLESS_TEST_ARCH=x86_64' containment.log \
+            || { echo "::error::not x86-64; this job exists to cover that architecture"; exit 1; }
+          # Anchored on the trailing duration bracket. The pure case's name is a
+          # strict PREFIX of the combined one ("… after launch" vs "… after
+          # launch while broker and run tools remain reachable"), so without the
+          # bracket either case could satisfy this check — including the one
+          # that is meant to be skipped here.
+          grep -qE '^\(pass\) .*denies a host Unix socket created after launch \[' containment.log \
+            || { echo "::error::pure late-socket denial case did not PASS — skipped or failed, so this job proved nothing"; exit 1; }
+          grep -qE '^\(pass\).*rejects x32 syscall numbers before native seccomp dispatch' containment.log \
+            || { echo "::error::x32 alternate-ABI case did not PASS on x86-64"; exit 1; }
+          # Prove the hosted predicate was ARMED. If GITHUB_ACTIONS failed to
+          # reach the container, the combined relay case would RUN instead of
+          # skipping — and it would usually pass, so pure+x32 staying green
+          # would hide the regression. Requiring the skip makes that impossible.
+          grep -qE '^\(skip\).*denies a host Unix socket created after launch while broker' containment.log \
+            || { echo "::error::combined relay case was not skipped — GITHUB_ACTIONS did not reach the container, so the hosted predicate was not armed"; exit 1; }
+          echo "pure late-socket denial and x32 cases executed and passed on x86-64"
+
+      - name: Upload containment log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privileged-containment-log
+          path: containment.log
+          retention-days: 14
