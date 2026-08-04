@@ -11,6 +11,15 @@ import { basename, resolve, sep } from "node:path";
  */
 const MAX_PROCESS_TABLE_BYTES = 4_000_000;
 const PROCESS_TABLE_TIMEOUT_MS = 5_000;
+/**
+ * Matching is by basename, so this proves SHAPE, not PROVENANCE: an unrelated
+ * same-user program genuinely launched as `bun /elsewhere/cli.ts daemon serve`
+ * matches too. Combined with the argv[1] anchor below that is enough to reject
+ * a process merely quoting a daemon command line, which is the false positive
+ * that was actually observed — but it is not identity. Anything that acts on
+ * this inventory destructively must stay behind explicit human confirmation
+ * until an entrypoint can be verified rather than name-matched.
+ */
 const DAEMON_ENTRYPOINTS = new Set(["cli.js", "cli.ts"]);
 
 export type DaemonReapReason = "missing-root" | "disposable-root" | "resident";
