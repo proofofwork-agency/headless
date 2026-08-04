@@ -41,11 +41,25 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Install bubblewrap
-        run: sudo apt-get update -qq && sudo apt-get install --yes -qq bubblewrap
+      - name: Install bubblewrap and match the release gate's userns setup
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install --yes -qq bubblewrap
+          # ci.yml relaxes this before its containment probe; without the same
+          # step strictContainmentAvailable() can be false here and all four
+          # cases skip — a second, quieter way for this job to prove nothing.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Fail closed if containment is unavailable
+        run: |
+          set -euo pipefail
+          # Without this the suite skips and the job looks like a clean run. The
+          # point is to REPRODUCE a failure, so an environment that cannot even
+          # attempt it must stop here rather than report nothing.
+          bun -e 'const { probeLinuxBwrap } = await import("./src/runtime/os-sandbox.ts"); const r = probeLinuxBwrap(); console.log(r); if (!r.ok) process.exit(1)'
 
       - name: Record the environment the failure is attributed to
         run: |
@@ -68,9 +82,13 @@ jobs:
           ( while true; do
               echo "--- $(date -u +%H:%M:%S) ---"
               ps -eo pid,ppid,etimes,stat,comm,args | grep -E 'bwrap|bun|headless' | grep -v grep || true
+              # Relay sockets, since the fault is a child holding one open past
+              # its response. The header claimed this before the sampler did it.
+              ss -xap 2>/dev/null | grep -E 'headless|run-tool|broker' || true
               sleep 2
             done ) > process-tree.log 2>&1 &
           echo $! > sampler.pid
+          trap 'kill "$(cat sampler.pid)" 2>/dev/null || true' EXIT
 
           # HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 is what makes the guarded
           # cases run here at all; that is the point of this job.
@@ -79,6 +97,23 @@ jobs:
           echo "exit=${PIPESTATUS[0]}" | tee -a cooperation.log
 
           kill "$(cat sampler.pid)" 2>/dev/null || true
+
+      - name: Refuse a vacuous reproducer
+        run: |
+          set -euo pipefail
+          # Every one of the four must appear as pass or fail. A skip means the
+          # gate still excluded them and this job proved nothing — which is
+          # exactly what it did before the predicate learned to honour the
+          # override.
+          for case_name in \
+            "injects the scoped helper into the contained worker and revokes it at terminal state" \
+            "runs one depth-one child and omits delegation from the child credential" \
+            "returns child failure as tool data and lets the parent finish" \
+            "returns child timeout as tool data inside the parent deadline"; do
+            grep -qE "^\((pass|fail)\).*${case_name}" cooperation.log \
+              || { echo "::error::case did not execute (skipped or absent): ${case_name}"; exit 1; }
+          done
+          echo "all four cooperation cases executed on hosted x86-64"
 
       - name: Extract the two scoped faults
         continue-on-error: true
