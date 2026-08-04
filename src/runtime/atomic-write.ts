@@ -22,18 +22,24 @@ export function atomicWriteFile(path: string, content: string | Buffer, opts: { 
   const data = typeof content === "string" ? Buffer.from(content, "utf8") : content;
 
   const fd = openSync(tmp, "w", mode);
+  // close(2) releases the descriptor even when it reports an error, which is
+  // why its own manual warns against retrying: a second close would target a
+  // number another operation may already have reused. Track the attempt so the
+  // failure path unlinks the temp file without double-closing.
+  let closeAttempted = false;
   try {
     let written = 0;
     while (written < data.length) {
       written += writeSync(fd, data, written, data.length - written, null);
     }
     fsyncSync(fd);
+    closeAttempted = true;
+    closeSync(fd);
   } catch (err) {
-    cleanupSync("atomic-write.close-after-write-failure", () => closeSync(fd));
-    cleanupSync("atomic-write.unlink-temp-after-write-failure", () => unlinkSync(tmp));
+    if (!closeAttempted) cleanupSync("atomic-write.close-after-write-failure", () => closeSync(fd));
+    cleanupSync("atomic-write.unlink-temp-after-write-or-close-failure", () => unlinkSync(tmp));
     throw err;
   }
-  closeSync(fd);
 
   try {
     renameSync(tmp, path);

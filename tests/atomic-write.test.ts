@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { atomicAppendFile, atomicWriteFile } from "../src/runtime/atomic-write";
@@ -19,6 +19,37 @@ describe("atomic file persistence", () => {
 
     expect(readFileSync(path, "utf8")).toBe("durable content");
     expect(statSync(path).mode & 0o777).toBe(0o640);
+    expect(readdirSync(root).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+
+  test("removes the temporary file when the final descriptor close fails", () => {
+    const root = fixtureRoot();
+    const path = join(root, "state.json");
+    const preload = join(import.meta.dir, "fixtures", "atomic-close-failure-preload.js");
+    const modulePath = join(import.meta.dir, "..", "src", "runtime", "atomic-write.ts");
+    const child = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        "--preload",
+        preload,
+        "-e",
+        `import { atomicWriteFile } from ${JSON.stringify(modulePath)};
+let failed = false;
+try {
+  atomicWriteFile(process.env.HEADLESS_ATOMIC_CLOSE_TARGET, "new content");
+} catch (error) {
+  if (!(error instanceof Error) || error.message !== "injected atomic close failure") throw error;
+  failed = true;
+}
+if (!failed) throw new Error("atomicWriteFile unexpectedly succeeded");`,
+      ],
+      env: { ...process.env, HEADLESS_ATOMIC_CLOSE_TARGET: path },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(child.exitCode, child.stderr.toString()).toBe(0);
+    expect(existsSync(path)).toBe(false);
     expect(readdirSync(root).filter((name) => name.includes(".tmp-"))).toEqual([]);
   });
 
