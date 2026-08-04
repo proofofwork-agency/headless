@@ -149,7 +149,7 @@ describe("validateCommandFlags rejects flags the command does not accept", () =>
     // Accepting it everywhere made it a silent no-op: `headless init --json`
     // exited 0 with prose. A command whose success output is human text must
     // refuse the flag rather than ignore the operator's request.
-    for (const name of ["lead", "daemon", "fleet", "goal", "status", "events", "council"]) {
+    for (const name of ["lead", "daemon", "fleet", "goal", "status", "events", "council", "skill", "loop", "orchestrate"]) {
       expect(() => validateCommandFlags([name, "--json"])).not.toThrow();
     }
     for (const name of ["init", "setup", "mcp", "tui"]) {
