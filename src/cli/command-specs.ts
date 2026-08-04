@@ -100,7 +100,7 @@ export const COMMAND_SPECS = [
   {
     name: "orchestrate",
     valueFlags: ["--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--unsafe-no-sandbox"],
+    booleanFlags: ["--unsafe-no-sandbox", "--json"],
     help: "orchestrate [--cwd dir]",
   },
   {
@@ -155,8 +155,8 @@ export const COMMAND_SPECS = [
     internal: true,
   },
   { name: "coop-proof", aliases: ["autonomy-coop-proof"], valueFlags: ["--cwd", "--extension-config", "--extension-module"], internal: true },
-  { name: "skill", aliases: ["skills"], valueFlags: ["--source", "--backend", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"], help: "skill | skills <list|inspect|import|enable|use|revoke> [options]" },
-  { name: "loop", valueFlags: ["--loop-id", "--file", "--mode", "--deadline-ms", "--max-iterations", "--per-iteration-cost-usd", "--total-cost-usd", "--check", "--backend", "--verify-backend", "--auth-mode", "--approval-policy", "--model", "--max-repair-nodes", "--stagnation-limit", "--gate-timeout-ms", "--step-timeout-ms", "--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--confirm", "--repair"], help: "loop <start|list|status|pause|resume|cancel> --confirm [--repair --check name] [finite policy options]" },
+  { name: "skill", aliases: ["skills"], valueFlags: ["--source", "--backend", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--json"], help: "skill | skills <list|inspect|import|enable|use|revoke> [options]" },
+  { name: "loop", valueFlags: ["--loop-id", "--file", "--mode", "--deadline-ms", "--max-iterations", "--per-iteration-cost-usd", "--total-cost-usd", "--check", "--backend", "--verify-backend", "--auth-mode", "--approval-policy", "--model", "--max-repair-nodes", "--stagnation-limit", "--gate-timeout-ms", "--step-timeout-ms", "--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--confirm", "--repair", "--json"], help: "loop <start|list|status|pause|resume|cancel> --confirm [--repair --check name] [finite policy options]" },
   { name: "verify", valueFlags: ["--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--evidence", "--json"], help: "verify [--evidence] [--json] [--cwd dir]   Verify the tamper-evident ledger and optional evidence files." },
   { name: "ledger", valueFlags: ["--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--confirm", "--evidence", "--json"], help: "ledger <verify [--evidence] [--json] | repair-tail --confirm> [--cwd dir]" },
   {
