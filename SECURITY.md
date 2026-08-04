@@ -36,6 +36,8 @@ Broker mode is the default. Real API keys remain in the daemon. Every run receiv
 
 A broker worker receives an opaque, short-lived token scoped to its run, provider, model, endpoint class, request/body limits, duration, and budget. The loopback broker validates those constraints before forwarding and deeply redacts bounded logs/errors. Request slots are reserved atomically, bodies are bounded while they are read, and the stream-duration deadline remains active until the response body terminates. Per-lease and broker-global concurrent-request and in-flight-body-memory caps apply before asynchronous body reads. Durable budget request/input/output quotas are registered as shared broker counters and charged atomically across all current and subsequently issued leases, preventing concurrent leases from reusing the same remainder. If a daemon crash destroys exact broker observations, recovery preserves unknown attribution and exhausts affected bounded dimensions instead of making quota reusable. Revoked or expired leases are pruned once their active requests finish, and issuance also enforces bounded retained lease/quota sets. Under a token or cost cap, built-in protocols require a positively recognized text-generation model and reject opaque conversation/prompt/file context, remote media, server-side search, provider-managed tools, non-text output modalities, and automatic/non-standard service tiers; extensions must implement trusted bounded-input validation. On cost-capped built-in requests, omission is not allowed to inherit a provider's automatic tier: the broker injects the deterministic standard tier, then uses the rewritten bytes for token and cost bounds. Trusted dated pricing produces an immutable admission reservation, and the broker conservatively prices the concrete request body and greatest recognized protocol output maximum before egress, including conflicting limit fields and multi-candidate output multiplicity. Durable accounting charges the greater of attributed usage and the broker-observed bound once.
 
+The daemon binds both an owner-only Unix broker socket and a loopback TCP listener by default. Required-contained Linux workers use the in-namespace loopback-to-Unix relay; host-side and explicitly unsafe runs use the real loopback listener, so their lease URL always has an owner. `HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0` explicitly selects AF_UNIX-only mode. In that mode Headless refuses any lease handoff for which no Linux required-containment relay will exist, rather than exposing a bearer token at the synthetic unowned relay port.
+
 Native login is selected explicitly and requires project trust plus acknowledgement that outbound destination IPs are unrestricted. A client cannot declare trust, credential paths, project roots, principals, or coordinator authority in a run. Native results report `native-direct-unrestricted` network access, backend-native credential access, and unknown cost unless the CLI supplies a real charge. `NATIVE_AUTH_UNAVAILABLE` and `NATIVE_SESSION_LOST` are explicit terminal/recovery conditions; Headless does not silently fall back to a different backend account.
 
 Built-in broker protocols cover OpenAI, Anthropic, Gemini, and xAI/OpenAI-compatible routes. A custom broker provider must register an explicit provider definition. Native OAuth state is supported only through the corresponding allowlisted regular-file capsule. Keychain-only Claude login on macOS currently fails closed; the broker does not import OAuth or keychain state.
@@ -68,7 +70,35 @@ Locks contain PID, process-start identity, host, and nonce. A lock with a verifi
 
 Persisted RunResult reads have a narrow schema-evolution decoder for the superseded `provider-direct` network value. It verifies protected archive hashes against the unmodified historical object before returning canonical in-memory `native-direct-unrestricted`, preserves every other field, and does not rewrite archive bytes. New writes and RPC use the strict current schema; malformed records and every other unknown enum value fail closed.
 
-An unkeyed chain detects accidental or unaudited modification but can be recomputed by a state-file writer. HMAC only prevents forgery when `HEADLESS_LEDGER_KEY` is kept outside that writer’s reach. Neither mode detects deletion/rollback of a valid tail without an external head/sequence anchor.
+An unkeyed chain detects accidental or unaudited modification but can be recomputed by a state-file writer. HMAC only prevents forgery when `HEADLESS_LEDGER_KEY` / `HEADLESS_LEDGER_KEYS` is kept outside that writer’s reach. Neither mode detects deletion/rollback of a valid tail without an external head/sequence anchor.
+
+### Ledger HMAC key generation
+
+HMAC ledger integrity is opt-in. A key shorter than 32 bytes or obviously low-entropy (repeated characters, pure digits, common password patterns) provides false tamper-evidence, so Headless refuses to **sign new records** with it: `append` and ledger tail repair fail closed, naming the key id and the variable that supplied it. Human-memorable 16-character secrets and similar passwords are insufficient.
+
+The floor is scoped to writing, not to opening or reading a ledger. A weak key still **verifies** an existing chain, and `headless verify` reports the weakness alongside the verdict (`weakKeys`) rather than withholding the operator's own history — refusing to read it would not raise the cost of forgery. To rotate, keep the old key in `HEADLESS_LEDGER_KEYS` so historical records stay verifiable and point `HEADLESS_LEDGER_ACTIVE_KEY_ID` at a new key that meets the floor.
+
+Generate a key with:
+
+```bash
+openssl rand -base64 32
+```
+
+Set either a single active key:
+
+```bash
+export HEADLESS_LEDGER_KEY="$(openssl rand -base64 32)"
+export HEADLESS_LEDGER_KEY_ID="primary"
+```
+
+or a JSON keyring (for rotation / verification of historical records):
+
+```bash
+export HEADLESS_LEDGER_KEYS="$(jq -nc --arg k "$(openssl rand -base64 32)" '{primary:$k}')"
+export HEADLESS_LEDGER_ACTIVE_KEY_ID="primary"
+```
+
+Keys may be raw high-entropy strings (≥32 UTF-8 bytes) or standard base64 / base64url encodings of ≥32 random bytes. Do not auto-generate keys inside the daemon: out-of-band distribution is what keeps the key outside the ledger writer’s reach.
 
 The stable `headless verify` command performs an auditor-requested full-chain scan and exits non-zero at the first sequence, previous-hash, project, digest, key, or HMAC-downgrade break. Opt-in release-evidence smokes atomically write provenance-bearing JSON, hash those exact bytes, and record the relative path and digest through authenticated `ledger.artifact`; `headless verify --evidence` additionally compares each current file with its latest durable anchor. The file does not contain its ledger receipt, avoiding a circular digest.
 

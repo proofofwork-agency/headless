@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, realpathSync, statSync, type Stats } from "node:fs";
 import { HeadlessError } from "./headless-error";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { assertTrustedAncestorChain } from "./trusted-path";
 import { supportedPlatform, UnsupportedPlatformError } from "./validation";
 
 export { UnsupportedPlatformError } from "./validation";
@@ -169,21 +170,63 @@ export function getProjectStatePaths(projectRoot: string, options: ProjectStateO
 
 export function ensureOwnerOnlyDirectory(path: string) {
   mkdirSync(path, { recursive: true, mode: OWNER_ONLY_DIRECTORY_MODE });
-  const info = lstatSync(path);
-  if (!info.isDirectory() || info.isSymbolicLink()) {
-    throw new Error(`Owner-only directory path is not a directory: ${path}`);
-  }
+  assertOwnedLeaf(path, lstatSync(path), "directory");
   chmodSync(path, OWNER_ONLY_DIRECTORY_MODE);
+  const verified = lstatSync(path);
+  assertOwnedLeaf(path, verified, "directory");
+  if ((verified.mode & 0o077) !== 0) {
+    throw new Error(`Owner-only directory path remained group/other accessible after chmod: ${path}`);
+  }
+  // realpath before ancestor walk (same pattern as secureCanonicalFile) so
+  // platform aliasing like macOS /var → /private/var is not rejected as a
+  // symlink ancestor. Leaf symlink rejection already happened via lstat above.
+  const canonical = realpathSync(path);
+  assertTrustedAncestorChain(canonical, `Owner-only directory ${path}`);
   return path;
 }
 
 export function ensureOwnerOnlyFile(path: string) {
-  const info = lstatSync(path);
-  if (!info.isFile() || info.isSymbolicLink()) {
+  assertOwnedLeaf(path, lstatSync(path), "file");
+  chmodSync(path, OWNER_ONLY_FILE_MODE);
+  const verified = lstatSync(path);
+  assertOwnedLeaf(path, verified, "file");
+  if ((verified.mode & 0o077) !== 0) {
+    throw new Error(`Owner-only file path remained group/other accessible after chmod: ${path}`);
+  }
+  const canonical = realpathSync(path);
+  assertTrustedAncestorChain(canonical, `Owner-only file ${path}`);
+  return path;
+}
+
+/**
+ * Fail-closed leaf checks shared by ensureOwnerOnlyDirectory/File.
+ * Does not auto-repair ownership — foreign-uid paths are refused.
+ */
+function assertOwnedLeaf(path: string, info: Stats, expected: "directory" | "file") {
+  if (info.isSymbolicLink()) {
+    throw new Error(
+      expected === "directory"
+        ? `Owner-only directory path is not a directory: ${path}`
+        : `Owner-only file path is not a regular file: ${path}`,
+    );
+  }
+  if (expected === "directory") {
+    if (!info.isDirectory()) {
+      throw new Error(`Owner-only directory path is not a directory: ${path}`);
+    }
+  } else if (!info.isFile()) {
     throw new Error(`Owner-only file path is not a regular file: ${path}`);
   }
-  chmodSync(path, OWNER_ONLY_FILE_MODE);
-  return path;
+
+  if (typeof process.getuid === "function") {
+    const uid = process.getuid();
+    // Root may only use root-owned leaves (getuid()===0). Non-root must match exactly.
+    if (info.uid !== uid) {
+      throw new Error(
+        `path ${path} is not owned by current uid ${uid} (owner ${info.uid}) — refusing to use untrusted trust root`,
+      );
+    }
+  }
 }
 
 export function ensureProjectStateDirectories(paths: ProjectStatePaths) {

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { z } from "zod";
 import { HeadlessError } from "../runtime/headless-error";
 import { redactAndTruncate } from "../runtime/redaction";
@@ -7,6 +7,7 @@ import { calculateModelPricedCost, listPricing } from "../runtime/pricing";
 import { recordRuntimeDiagnostic } from "../runtime/diagnostics";
 import { linkedProviderOperationIds } from "../runtime/linked-provider-ids";
 import { getProvider, type ProviderDefinition } from "./providers";
+import { secureBunUnixServe } from "../runtime/secure-socket";
 
 const DEFAULT_BODY_LIMIT = 4_000_000;
 const DEFAULT_STREAM_LIMIT_MS = 300_000;
@@ -17,6 +18,13 @@ const DEFAULT_BROKER_BODY_MEMORY_LIMIT = 64_000_000;
 const MAX_RETAINED_LEASES = 10_000;
 const MAX_RETAINED_BUDGET_QUOTAS = 10_000;
 const MAX_RETAINED_LINKED_OPERATIONS = 10_000;
+/**
+ * Synthetic loopback port embedded in lease baseUrl when the broker is Unix-socket-only.
+ * Host TCP is not listening on this port; Linux workers reach the broker via the
+ * in-netns relay (linux-relay) which binds 127.0.0.1:<port> inside the private netns
+ * and forwards to the host AF_UNIX socket. Keep aligned with linux-relay defaults.
+ */
+export const BROKER_UNIX_ONLY_RELAY_PORT = 38_471;
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const nullableLinkedAmount = z.number().nonnegative().finite().nullable();
@@ -225,10 +233,19 @@ export type BrokerLinkedOperation = z.infer<typeof BrokerLinkedOperationSchema>;
 
 export type ProviderBrokerOptions = {
   credentials?: Record<string, string | undefined>;
+  /** Environment used for broker policy flags; defaults to the process environment. */
+  env?: Readonly<NodeJS.ProcessEnv>;
   upstreams?: Record<string, string | undefined>;
   fetch?: typeof fetch;
   maxLogEntries?: number;
   unixSocketPath?: string;
+  /**
+   * When a Unix socket is configured, loopback TCP remains on by default so
+   * every lease baseUrl has a host owner and explicit unsafe runs keep working.
+   * Set false (or HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0) for AF_UNIX-only mode;
+   * only required-contained Linux workers can consume those leases.
+   */
+  allowLoopbackTcp?: boolean;
   maxConcurrentRequests?: number;
   maxInFlightBodyBytes?: number;
   initialBudgetQuotas?: BrokerBudgetQuota[];
@@ -258,6 +275,8 @@ export class ProviderBroker {
   private server: ReturnType<typeof Bun.serve> | null = null;
   private unixServer: ReturnType<typeof Bun.serve> | null = null;
   readonly unixSocketPath: string | null;
+  /** Explicit or env-derived policy for 127.0.0.1 TCP when a Unix socket is configured. */
+  readonly allowLoopbackTcp: boolean;
 
   constructor(options: ProviderBrokerOptions = {}) {
     this.credentials = options.credentials ?? process.env;
@@ -279,21 +298,40 @@ export class ProviderBroker {
       this.linkedOperations.set(parsed.operationId, parsed);
     }
     this.unixSocketPath = options.unixSocketPath ?? null;
+    this.allowLoopbackTcp = resolveAllowLoopbackTcp(options.allowLoopbackTcp, options.env ?? process.env);
   }
 
+  /**
+   * Start the broker edge(s).
+   *
+   * - No unixSocketPath: bind loopback TCP only.
+   * - unixSocketPath with allowLoopbackTcp disabled: Unix socket only — no host TCP listener.
+   *   Lease baseUrl still carries a synthetic 127.0.0.1 port so Linux in-netns relays
+   *   and worker env wiring keep working; unixSocket on the worker config is authoritative.
+   * - unixSocketPath without an explicit opt-out: bind both edges. The TCP listener
+   *   owns the lease baseUrl for host-side and explicit unsafe execution, while
+   *   required-contained Linux workers still relay through the owner-only Unix socket.
+   */
   start(port = 0) {
-    if (this.server) return this.endpoint;
+    if (this.server || this.unixServer) return this.endpoint;
+    const wantTcp = !this.unixSocketPath || this.allowLoopbackTcp;
     try {
-      this.server = Bun.serve({
-        hostname: "127.0.0.1",
-        port,
-        maxRequestBodySize: 64_000_000,
-        fetch: (request) => this.handle(request),
-      });
+      if (wantTcp) {
+        this.server = Bun.serve({
+          hostname: "127.0.0.1",
+          port,
+          maxRequestBodySize: 64_000_000,
+          fetch: (request) => this.handle(request),
+        });
+      }
       if (this.unixSocketPath) {
         if (existsSync(this.unixSocketPath)) throw new Error(`Provider broker socket already exists: ${this.unixSocketPath}`);
-        this.unixServer = Bun.serve({ unix: this.unixSocketPath, maxRequestBodySize: 64_000_000, fetch: (request) => this.handle(request) });
-        chmodSync(this.unixSocketPath, 0o600);
+        this.unixServer = secureBunUnixServe(this.unixSocketPath, () =>
+          Bun.serve({ unix: this.unixSocketPath as string, maxRequestBodySize: 64_000_000, fetch: (request) => this.handle(request) }),
+        );
+      }
+      if (!this.server && !this.unixServer) {
+        throw new Error("Provider broker start requires a TCP listener or a Unix socket path.");
       }
     } catch (error) {
       this.server?.stop(true);
@@ -314,9 +352,26 @@ export class ProviderBroker {
     if (this.unixSocketPath) rmSync(this.unixSocketPath, { force: true });
   }
 
+  /**
+   * True when a host-side 127.0.0.1 TCP listener is active.
+   *
+   * Callers that hand a lease to a worker must propagate this, because it is the
+   * only place that knows whether `endpoint` names a real host listener or the
+   * synthetic relay port (see BrokerWorkerAccess.hostLoopbackListener).
+   */
+  get tcpListening(): boolean {
+    return this.server !== null;
+  }
+
   get endpoint() {
-    if (!this.server) throw new Error("Provider broker is not running.");
-    return `http://127.0.0.1:${this.server.port}`;
+    if (this.server) return `http://127.0.0.1:${this.server.port}`;
+    // Unix-socket-only mode: baseUrl stays a loopback HTTP URL for worker env /
+    // Linux relay port selection. Host TCP is not bound; dial via unixSocket.
+    // Nothing on the host owns this port, so it is inert outside a Linux
+    // contained worker whose in-namespace relay binds it; the runner refuses to
+    // hand it to any other worker (assertBrokerEndpointIsServed).
+    if (this.unixServer) return `http://127.0.0.1:${BROKER_UNIX_ONLY_RELAY_PORT}`;
+    throw new Error("Provider broker is not running.");
   }
 
   issueLease(input: z.input<typeof BrokerLeaseScopeSchema>) {
@@ -346,12 +401,16 @@ export class ProviderBroker {
       inFlightBodyBytes: 0,
       revoked: false,
     });
+    // baseUrl remains populated for backward compat and Linux in-netns relay port
+    // selection. When unixSocketPath is set, workers must prefer the Unix socket
+    // (run-execution-service / simple.ts already plumb unixSocket authoritatively).
     return {
       id,
       token,
       provider: scope.provider,
       expiresAt: scope.expiresAt,
       baseUrl: `${this.endpoint}/${scope.provider}`,
+      ...(this.unixSocketPath ? { unixSocket: this.unixSocketPath } : {}),
     };
   }
 
@@ -784,9 +843,25 @@ export class ProviderBroker {
     const provider = getProvider(providerId);
     if (!provider) return this.failure(null, providerId, request, route, 404, "Unknown provider.", started, 0);
 
-    const token = extractToken(request, url);
+    const token = extractToken(request);
     const lease = token ? this.findLease(token) : null;
-    if (!lease) return this.failure(null, providerId, request, route, 401, "Invalid broker token.", started, 0);
+    if (!lease) {
+      // Reject query-string credentials with a clear header-auth migration hint.
+      // Never include the key value in the response or logs (route is pathname-only).
+      if (!token && url.searchParams.has("key")) {
+        return this.failure(
+          null,
+          providerId,
+          request,
+          route,
+          400,
+          "Broker credentials must be sent via headers (x-goog-api-key, x-api-key, Authorization Bearer, or x-headless-token), not the key query parameter.",
+          started,
+          0,
+        );
+      }
+      return this.failure(null, providerId, request, route, 401, "Invalid broker token.", started, 0);
+    }
     if (lease.provider !== providerId) return this.failure(lease, providerId, request, route, 403, "Broker token is scoped to a different provider.", started, 0);
     if (lease.revoked || lease.expiresAt <= Date.now()) return this.failure(lease, providerId, request, route, 401, "Broker token is expired or revoked.", started, 0);
     if (lease.requests >= lease.maxRequests) return this.failure(lease, providerId, request, route, 429, "Broker request budget exhausted.", started, 0);
@@ -940,6 +1015,8 @@ export class ProviderBroker {
     let headers: Headers;
     try {
       upstream = new URL(providerPath + url.search, this.upstreams[providerId] ?? provider.upstream);
+      // Never forward client-supplied key query credentials upstream.
+      upstream.searchParams.delete("key");
       headers = forwardedHeaders(request.headers);
       provider.authenticate(headers, credential, upstream);
     } catch (error) {
@@ -1303,12 +1380,13 @@ function digestToken(token: string) {
   return createHash("sha256").update(token).digest();
 }
 
-function extractToken(request: Request, url: URL) {
+function extractToken(request: Request) {
   const explicit = request.headers.get("x-headless-token");
   if (explicit) return explicit;
   const authorization = request.headers.get("authorization");
   if (authorization?.toLowerCase().startsWith("bearer ")) return authorization.slice(7).trim();
-  return request.headers.get("x-api-key") ?? request.headers.get("x-goog-api-key") ?? url.searchParams.get("key");
+  // Headers only — never accept lease tokens from ?key= (avoids query-string credential leakage).
+  return request.headers.get("x-api-key") ?? request.headers.get("x-goog-api-key");
 }
 
 function routeAllowed(provider: ProviderDefinition, path: string) {
@@ -1539,6 +1617,22 @@ function safeResponseHeaders(source: Headers) {
 
 function messageOf(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function resolveAllowLoopbackTcp(explicit: boolean | undefined, sourceEnv: Readonly<NodeJS.ProcessEnv>): boolean {
+  if (explicit === true) return true;
+  if (explicit === false) return false;
+  const env = sourceEnv.HEADLESS_BROKER_ALLOW_LOOPBACK_TCP?.trim().toLowerCase();
+  // Explicit env opt-out honored on all platforms (operators who accept AF_UNIX-only breakage).
+  if (env === "0" || env === "false" || env === "no" || env === "off") return false;
+  if (env === "1" || env === "true" || env === "yes" || env === "on") return true;
+  if (env) {
+    throw new TypeError("HEADLESS_BROKER_ALLOW_LOOPBACK_TCP must be one of: 0, 1, false, true, no, yes, off, on.");
+  }
+  // Default to a real loopback owner on every platform. Required-contained Linux
+  // workers still use the AF_UNIX relay, but host-side and explicit unsafe runs
+  // consume baseUrl directly and must never receive the synthetic unowned port.
+  return true;
 }
 
 function boundedPositive(value: number, maximum: number, label: string) {

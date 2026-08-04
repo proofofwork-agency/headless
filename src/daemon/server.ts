@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
+import { secureUnixListen } from "../runtime/secure-socket";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { ZodError } from "zod";
@@ -239,20 +240,26 @@ export class HeadlessDaemon {
     const server = createServer((socket) => this.accept(socket));
     let bound = false;
     try {
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(this.state.socketPath, () => {
-          bound = true;
-          server.off("error", reject);
-          resolve();
-        });
-      });
-      chmodSync(this.state.socketPath, 0o600);
+      await secureUnixListen(server, this.state.socketPath);
+      bound = true;
       this.loadedExtensions = await loadDaemonExtensions(this.extensionConfig);
       this.initializeOwnedState();
       recoverLinkedProviderHolds({ budgets: this.budgets, broker: this.broker, jobs: this.jobs });
       this.reconcileManualLinkedRecoveries();
       this.broker.start();
+      if (!this.broker.tcpListening && process.platform !== "linux") {
+        // Only Linux contained workers can reach a Unix-socket-only broker (the
+        // in-namespace relay binds the synthetic port). Elsewhere every broker
+        // run will now be refused rather than handed an unowned endpoint, so
+        // say why once at startup instead of only per run.
+        recordRuntimeDiagnostic(
+          "state",
+          "broker.loopback-listener",
+          `The provider broker is Unix-socket-only on ${process.platform}, where no in-namespace relay exists. `
+            + "Broker-authenticated runs will be refused; clear HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0 to restore them.",
+          "warning",
+        );
+      }
       // The socket elects the local daemon; durable worktree leases additionally
       // fail closed on a live or foreign-host owner before recovery/admission.
       this.worktreeLeases.reconcile();
@@ -1071,9 +1078,22 @@ export class HeadlessDaemon {
     this.token = this.configuredToken ?? loadOrCreateToken(this.state.tokenPath);
     migrateSingleLeadState(this.state);
     const brokerQuotas = new DurableBrokerQuotaStore(this.state);
+    // Bind both broker edges by default. Required-contained Linux workers reach
+    // the owner-only Unix socket through the in-netns relay, while host-side and
+    // explicit unsafe runs consume the loopback baseUrl directly. Operators can
+    // force AF_UNIX-only mode with HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0; the runner
+    // then refuses any lease for which no relay will exist.
+    const brokerSocketPath = join(
+      this.state.daemonRuntimeDir,
+      `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`,
+    );
     this.broker = new ProviderBroker({
       credentials: this.stateOptions?.env ?? process.env,
-      unixSocketPath: join(this.state.daemonRuntimeDir, `${this.state.projectId.slice(0, 16)}-${process.pid}-${randomBytes(4).toString("hex")}.broker.sock`),
+      env: this.stateOptions?.env ?? process.env,
+      unixSocketPath: brokerSocketPath,
+      // Leave undefined so ProviderBroker applies the safe dual-edge default and
+      // honors HEADLESS_BROKER_ALLOW_LOOPBACK_TCP on every platform.
+      allowLoopbackTcp: undefined,
       initialBudgetQuotas: brokerQuotas.snapshot(),
       persistBudgetQuota: (quota, expiresAt) => brokerQuotas.update(quota, expiresAt),
       initialLinkedOperations: brokerQuotas.linkedSnapshot(),

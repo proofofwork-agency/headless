@@ -26,6 +26,9 @@ import {
   unregisterPricing,
   type PricingEntry,
 } from "./pricing";
+import { assertTrustedAncestorChain } from "./trusted-path";
+
+export { assertTrustedAncestorChain } from "./trusted-path";
 
 const MAX_EXTENSION_CONFIG_BYTES = 65_536;
 const MAX_EXTENSION_MODULE_BYTES = 1_048_576;
@@ -393,34 +396,6 @@ function secureCanonicalFile(path: string, label: string, maximumBytes: number) 
   }
   assertTrustedAncestorChain(canonical, label);
   return canonical;
-}
-
-function assertTrustedAncestorChain(path: string, label: string) {
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  let childPath = path;
-  let current = dirname(path);
-  while (true) {
-    const info = lstatSync(current);
-    if (!info.isDirectory() || info.isSymbolicLink()) {
-      throw new Error(`${label} has a non-directory ancestor: ${current}`);
-    }
-    if (uid !== null && info.uid !== uid && info.uid !== 0) {
-      throw new Error(`${label} ancestor must be owned by the daemon user or root: ${current}`);
-    }
-    if ((info.mode & 0o022) !== 0) {
-      const child = lstatSync(childPath);
-      const protectedStickyRoot = (info.mode & 0o1000) !== 0
-        && info.uid === 0
-        && (uid === null || child.uid === uid || child.uid === 0);
-      if (!protectedStickyRoot) {
-        throw new Error(`${label} ancestor must not be writable by group or other users: ${current}`);
-      }
-    }
-    const parent = dirname(current);
-    if (parent === current) break;
-    childPath = current;
-    current = parent;
-  }
 }
 
 function resolveExpectedManifest(serialized: string): ResolvedDaemonExtensionConfig {

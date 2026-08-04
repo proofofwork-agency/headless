@@ -44,4 +44,6 @@ function printHumanVerdict(verdict: LedgerVerificationVerdict) {
       + `${verdict.evidence.mismatched} mismatched, ${verdict.evidence.missing} missing, ${verdict.evidence.malformed} malformed`,
     );
   }
+  // An intact chain under a weak key is still intact; say how strong the evidence is.
+  if (verdict.weakKeys) console.error(`! weak key: ${verdict.weakKeys.reason}`);
 }

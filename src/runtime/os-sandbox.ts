@@ -951,8 +951,10 @@ function runLinuxRunToolRelayProbe(): SandboxProbeResult {
   const socketPath = join(dir, "probe.tool.sock");
   const readyPath = join(dir, "ready");
   const nonce = `headless-run-tool-relay-${process.pid}-${Date.now()}`;
+  // Bind under umask 0o077 so the probe socket is owner-only at creation
+  // (no chmod-after-listen TOCTOU). Umask is restored in the listen callback.
   const serverSource = [
-    "const {chmodSync,writeFileSync}=require('node:fs');",
+    "const {writeFileSync}=require('node:fs');",
     "const {createServer}=require('node:net');",
     `const expected=${JSON.stringify(nonce)};`,
     "const server=createServer((socket)=>{",
@@ -960,7 +962,10 @@ function runLinuxRunToolRelayProbe(): SandboxProbeResult {
     "socket.on('data',(chunk)=>{buffer+=chunk;const newline=buffer.indexOf('\\n');if(newline<0)return;",
     "const value=buffer.slice(0,newline);socket.end((value===expected?expected:'mismatch')+'\\n');server.close();});",
     "});",
-    `server.listen(${JSON.stringify(socketPath)},()=>{chmodSync(${JSON.stringify(socketPath)},0o600);writeFileSync(${JSON.stringify(readyPath)},'ready',{mode:0o600});});`,
+    "const previousUmask=process.umask(0o077);",
+    "try{",
+    `server.listen(${JSON.stringify(socketPath)},()=>{process.umask(previousUmask);writeFileSync(${JSON.stringify(readyPath)},'ready',{mode:0o600});});`,
+    "}catch(error){process.umask(previousUmask);throw error;}",
     `setTimeout(()=>process.exit(78),${LINUX_RUN_TOOL_RELAY_SERVER_TIMEOUT_MS});`,
   ].join("");
   const server = spawn(bun, ["-e", serverSource], { cwd: dir, stdio: "ignore" });
