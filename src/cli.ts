@@ -51,7 +51,13 @@ if (import.meta.main) {
   process.once("SIGHUP", () => void handleSignal("SIGHUP"));
   main().catch((error) => {
     const validation = isValidationError(error);
-    const structured = toStructuredError(error, validation ? {
+    // A CliUsageError is operator input, not a runtime fault. Classify it once
+    // here so text and --json agree: deriving it only in the --json branch let
+    // text mode fall through to INTERNAL_ERROR and send typos to `daemon status`.
+    const structured = toStructuredError(error, error instanceof CliUsageError ? {
+      code: "INVALID_REQUEST",
+      safeMessage: error.message,
+    } : validation ? {
       code: "INVALID_REQUEST",
       safeMessage: validationErrorMessage(error),
       details: validationErrorDetails(error),
@@ -59,10 +65,7 @@ if (import.meta.main) {
     const separator = process.argv.indexOf("--");
     const flagArgs = separator < 0 ? process.argv : process.argv.slice(0, separator);
     if (flagArgs.includes("--json")) {
-      const errorValue = error instanceof CliUsageError
-        ? toStructuredError(error, { code: "INVALID_REQUEST", safeMessage: error.message })
-        : structured;
-      console.log(JSON.stringify({ ok: false, error: errorValue }, null, 2));
+      console.log(JSON.stringify({ ok: false, error: structured }, null, 2));
     } else {
       console.error(validation
         ? structured.message

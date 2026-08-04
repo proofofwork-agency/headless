@@ -353,6 +353,39 @@ async function waitForPendingApproval(project: string, env: Record<string, strin
   throw new Error("Timed out waiting for the unpriced broker approval.");
 }
 
+describe("CLI usage errors are classified as operator input, not runtime faults", () => {
+  // Regression: the --json branch mapped CliUsageError to INVALID_REQUEST while
+  // the text branch fell through to INTERNAL_ERROR, so a typo told the operator
+  // the daemon had failed and sent them to `headless daemon status`.
+  const usageInvocations = [
+    ["lead", "bogus"],
+    ["mcp", "bogus"],
+    ["daemon", "bogus-sub"],
+    ["experimental", "ledger", "bogus"],
+  ];
+
+  for (const argv of usageInvocations) {
+    test(`\`${argv.join(" ")}\` reports invalid request in both output modes`, async () => {
+      const text = await runCli(argv);
+      expect(text.exitCode).toBe(1);
+      expect(text.stderr).not.toContain("Internal error");
+      expect(text.stderr).not.toContain("headless daemon status");
+      expect(text.stderr).toContain("Invalid request");
+      expect(text.stderr).toContain("Next: headless --help");
+
+      const json = await runCli([...argv, "--json"]);
+      expect(json.exitCode).toBe(1);
+      expect(JSON.parse(json.stdout).error.code).toBe("INVALID_REQUEST");
+    });
+  }
+
+  test("keeps INTERNAL_ERROR for failures that are not operator input", async () => {
+    const result = await runCli(["verify", "--cwd", "/nonexistent/path/xyz"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Internal error");
+  });
+});
+
 async function runCli(args: string[], extraEnv: Record<string, string> = {}) {
   const process = Bun.spawn(["bun", cliPath, ...args], {
     stdout: "pipe",
