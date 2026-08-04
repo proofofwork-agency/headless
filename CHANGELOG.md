@@ -29,6 +29,13 @@
 - `headless tui` refuses without a terminal instead of reaching Ink's renderer, which threw from inside React and printed a framework stack trace citing `node_modules`.
 - The `UNSUPPORTED_PLATFORM` remedy no longer blames the operating system for failures that are not about the operating system.
 
+### Documentation
+
+- **Re-verified the "$5 cap" broker default and confirmed the existing wording.** An earlier pass in this cycle concluded the documented $5 ceiling did not exist and rewrote three pages to say so. That conclusion was wrong and has been reverted. `src/daemon/run-execution-service.ts` defines `DEFAULT_BROKER_MAX_COST_USD = 5` and applies it to every broker lease as `trustedPrice ? minimumNullable(minimumNullable(limits.maxCostUsd, grantCostLimitUsd), DEFAULT_BROKER_MAX_COST_USD) : null`; `minimumNullable` treats `null` as "no limit", so with no operator-configured budget the lease ceiling is exactly $5. The docs now also name the constant, so the claim is checkable rather than merely asserted. The request/input/output defaults (8 / 200,000 / 32,000) were accurate and are unchanged.
+- **Corrected the capability-gate coverage registry, which claimed a Linux-only test ran on macOS.** `linuxRelayLifecycleTest` (the late-created-host-socket relay case) was declared as running on the macOS leg. It resolves to `linuxBwrapTest`, so macOS skips it as Linux-only while hosted Linux skips it for the tracked relay incompatibility — it runs on no CI leg. It is now declared uncovered with a reason, and `docs/plan.md`, the release-gates page, the skip warning, and the follow-up note no longer imply a privileged CI step covers it; no workflow sets `HEADLESS_PRIVILEGED_CONTAINMENT_CI`.
+- **The coverage registry now sees inline `test.skipIf(...)` gates, not only module-level bindings**, and keys every gate by file rather than by bare name. Six inline gates were invisible to it, and two additional `gitTest` bindings were silently absorbed by a same-named entry for a different file.
+- **`docs/plan.md` no longer reports depth-one contained delegation as having passed the hosted Linux workflow.** Its four cooperation cases are skipped there; that pass is macOS-only.
+
 ## 0.2.0-beta.6 — 2026-07-31
 
 Package publication remains blocked. Both package manifests are private at `0.2.0-beta.6`; npm publication and repository visibility remain separate human-authority decisions. This tree is an unpublished private beta (not alpha).

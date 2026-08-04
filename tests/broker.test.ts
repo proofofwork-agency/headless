@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BROKER_UNIX_ONLY_RELAY_PORT, ProviderBroker, type BrokerLinkedOperation } from "../src/broker/server";
@@ -7,6 +7,7 @@ import { getProvider, registerProvider, unregisterProvider } from "../src/broker
 import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
 import { DurableBrokerQuotaStore } from "../src/runtime/broker-quota-store";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
+import { testTimeout } from "./support/timing";
 
 const closers: Array<() => void> = [];
 const pricingIds: string[] = [];
@@ -277,6 +278,55 @@ describe("provider broker", () => {
     expect(broker.allowLoopbackTcp).toBe(false);
   });
 
+  // Regression: start() refused an occupied socket path and then rmSync'd that
+  // very path on its way out, so the refusal deleted what it was protecting and
+  // the next start walked straight in. The daemon already got this right with a
+  // bound flag; the broker never did.
+  test("refusing an occupied socket path leaves the occupant's socket intact", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-occupied-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const socket = join(root, "broker.sock");
+    const occupant = Bun.serve({ unix: socket, fetch: () => new Response("occupant") });
+    closers.push(() => occupant.stop(true));
+    const occupantInode = lstatSync(socket).ino;
+
+    const broker = new ProviderBroker({
+      credentials: { OPENAI_API_KEY: "parent-key" },
+      env: { HEADLESS_BROKER_ALLOW_LOOPBACK_TCP: "0" },
+      unixSocketPath: socket,
+    });
+    expect(() => broker.start()).toThrow(/socket already exists/i);
+    expect(existsSync(socket)).toBe(true);
+    expect(lstatSync(socket).ino).toBe(occupantInode);
+    // Still refuses on a retry, because the occupant is still the owner.
+    expect(() => broker.start()).toThrow(/socket already exists/i);
+  });
+
+  // stop() runs after Bun.serve().stop() has already unlinked the path, so an
+  // unconditional rmSync there deletes whichever successor bound in the window.
+  test("stop() reclaims only the socket inode the broker itself bound", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-successor-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const socket = join(root, "broker.sock");
+    const broker = new ProviderBroker({
+      credentials: { OPENAI_API_KEY: "parent-key" },
+      env: { HEADLESS_BROKER_ALLOW_LOOPBACK_TCP: "0" },
+      unixSocketPath: socket,
+    });
+    broker.start();
+    broker.stop();
+    expect(existsSync(socket)).toBe(false);
+
+    // A successor takes the freed path over, then the departing broker's stop()
+    // runs again (idempotent teardown paths do exactly this).
+    const successor = Bun.serve({ unix: socket, fetch: () => new Response("successor") });
+    closers.push(() => successor.stop(true));
+    const successorInode = lstatSync(socket).ino;
+    broker.stop();
+    expect(existsSync(socket)).toBe(true);
+    expect(lstatSync(socket).ino).toBe(successorInode);
+  });
+
   test("rejects an invalid loopback policy instead of silently enabling TCP", () => {
     expect(() => new ProviderBroker({
       env: { HEADLESS_BROKER_ALLOW_LOOPBACK_TCP: "flase" },
@@ -311,6 +361,8 @@ describe("provider broker", () => {
     expect((await response.json()) as { tcp: boolean }).toEqual({ tcp: true });
   });
 
+  // Launches the relay and a child bun process, so bun's 5s default is a
+  // local-speed budget for the one case that runs only on a loaded Linux runner.
   test.skipIf(process.platform !== "linux")("the Linux loopback relay forwards only through the designated broker socket", async () => {
     const root = mkdtempSync(join(tmpdir(), "headless-broker-relay-"));
     closers.push(() => rmSync(root, { recursive: true, force: true }));
@@ -331,7 +383,7 @@ describe("provider broker", () => {
     expect(code, stderr).toBe(0);
     expect(output).toContain('"relayed":true');
     expect(broker.getLeaseObservation(lease.id)?.requests).toBe(1);
-  });
+  }, testTimeout(10_000));
 
   test("rejects invalid tokens, models, routes, bodies, and exhausted leases", async () => {
     const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ ok: true }) });

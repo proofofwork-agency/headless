@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,15 @@ import { parseGoalCommand } from "../src/cli/commands/goal";
 import { runLaunchCommand } from "../src/cli/commands/launch";
 import { runMcpCommand } from "../src/cli/commands/mcp";
 import { parseProjectCommand } from "../src/cli/commands/project";
+import { stopTrackedDaemons, trackDaemonProjectRoot } from "./support/daemon-teardown";
+
+/**
+ * The CLI invocations below are chosen to resolve without starting a daemon, but
+ * that is an assumption about the product, not something this file controls: one
+ * command gaining a control-plane call would leak a resident daemon per run onto
+ * a root this file then deletes. Draining is a no-op when nothing spawned.
+ */
+afterAll(async () => { await stopTrackedDaemons(); });
 
 /**
  * Every handler used to read its subcommand from a physical index, so a global
@@ -125,7 +134,7 @@ describe("launch and events fail on operator input before any daemon starts", ()
   test("stable and nested commands honour an action that follows --cwd", async () => {
     const state = mkdtempSync(join(tmpdir(), "hl-action-state-"));
     const runtime = mkdtempSync(join(tmpdir(), "hl-action-rt-"));
-    const project = mkdtempSync(join(tmpdir(), "hl-action-proj-"));
+    const project = trackDaemonProjectRoot(mkdtempSync(join(tmpdir(), "hl-action-proj-")));
     const env = { HEADLESS_STATE_HOME: state, HEADLESS_RUNTIME_HOME: runtime };
     try {
       const daemon = await runCliIsolated(["daemon", "--cwd", project, "stop"], env);

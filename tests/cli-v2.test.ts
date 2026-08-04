@@ -20,8 +20,10 @@ import {
   validateCommandFlags,
 } from "../src/cli";
 import { parseBudgetCommand } from "../src/cli/commands/budget";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
 import { stopTrackedDaemons, trackDaemonProjectRoot } from "./support/daemon-teardown";
+
+setTestTimeout(10_000);
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const cliSharedUrl = new URL("../src/cli/shared.ts", import.meta.url).href;
@@ -435,6 +437,34 @@ describe("CLI usage errors are classified as operator input, not runtime faults"
     const parsed = JSON.parse(json.stdout);
     expect(parsed.error.code).toBe("INVALID_REQUEST");
     expect(parsed.error.message).toBe("Unknown flag for tui: --json.");
+  });
+
+  test("the real CLI rejects surplus and missing positionals, not only direct calls", async () => {
+    // validateCommandFlags was pinned end-to-end by the `tui --json` case above,
+    // but every positional assertion called validateCommandPositionals directly:
+    // deleting its call in src/cli.ts left the whole suite green while `mcp
+    // status codex EXTRA` silently ran the status it was not asked for.
+    // `mcp status` and a prompt-less `exec` both resolve without a daemon, so
+    // this stays cheap.
+    // Assert the CLASSIFICATION, not the exit code. Whether `mcp status codex`
+    // succeeds depends on a locally installed codex CLI: macOS CI has one and
+    // exits 0, Linux CI has none and exits 1. Neither says anything about the
+    // positional grammar. What must hold on every host is that this shape is
+    // not rejected AS A USAGE ERROR, and that adding one token is.
+    const accepted = await runCli(["mcp", "status", "codex"]);
+    expect(accepted.stderr).not.toContain("unexpected extra argument");
+    expect(accepted.stderr).not.toContain("requires a subcommand");
+
+    const surplus = await runCli(["mcp", "status", "codex", "EXTRA"]);
+    expect(surplus.exitCode).toBe(1);
+    expect(surplus.stderr).toContain('mcp status received an unexpected extra argument "EXTRA".');
+
+    const missing = await runCli(["exec"]);
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain("exec requires prompt.");
+
+    const missingJson = await runCli(["exec", "--json"]);
+    expect(JSON.parse(missingJson.stdout).error).toMatchObject({ code: "INVALID_REQUEST" });
   });
 
   test("gate validation failures remain one parseable JSON document", async () => {

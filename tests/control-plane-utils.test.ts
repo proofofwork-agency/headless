@@ -11,7 +11,9 @@ import { resumableNativeSessionId } from "../src/daemon/run-execution-service";
 import { HeadlessError, toHeadlessError, toStructuredError } from "../src/runtime/headless-error";
 import { signalProcessTree, terminateProcessTree, type KillableChild } from "../src/runtime/process-tree";
 import { positiveTimeout, safeOption, supportedPlatform, UnsupportedPlatformError } from "../src/runtime/validation";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(2_000);
 
 const temporaryPaths: string[] = [];
 const descendantPids: number[] = [];

@@ -181,7 +181,13 @@ async function tryClient(
       : state.tokenPath;
   if (!existsSync(tokenPath) || !existsSync(state.socketPath)) return null;
   try {
-    const client = new HeadlessDaemonClient({ projectRoot, state: options.state, timeoutMs, credential: options.credential });
+    // `timeoutMs` bounds the LIVENESS PROBE, so it is passed to the ping alone.
+    // Constructing the client with it made that probe deadline the client's
+    // default for every later call, and this client is the one the caller gets
+    // back — so an ordinary run.submit inherited 500ms and failed
+    // DAEMON_UNAVAILABLE under any load, on an operator's machine, not only in
+    // tests. The client keeps its own operational default instead.
+    const client = new HeadlessDaemonClient({ projectRoot, state: options.state, credential: options.credential });
     const ping = await client.call<{ extensionConfigDigest?: string; experimentalSessionsEnabled?: boolean }>("ping", {}, timeoutMs);
     if (expectedExtensions && ping.extensionConfigDigest !== expectedExtensions.digest) {
       throw new HeadlessError("EXTENSION_CONFIG_MISMATCH", "The running Headless daemon uses a different extension configuration. Stop it before changing trusted extension modules.");

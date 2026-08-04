@@ -1,4 +1,4 @@
-import { describe, expect, setDefaultTimeout, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,8 +10,9 @@ import {
   type WriteGateContext,
   type WriteGateDecision,
 } from "../src/runtime/write-integration";
+import { setTestTimeout } from "./support/timing";
 
-setDefaultTimeout(15_000);
+setTestTimeout(10_000);
 
 const gitAvailable = runGitStrict(["--version"], process.cwd()).ok;
 const gitTest = gitAvailable ? test : test.skip;

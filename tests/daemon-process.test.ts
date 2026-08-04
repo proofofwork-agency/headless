@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadlessDaemonClient } from "../src/daemon/client";
-import { schedulingAttempts, schedulingWindow } from "./support/timing";
+import { schedulingAttempts, schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(10_000);
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const children = new Set<ReturnType<typeof Bun.spawn>>();

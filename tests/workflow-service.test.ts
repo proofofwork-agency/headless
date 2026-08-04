@@ -8,7 +8,12 @@ import { WorkflowService, type WorkflowSubmitOptions } from "../src/daemon/workf
 import { FinalityStore } from "../src/runtime/finality-store";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import type { AuthenticatedCredential } from "../src/runtime/credential-store";
-import { schedulingDeadline, schedulingWindow } from "./support/timing";
+import { schedulingDeadline, schedulingWindow, setTestTimeout } from "./support/timing";
+
+// The harness observes each step's product deadline plus the service's own 10s
+// margin, so the longest step here (30s) is a 40s window. Under bun's 5s default
+// the harness threw before the workflow could reach any terminal state.
+setTestTimeout(40_000);
 
 const roots: string[] = [];
 

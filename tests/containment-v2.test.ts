@@ -24,15 +24,22 @@ import { backendDefinitions } from "../src/backends/registry";
 import { ProviderBroker } from "../src/broker/server";
 import { RunToolEndpointManager } from "../src/daemon/run-tool-endpoint";
 import { installRunToolClient } from "../src/runtime/run-tool-client";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(5_000);
 
 const cleanupRoots: string[] = [];
 const darwinTest = process.platform === "darwin" ? test : test.skip;
+// The privileged Linux containment step this escape hatch was written for was
+// removed from .github/workflows/ci.yml, and nothing sets the variable now. The
+// hatch stays for a self-hosted privileged runner, but no CI leg takes it: this
+// is a bwrap case, so macOS cannot run it either, and the gate is registered as
+// knowingly uncovered in tests/gated-coverage.test.ts rather than claiming a leg.
 const HOSTED_LINUX_RELAY_INCOMPATIBLE = process.platform === "linux"
   && process.env.GITHUB_ACTIONS === "true"
   && process.env.HEADLESS_PRIVILEGED_CONTAINMENT_CI !== "1";
 if (HOSTED_LINUX_RELAY_INCOMPATIBLE) {
-  console.warn("Skipping the late-socket broker/run-tool relay lifecycle case in the unprivileged GitHub runner; CI runs it in the privileged Linux containment step.");
+  console.warn("Skipping the late-socket broker/run-tool relay lifecycle case: the hosted GitHub Linux runner cannot terminalize the relay child, and no CI leg covers this case. Run it on a local Linux machine, or set HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 on a privileged self-hosted runner.");
 }
 // Real-sandbox tests spawn bwrap + relay + worker processes. The exact
 // broker+run-tool capability test has reached the helper's 15s latency bound

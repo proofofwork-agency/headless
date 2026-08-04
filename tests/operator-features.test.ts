@@ -8,7 +8,9 @@ import { LoopStore } from "../src/runtime/loop-store";
 import { migrateSingleLeadState } from "../src/runtime/project-state-migration";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { SkillRegistry } from "../src/runtime/skill-registry";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(2_000);
 
 const roots: string[] = [];
 const runtimeRoots: string[] = [];

@@ -20,7 +20,9 @@ import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runt
 import { ProjectTrustStore } from "../src/runtime/project-trust-store";
 import { PersistentSessionStore } from "../src/runtime/persistent-sessions";
 import { registerPricing, unregisterPricing } from "../src/runtime/pricing";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(2_000);
 
 const roots: string[] = [];
 const adapters: string[] = [];
@@ -177,13 +179,36 @@ describe("job admission service", () => {
   test("expires queued work across its total lifecycle without starting it", async () => {
     const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
     fixture.service.submit(run(fixture.backend, "active", "read-only", 5_000), "coordinator");
-    const queued = fixture.service.submit(run(fixture.backend, "expires", "read-only", 30), "coordinator");
+    const queued = fixture.service.submit(run(fixture.backend, "expires", "read-only", 5_000), "coordinator");
 
-    await waitUntil(() => fixture.jobs.get(queued.id)?.state === "timed_out", 2_000);
+    // Expiry is driven rather than awaited. A 30ms product deadline plus a poll
+    // is a wall-clock race the fixture loses on a loaded runner, and it can also
+    // retire the job before the assertions can observe it as queued at all.
+    expect(fixture.service.sweepQueueDeadlines(Date.now() + 5_001).map((job) => job.id)).toEqual([queued.id]);
+    expect(fixture.jobs.get(queued.id)?.state).toBe("timed_out");
     expect(fixture.started).toEqual(["active"]);
     expect(fixture.jobs.get(queued.id)?.result?.error?.code).toBe("TIMED_OUT");
     expect(fixture.budgets.getReservation(queued.id)).toBeNull();
     expect(fixture.tasks.list({ jobId: queued.id })[0]?.state).toBe("failed");
+
+    fixture.release("active");
+    await fixture.service.waitForIdle();
+    fixture.service.dispose();
+  });
+
+  /**
+   * The armed-timer path, kept because the driven cases above would still pass
+   * if the deadline were never armed and an unattended daemon never expired
+   * anything. Only the end state is asserted, so a slow runner takes longer
+   * rather than observing a different outcome.
+   */
+  test("arms the queue deadline so an unattended daemon retires the job on its own", async () => {
+    const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
+    fixture.service.submit(run(fixture.backend, "active", "read-only", 5_000), "coordinator");
+    const queued = fixture.service.submit(run(fixture.backend, "unattended", "read-only", 30), "coordinator");
+
+    await waitUntil(() => fixture.jobs.get(queued.id)?.state === "timed_out", 2_000);
+    expect(fixture.started).toEqual(["active"]);
 
     fixture.release("active");
     await fixture.service.waitForIdle();
@@ -241,13 +266,17 @@ describe("job admission service", () => {
     fixture.service.dispose();
   });
 
-  test("expires a pending coder-tool request when the queued job reaches its lifecycle deadline", async () => {
+  test("expires a pending coder-tool request when the queued job reaches its lifecycle deadline", () => {
     const fixture = createFixture({ maxConcurrency: 1, maxQueued: 2 });
-    const job = fixture.service.submit(run(fixture.backend, "expired-write", "write", 30, "ask"), "coordinator");
-    const approval = fixture.approvals.list({ collaborationId: job.id, status: "pending" })[0]!;
+    const job = fixture.service.submit(run(fixture.backend, "expired-write", "write", 5_000, "ask"), "coordinator");
+    const approval = fixture.approvals.list({ collaborationId: job.id, status: "pending" })[0];
+    // A 30ms deadline used to expire the job inside submit whenever fixture
+    // setup was slow, so this read produced a TypeError instead of a verdict.
+    expect(approval, "an ask-mode write must park on a pending coder-tool approval").toBeDefined();
 
-    await waitUntil(() => fixture.jobs.get(job.id)?.state === "timed_out", 2_000);
-    expect(fixture.approvals.get(approval.id)?.status).not.toBe("pending");
+    expect(fixture.service.sweepQueueDeadlines(Date.now() + 5_001).map((expired) => expired.id)).toEqual([job.id]);
+    expect(fixture.jobs.get(job.id)?.state).toBe("timed_out");
+    expect(fixture.approvals.get(approval!.id)?.status).not.toBe("pending");
     expect(fixture.started).toEqual([]);
     expect(fixture.budgets.getReservation(job.id)).toBeNull();
     expect(fixture.tasks.list({ jobId: job.id })[0]?.state).toBe("failed");

@@ -21,9 +21,11 @@ import {
   type SessionTransportRequest,
   type SessionTransportResult,
 } from "../src/runtime/session-drivers";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
 import { buildClaudeCommand } from "../src/backends/claude";
 import { codexSandbox } from "../src/backends/codex";
+
+setTestTimeout(1_000);
 
 describe("session driver selection", () => {
   test("reports native login presence and rejects a missing auth capsule", async () => {

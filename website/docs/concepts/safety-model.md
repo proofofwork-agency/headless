@@ -32,7 +32,7 @@ Native-login workers receive only their **own backend's** allowlisted credential
 
 ## The broker: finite leases, fail-closed budgets
 
-Broker mode is the default authentication mode. Real API keys stay in the daemon; a worker receives only an opaque, short-lived lease scoped to its run, provider, model, endpoint class, request and body limits, duration, and budget. Every run gets finite defaults — 8 requests, 200,000 aggregate input tokens, 32,000 aggregate output tokens, and a $5 cap when trusted pricing exists.
+Broker mode is the default authentication mode. Real API keys stay in the daemon; a worker receives only an opaque, short-lived lease scoped to its run, provider, model, endpoint class, request and body limits, duration, and budget. Every run gets finite defaults — 8 requests, 200,000 aggregate input tokens, 32,000 aggregate output tokens, and a $5 cap when trusted pricing exists. An operator-configured ceiling (`experimental budget upsert --max-cost-usd`) lowers that cap; it never raises it.
 
 **Unknown price is never zero.** The core pricing registry ships intentionally empty; USD attribution requires trusted dated pricing from a daemon extension. Unknown pricing requires explicit per-run approval and stays reported as unknown — and if any USD ceiling applies while the registry is empty, admission fails closed rather than guessing. Quotas are charged atomically across all concurrent leases, and a daemon crash exhausts crash-unknown allocation instead of making it reusable.
 

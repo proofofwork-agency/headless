@@ -15,6 +15,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { WorkerEnvironmentPaths } from "./worker-environment";
 import { resolveExecutable } from "./executable-read-roots";
+import { secureBunUnixServe } from "./secure-socket";
 
 export const DARWIN_SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 export const DARWIN_WRITE_DENIAL_PROBE = "darwin-sandbox-write-denial-v1";
@@ -851,7 +852,10 @@ export function probeLinuxBwrap(): SandboxProbeResult {
       return { ok: false, reason: "Linux containment seccomp supervisor runtime is unavailable" };
     }
     const probeSocket = join(dir, "live-host.sock");
-    socketListener = Bun.listen({ unix: probeSocket, socket: { data() {} } });
+    // Same umask guard + post-bind ownership gate as every other in-process bind,
+    // even though `dir` is a 0700 mkdtemp: an exempt bind here would be the one
+    // socket whose creation mode nothing verifies.
+    socketListener = secureBunUnixServe(probeSocket, () => Bun.listen({ unix: probeSocket, socket: { data() {} } }));
     const socketProbe = [
       "const {createConnection}=require('node:net');",
       `const socket=createConnection(${JSON.stringify(probeSocket)});`,
@@ -951,10 +955,16 @@ function runLinuxRunToolRelayProbe(): SandboxProbeResult {
   const socketPath = join(dir, "probe.tool.sock");
   const readyPath = join(dir, "ready");
   const nonce = `headless-run-tool-relay-${process.pid}-${Date.now()}`;
-  // Bind under umask 0o077 so the probe socket is owner-only at creation
-  // (no chmod-after-listen TOCTOU). Umask is restored in the listen callback.
+  // Documented exemption from secure-socket.ts: this listener lives in a separate
+  // `bun -e` child, which cannot import the shared helper in a bundled build, so
+  // the umask guard and the post-bind ownership gate are restated inline here.
+  // The child owns the whole sequence — bind under umask 0o077 (no
+  // chmod-after-listen TOCTOU), restore, then refuse to publish the ready marker
+  // unless the on-disk socket is genuinely owner-only. An async bind failure
+  // arrives as an 'error' event that the try/catch below can never see, so it
+  // gets its own handler rather than becoming an uncaught exception.
   const serverSource = [
-    "const {writeFileSync}=require('node:fs');",
+    "const {lstatSync,writeFileSync}=require('node:fs');",
     "const {createServer}=require('node:net');",
     `const expected=${JSON.stringify(nonce)};`,
     "const server=createServer((socket)=>{",
@@ -963,8 +973,12 @@ function runLinuxRunToolRelayProbe(): SandboxProbeResult {
     "const value=buffer.slice(0,newline);socket.end((value===expected?expected:'mismatch')+'\\n');server.close();});",
     "});",
     "const previousUmask=process.umask(0o077);",
+    "server.once('error',()=>{process.umask(previousUmask);process.exit(76);});",
     "try{",
-    `server.listen(${JSON.stringify(socketPath)},()=>{process.umask(previousUmask);writeFileSync(${JSON.stringify(readyPath)},'ready',{mode:0o600});});`,
+    `server.listen(${JSON.stringify(socketPath)},()=>{process.umask(previousUmask);`,
+    `const info=lstatSync(${JSON.stringify(socketPath)});`,
+    "if(!info.isSocket()||(info.mode&0o077)!==0||typeof process.getuid!=='function'||info.uid!==process.getuid())process.exit(77);",
+    `writeFileSync(${JSON.stringify(readyPath)},'ready',{mode:0o600});});`,
     "}catch(error){process.umask(previousUmask);throw error;}",
     `setTimeout(()=>process.exit(78),${LINUX_RUN_TOOL_RELAY_SERVER_TIMEOUT_MS});`,
   ].join("");

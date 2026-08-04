@@ -1,7 +1,7 @@
 ---
 id: intro
 title: "Headless: Proof of Work for AI Agents"
-slug: /
+slug: /docs
 sidebar_position: 1
 ---
 

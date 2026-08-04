@@ -8,7 +8,9 @@ import {
   parseDaemonProcessTable,
 } from "../src/runtime/daemon-inventory";
 import { countDaemonsForRoots, stopTrackedDaemons, trackDaemonProjectRoot } from "./support/daemon-teardown";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(20_000);
 
 const cliPath = new URL("../src/cli.ts", import.meta.url).pathname;
 const roots: string[] = [];
@@ -42,6 +44,19 @@ describe("daemon process inventory", () => {
     expect(entries[1]!.projectRoot).toBe("/tmp/beta");
     // A daemon without --cwd cannot be attributed to a checkout.
     expect(entries[2]!.projectRoot).toBeNull();
+  });
+
+  test("ignores a process that merely quotes a daemon command line", () => {
+    // `daemon reap` SIGTERMs whatever this returns, so matching `daemon serve`
+    // anywhere in an argv meant a shell echoing the string — or a message
+    // quoting it — could be killed as if it were a daemon. Observed as a stray
+    // whose "project root" contained backticks and a newline.
+    const table = [
+      "  5150   501 /bin/sh -c echo /opt/headless/src/cli.ts daemon serve --cwd /tmp/quoted",
+      "  5151   501 /usr/bin/bun /opt/headless/src/cli.ts daemon serve --cwd /tmp/real",
+      "",
+    ].join("\n");
+    expect(parseDaemonProcessTable(table, 501, 9_999).map((entry) => entry.pid)).toEqual([5151]);
   });
 
   test("never reports the scanning process itself", () => {
@@ -105,41 +120,60 @@ describe("bootstrapped daemon lifecycle", () => {
   test("exits on its own once the idle deadline passes", async () => {
     const fixture = idleFixture("headless-idle-exit-");
     const daemon = spawnDaemon(fixture, ["--idle-timeout-ms", String(IDLE_MS)]);
-    await waitForDaemonReady(daemon);
-    const exitCode = await Promise.race([
-      daemon.exited,
-      Bun.sleep(schedulingWindow(20_000)).then(() => "timeout" as const),
-    ]);
+    let exitCode: number | "timeout";
+    try {
+      await waitForDaemonReady(daemon);
+      exitCode = await Promise.race([
+        daemon.exited,
+        Bun.sleep(schedulingWindow(20_000)).then(() => "timeout" as const),
+      ]);
+    } finally {
+      // Idle shutdown is the behaviour under test, so on the happy path this is
+      // already gone; it matters when readiness throws or the watchdog does not
+      // fire, which is exactly the failure that would otherwise leak.
+      if (!daemon.killed) daemon.kill("SIGTERM");
+      await daemon.exited;
+    }
     expect(exitCode).toBe(0);
   }, 60_000);
 
   test("stays resident while a client keeps using it", async () => {
     const fixture = idleFixture("headless-idle-busy-");
-    const daemon = spawnDaemon(fixture, ["--idle-timeout-ms", String(IDLE_MS)]);
-    await waitForDaemonReady(daemon);
-    // Outlast the idle window while pinging: activity must reset the deadline.
-    const deadline = Date.now() + IDLE_MS * 3;
-    while (Date.now() < deadline) {
-      const ping = await runCli(["daemon", "status", "--cwd", fixture.project], fixture.env);
-      expect(ping.exitCode, ping.stderr).toBe(0);
-      await Bun.sleep(IDLE_MS / 4);
+    const daemon = spawnDaemon(fixture, ["--idle-timeout-ms", String(BUSY_IDLE_MS)]);
+    try {
+      await waitForDaemonReady(daemon);
+      // Outlast the idle window while pinging: activity must reset the deadline.
+      const deadline = Date.now() + BUSY_IDLE_MS * 3;
+      while (Date.now() < deadline) {
+        const ping = await runCli(["daemon", "status", "--cwd", fixture.project], fixture.env);
+        expect(ping.exitCode, ping.stderr).toBe(0);
+        await Bun.sleep(BUSY_IDLE_MS / 4);
+      }
+      expect(daemon.killed).toBe(false);
+    } finally {
+      // A failing assertion above must not also leak the daemon: the failure
+      // would then surface later as a stray with no link to this fixture.
+      daemon.kill("SIGTERM");
+      await daemon.exited;
     }
-    expect(daemon.killed).toBe(false);
-    daemon.kill("SIGTERM");
-    await daemon.exited;
   }, 60_000);
 
   test("never arms the watchdog when the operator opts out", async () => {
     const fixture = idleFixture("headless-idle-optout-");
     const daemon = spawnDaemon(fixture, ["--no-idle-timeout"]);
-    await waitForDaemonReady(daemon);
-    const outcome = await Promise.race([
-      daemon.exited.then((code) => `exited:${code}`),
-      Bun.sleep(IDLE_MS * 3).then(() => "resident" as const),
-    ]);
-    expect(outcome).toBe("resident");
-    daemon.kill("SIGTERM");
-    await daemon.exited;
+    try {
+      await waitForDaemonReady(daemon);
+      const outcome = await Promise.race([
+        daemon.exited.then((code) => `exited:${code}`),
+        Bun.sleep(IDLE_MS * 3).then(() => "resident" as const),
+      ]);
+      expect(outcome).toBe("resident");
+    } finally {
+      // This daemon opted out of the idle watchdog, so nothing will ever
+      // reclaim it on its own. Leaking it here is permanent.
+      daemon.kill("SIGTERM");
+      await daemon.exited;
+    }
   }, 60_000);
 
   test("classifies a suite fixture root as disposable so reaping can find it", () => {
@@ -155,6 +189,22 @@ describe("bootstrapped daemon lifecycle", () => {
 });
 
 const IDLE_MS = 2_000;
+
+/**
+ * The busy-loop test's daemon has to outlive a single ping, and every ping is a
+ * cold `bun src/cli.ts` process — roughly 500ms locally and several times that
+ * on a loaded or CI machine. Against a flat 2s deadline, one slow ping lets the
+ * daemon idle out between pings and the next reports "No Headless daemon is
+ * running": a real product-failure signature produced entirely by machine load.
+ * Scaling the deadline keeps what the test actually asserts — that activity
+ * resets it — while giving each ping the same headroom everywhere.
+ *
+ * Capped because the loop runs for three of these and has to finish inside the
+ * test's own budget — scaling without a ceiling is how a widened window becomes
+ * unreachable, which is the defect this file's sibling fix exists for. Beyond a
+ * few seconds of headroom a ping is not slow, the machine is broken.
+ */
+const BUSY_IDLE_MS = Math.min(schedulingWindow(2_000), 6_000);
 
 function idleFixture(prefix: string) {
   const root = mkdtempSync(join(tmpdir(), prefix));

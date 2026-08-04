@@ -48,7 +48,15 @@ export function parseDaemonProcessTable(output: string, uid: number, selfPid: nu
     if (!Number.isSafeInteger(owner) || owner !== uid) continue;
     const argv = command.split(/\s+/).filter(Boolean);
     const serve = argv.findIndex((value, index) => value === "daemon" && argv[index + 1] === "serve");
-    if (serve < 1) continue;
+    // Anchored to argv[1], not merely "somewhere after an entrypoint". Every
+    // daemon in this tree is spawned as `<runtime> <entrypoint> daemon serve`,
+    // so the subcommand is always the third token. Accepting it anywhere let
+    // any process whose command line CONTAINS that text be classified as a
+    // daemon — a shell echoing the string, or a message quoting it — and
+    // `daemon reap` SIGTERMs what this returns, so a false positive kills an
+    // unrelated process. Observed: a stray reported with backticks and a
+    // newline inside its "project root".
+    if (serve !== 2) continue;
     const entrypoint = argv[serve - 1];
     if (!entrypoint || !DAEMON_ENTRYPOINTS.has(basename(entrypoint))) continue;
     const cwdFlag = argv.indexOf("--cwd", serve);

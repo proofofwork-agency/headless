@@ -7,7 +7,9 @@ import { LoopStore } from "../src/runtime/loop-store";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { REPAIR_VERIFY_STEP_ID, type RepairStep } from "../src/runtime/repair-plan";
 import type { GateCheckResult, ReleaseGateReport } from "../src/runtime/release-gate";
-import { schedulingWindow } from "./support/timing";
+import { schedulingWindow, setTestTimeout } from "./support/timing";
+
+setTestTimeout(5_000);
 
 const roots: string[] = [];
 const runtimeRoots: string[] = [];

@@ -1,7 +1,6 @@
+import { missingOperandError } from "../argv";
 import {
   DEFAULT_RUN_TIMEOUT_MS,
-  backendUsage,
-  CliUsageError,
   daemonClient,
   flagArgsBeforeSeparator,
   getArg,
@@ -13,18 +12,15 @@ import {
   resolveExecPolicy,
   submitAndWait,
 } from "../shared";
-import { profileChoices } from "../profile";
 
 export async function runExecCommand(args: string[]) {
   const flags = flagArgsBeforeSeparator(args);
   const projectRoot = getArg(flags, "--cwd") || process.cwd();
   const backend = parseBackend(getArg(flags, "--backend") || "opencode");
   const prompt = getPrompt(args);
-  if (!prompt) {
-    throw new CliUsageError(
-      `Usage: headless exec --backend <${backendUsage()}> [--profile ${profileChoices().join("|")}] "your prompt"`,
-    );
-  }
+  // validateCommandPositionals rejects this first for a CLI invocation; the
+  // guard remains because runExecCommand is also called as a library function.
+  if (!prompt) throw missingOperandError("exec", "prompt");
   const timeoutMs = parseIntegerArg(flags, "--timeout-ms") ?? DEFAULT_RUN_TIMEOUT_MS;
   const { mode, authMode, containment } = resolveExecPolicy(flags);
   const client = await daemonClient(projectRoot, flags);

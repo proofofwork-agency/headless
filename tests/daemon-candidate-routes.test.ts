@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,8 +10,9 @@ import { FinalityStore } from "../src/runtime/finality-store";
 import { getHeadSha, runGitStrict } from "../src/runtime/git";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 import { captureWriteDiff, createWriteWorktree, planWriteWorktree, removeWriteWorktree } from "../src/runtime/worktree";
+import { setTestTimeout } from "./support/timing";
 
-setDefaultTimeout(20_000);
+setTestTimeout(15_000);
 
 const roots: string[] = [];
 const daemons: HeadlessDaemon[] = [];

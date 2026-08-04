@@ -33,7 +33,10 @@ describe("resolveCommandAction reads the grammar, not a physical index", () => {
       const resolved = resolveCommandAction(argv, fallback);
       expect(resolved.action).toBe(action);
       expect(resolved.operands).toEqual(operands);
-      expect(resolved.action?.startsWith("-")).not.toBe(true);
+      // `resolved.action?.startsWith("-")` silently passed whenever action was
+      // undefined, which is exactly the regression the row is meant to catch.
+      expect(resolved.action).toBeDefined();
+      expect(resolved.action!.startsWith("-")).toBe(false);
     });
   }
 
@@ -120,6 +123,51 @@ describe("separator safety", () => {
   });
 });
 
+describe("getPrompt reads the same operands the validator counted", () => {
+  // A private scanner using token.startsWith("-") and the GLOBAL value-flag
+  // union disagreed with parseCommandArgv on a bare `-`, on negative numerics,
+  // and on flags belonging to other commands. The costly case: `council -1`
+  // passed validation with -1 as the question, then getPrompt returned
+  // undefined and the handler ran its DEFAULT question — a different,
+  // quota-spending council than the operator asked for.
+  const operandCases: Array<[string[], string | undefined]> = [
+    [["council", "-1"], "-1"],
+    [["council", "-"], "-"],
+    [["exec", "-1"], "-1"],
+    [["exec", "-"], "-"],
+    [["exec", "a prompt"], "a prompt"],
+    [["council"], undefined],
+    [["exec", "--session-id", "s1", "--timeout-ms", "2", "prompt"], "prompt"],
+  ];
+
+  for (const [argv, prompt] of operandCases) {
+    test(`\`${argv.join(" ")}\` yields ${JSON.stringify(prompt)}`, () => {
+      expect(getPrompt(argv)).toBe(prompt as string);
+      // The grammar and the reader must agree on WHICH tokens are operands.
+      expect(parseCommandArgv(argv).positionalEntries.map((entry) => entry.value))
+        .toEqual(prompt === undefined ? [] : [prompt]);
+    });
+  }
+
+  test("a command's own value flags decide what is consumed, not the global union", () => {
+    // --limit belongs to events, not exec; the global union swallowed the token
+    // behind it, so the operand the grammar saw was not the prompt exec ran.
+    expect(parseCommandArgv(["exec", "--limit", "2", "prompt"]).positionalEntries.map((entry) => entry.value))
+      .toEqual(["2", "prompt"]);
+    expect(() => getPrompt(["exec", "--limit", "2", "prompt"])).toThrow("Unexpected extra prompt argument: prompt");
+    expect(getPrompt(["events", "--limit", "2", "prompt"])).toBe("prompt");
+  });
+
+  test("the post-separator fast path is unchanged", () => {
+    expect(getPrompt(["exec", "--", "--help"])).toBe("--help");
+    expect(getPrompt(["exec", "--", "a", "long", "prompt"])).toBe("a long prompt");
+    expect(getPrompt(["exec", "--"])).toBeUndefined();
+    // One token before `--`; more than one is still an operator error.
+    expect(getPrompt(["exec", "one two"])).toBe("one two");
+    expect(() => getPrompt(["exec", "one", "two"])).toThrow(CliUsageError);
+  });
+});
+
 describe("validateCommandFlags rejects flags the command does not accept", () => {
   test("rejects a flag that is only valid on another command", () => {
     // --limit is registered by events/collaboration/receipt. The global union
@@ -134,7 +182,7 @@ describe("validateCommandFlags rejects flags the command does not accept", () =>
     expect(() => validateCommandFlags(["logs", "--stream"])).toThrow("Unknown flag for events: --stream.");
   });
 
-  test("accepts every flag each command declares", () => {
+  test("accepts every flag each command declares, and nothing it does not", () => {
     for (const spec of COMMAND_SPECS) {
       for (const flag of "valueFlags" in spec ? spec.valueFlags : []) {
         expect(() => validateCommandFlags([spec.name, flag, "value"])).not.toThrow();
@@ -142,6 +190,10 @@ describe("validateCommandFlags rejects flags the command does not accept", () =>
       for (const flag of "booleanFlags" in spec ? spec.booleanFlags : []) {
         expect(() => validateCommandFlags([spec.name, flag])).not.toThrow();
       }
+      // Paired reject per command: an accept-only loop passes against a
+      // validator that checks nothing, which is the defect it exists to catch.
+      expect(() => validateCommandFlags([spec.name, "--not-a-declared-flag"]))
+        .toThrow(`Unknown flag for ${spec.name}: --not-a-declared-flag.`);
     }
   });
 
@@ -169,12 +221,23 @@ describe("validateCommandFlags rejects flags the command does not accept", () =>
   test("never inspects tokens after the separator", () => {
     expect(() => validateCommandFlags(["exec", "--", "--limit", "--not-a-flag", "-x"])).not.toThrow();
     expect(() => validateCommandFlags(["exec", "--cwd", "/repo", "--", "--follow"])).not.toThrow();
+    // Paired: the identical tokens BEFORE the separator are rejected, so these
+    // accepts show the separator is honoured rather than that nothing is read.
+    expect(() => validateCommandFlags(["exec", "--follow", "--", "--follow"])).toThrow("Unknown flag for exec: --follow.");
+    expect(() => validateCommandFlags(["exec", "-x", "--", "-x"])).toThrow("Unknown flag for exec: -x.");
   });
 
   test("treats bare - and negative numbers as operands, not flags", () => {
+    // `["experimental", "-1"]` used to stand in for this: "experimental" is not
+    // a command, so resolveCommandSpec returned undefined and the function
+    // exited before any check — a not.toThrow that could not fail.
     expect(() => validateCommandFlags(["exec", "-", "prompt"])).not.toThrow();
-    expect(() => validateCommandFlags(["experimental", "-1"])).not.toThrow();
+    expect(() => validateCommandFlags(["council", "-1"])).not.toThrow();
     expect(() => validateCommandFlags(["collaboration", "turns", "--after-sequence", "-1"])).not.toThrow();
+    // Paired reject on the same commands, so a no-op validator fails here.
+    expect(() => validateCommandFlags(["council", "-1x"])).toThrow("Unknown flag for council: -1x.");
+    expect(() => validateCommandFlags(["exec", "--", "prompt"])).not.toThrow();
+    expect(() => validateCommandFlags(["exec", "-x", "prompt"])).toThrow("Unknown flag for exec: -x.");
   });
 
   test("ignores argv whose command cannot be resolved, because dispatch rejects it first", () => {

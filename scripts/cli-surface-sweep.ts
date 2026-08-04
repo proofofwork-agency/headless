@@ -43,7 +43,13 @@ const results: Result[] = [];
 async function run(c: Case): Promise<Result> {
   const started = Date.now();
   const proc = Bun.spawn(["bun", CLI, ...c.argv], {
-    cwd: ROOT,
+    // The disposable project, not ROOT. Cases like `--cwd ""` and the ones that
+    // pass no --cwd at all deliberately fall back to process.cwd(), and with
+    // ROOT that meant running against this actual checkout: `experimental gate`
+    // then does real release-gate work on a real tree and blows the 20s budget,
+    // so the sweep reported a hang that only reproduces on a developer machine.
+    // CLI is an absolute path, so the spawn does not need ROOT.
+    cwd: project,
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
@@ -226,4 +232,35 @@ bad += fail(parity, "TEXT/JSON CLASSIFICATION DIVERGENCE");
 bad += fail(silentFailures, "FAILED WITH NO MESSAGE");
 console.log(bad === 0 ? "\nALL INVARIANTS HELD" : `\nINVARIANT VIOLATIONS: ${bad}`);
 
-for (const dir of [stateHome, runtimeHome, project]) { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+// The whole point of this harness is to REFUSE a bad surface, and it printed
+// its verdict without ever setting an exit code — so `bun run check:cli-surface`
+// exited 0 through timeouts, stack-trace leakage, secret leakage, leaked state
+// paths, raw filesystem errors, classification divergence, and silent failures
+// alike. A check that cannot fail certifies nothing, and this one was reported
+// as evidence. Cleanup runs first, in a finally, so a failure to reclaim the
+// sweep's own daemon cannot swallow the verdict — and is itself a failure,
+// because leaving a stray behind breaks the next run on this machine.
+let cleanupFailed = false;
+try {
+  // `daemon reap --all` is NOT scoped by HEADLESS_STATE_HOME — it scans the
+  // machine-wide process table — so using it here would let the sweep SIGTERM
+  // an operator's real checkout daemons, or another agent's. Stop exactly the
+  // one project this sweep owns.
+  const stopped = Bun.spawnSync({
+    cmd: ["bun", CLI, "daemon", "stop", "--cwd", project],
+    cwd: project,
+    env: { ...process.env, NO_COLOR: "1", CI: "1", HEADLESS_STATE_HOME: stateHome, HEADLESS_RUNTIME_HOME: runtimeHome },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  // A non-zero exit because no daemon was running is the common, healthy case.
+  const noDaemon = `${stopped.stdout.toString()}${stopped.stderr.toString()}`.includes("No Headless daemon");
+  if (stopped.exitCode !== 0 && !noDaemon) {
+    cleanupFailed = true;
+    console.log(`\nCLEANUP FAILED: could not stop the sweep's daemon (exit ${stopped.exitCode}). Run: bun run check:daemons`);
+  }
+} finally {
+  for (const dir of [stateHome, runtimeHome, project]) { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+}
+
+if (bad > 0 || cleanupFailed) process.exitCode = 1;

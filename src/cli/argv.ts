@@ -85,6 +85,22 @@ export function readFlagValue(argv: string[], name: string, index: number) {
 }
 
 /**
+ * One message for a missing operand, wherever it is detected. Handlers still
+ * guard their own input — they are reachable as library functions, without the
+ * CLI entry point that runs validateCommandPositionals — and two different
+ * texts for one mistake tell the operator they made two.
+ */
+export function missingOperandError(
+  command: string,
+  operand: string,
+  options: { actionPath?: readonly string[]; alternativeFlags?: readonly string[] } = {},
+) {
+  const label = [command, ...(options.actionPath ?? [])].join(" ");
+  const alternatives = options.alternativeFlags?.length ? ` or ${options.alternativeFlags.join(" or ")}` : "";
+  return new CliUsageError(`${label} requires ${operand}${alternatives}. ${renderCommandUsage(command)}`);
+}
+
+/**
  * Split one command invocation into flags, positionals, and the passthrough
  * tail. A registered value flag and its value are consumed as a single grammar
  * unit, so `mcp --cwd /repo` yields no positional instead of reading /repo as
@@ -163,9 +179,10 @@ export function validateCommandFlags(argv: string[]) {
  * ignored unknown flags, and just as likely to hide a typo for a subcommand the
  * operator believed existed.
  *
- * Deliberately separate from validateCommandFlags, whose contract is flag-only:
- * folding these together would make `exec - prompt` newly fail, and a test pins
- * that bare `-` is an operand rather than a flag.
+ * Deliberately separate from validateCommandFlags, whose contract is flag-only,
+ * and run AFTER it: a misspelled value flag leaves its value looking like a
+ * positional, so `exec --cdw /repo prompt` folded into one pass would report a
+ * surplus argument instead of naming --cdw, which is the actual mistake.
  *
  * An UNRECOGNISED action is left alone — the handler's own usage error is more
  * specific than anything this layer could say. Only surplus, missing, or
@@ -177,7 +194,15 @@ export function validateCommandPositionals(argv: string[]) {
   const grammar = POSITIONAL_GRAMMAR[spec.name];
   if (!grammar) return;
   const { positionalEntries, flagsBeforeSeparator } = parseCommandArgv(argv);
-  const hasSeparatorTail = argv.indexOf("--") !== -1;
+  const separator = argv.indexOf("--");
+  const hasSeparatorTail = separator !== -1;
+  // getPrompt's fast path verbatim, so both layers agree on when the opaque
+  // tail actually supplies free text: `exec --` supplies none.
+  const tailText = hasSeparatorTail ? argv.slice(separator + 1).join(" ") || undefined : undefined;
+  // Naming the action the operator typed keeps this message identical to the
+  // one the handler raises for the same mistake.
+  const actionPath: string[] = [];
+  const label = () => [spec.name, ...actionPath].join(" ");
   const reject = (detail: string) => {
     throw new CliUsageError(`${detail} ${renderCommandUsage(spec.name)}`);
   };
@@ -190,7 +215,7 @@ export function validateCommandPositionals(argv: string[]) {
   while (node.kind === "actions") {
     const token = positionalEntries[cursor]?.value;
     if (token === undefined) {
-      if (!node.default) reject(`${spec.name} requires a subcommand.`);
+      if (!node.default) reject(`${label()} requires a subcommand.`);
       node = node.actions[node.default!]!;
       break;
     }
@@ -200,6 +225,7 @@ export function validateCommandPositionals(argv: string[]) {
     // are this validator's business.
     if (!next) return;
     cursor += 1;
+    actionPath.push(token);
     node = next;
   }
   if (node.kind !== "leaf") return;
@@ -208,13 +234,13 @@ export function validateCommandPositionals(argv: string[]) {
     if (flagPresent(field.unlessAnyFlag)) {
       // The flag owns this value, so a positional here is a second source.
       if (positionalEntries[cursor]) {
-        reject(`${spec.name} takes ${field.name} from ${field.unlessAnyFlag!.join(" or ")}, so the extra argument is ambiguous.`);
+        reject(`${label()} takes ${field.name} from ${field.unlessAnyFlag!.join(" or ")}, so the extra argument is ambiguous.`);
       }
       continue;
     }
     if (!positionalEntries[cursor]) {
       // A fixed field can never be satisfied from the opaque `--` tail.
-      if (field.required) reject(`${spec.name} requires ${field.name}.`);
+      if (field.required) throw missingOperandError(spec.name, field.name, { actionPath, alternativeFlags: field.unlessAnyFlag });
       continue;
     }
     cursor += 1;
@@ -224,17 +250,23 @@ export function validateCommandPositionals(argv: string[]) {
   if (text) {
     if (flagPresent(text.unlessAnyFlag)) {
       if (positionalEntries[cursor]) {
-        reject(`${spec.name} takes ${text.name} from ${text.unlessAnyFlag!.join(" or ")}, so the extra argument is ambiguous.`);
+        reject(`${label()} takes ${text.name} from ${text.unlessAnyFlag!.join(" or ")}, so the extra argument is ambiguous.`);
       }
     } else if (positionalEntries[cursor]) {
       // One quoted token before `--`; the tail may hold any number.
       cursor += 1;
-      if (hasSeparatorTail) reject(`${spec.name} received ${text.name} both before and after --.`);
+      if (hasSeparatorTail) reject(`${label()} received ${text.name} both before and after --.`);
+    } else if (text.required && tailText === undefined) {
+      // `required` was declared and never read, so `exec`, `goal start`,
+      // `session send` and `loop start` all reached their handlers and produced
+      // a second, differently worded missing-prompt error. Unlike a fixed
+      // field, free text MAY come from the tail, which is why it counts here.
+      throw missingOperandError(spec.name, text.name, { actionPath, alternativeFlags: text.unlessAnyFlag });
     }
   }
 
   const leftover = positionalEntries[cursor];
   if (leftover) {
-    reject(`${spec.name} received an unexpected extra argument "${leftover.value}".`);
+    reject(`${label()} received an unexpected extra argument "${leftover.value}".`);
   }
 }
