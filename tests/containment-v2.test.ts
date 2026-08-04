@@ -455,7 +455,13 @@ describe("Linux bubblewrap profiles", () => {
     const project = temporaryDirectory("headless-late-socket-pure-");
     mkdirSync(join(project, ".git"));
     const runtime = temporaryDirectory("headless-late-socket-pure-runtime-");
-    const lateSocket = join(runtime, "late-host.sock");
+    // Under `project`, NOT under `runtime`. project is re-exposed into the mount
+    // namespace with --ro-bind, so a socket created there after launch is
+    // VISIBLE inside the sandbox and only the inherited AF_UNIX seccomp filter
+    // stops the connect — which is the property under test. A path outside
+    // worker.root is simply absent behind the private /tmp tmpfs, so it would
+    // return ENOENT even with seccomp removed entirely: a test that cannot fail.
+    const lateSocket = join(project, "late-host-pure.sock");
     const worker = createWorkerEnvironment({ baseDir: runtime });
     const marker = join(worker.temp, "worker-ready");
     const proceed = join(worker.temp, "host-socket-ready");

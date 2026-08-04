@@ -57,8 +57,9 @@ jobs:
         run: |
           set -euo pipefail
           # --cpus/--memory match the recorded evidence in the follow-up doc.
-          # GITHUB_ACTIONS is already true here, which is what keeps the
-          # combined relay case skipped; see the note at the test invocation.
+          # GITHUB_ACTIONS must be passed EXPLICITLY: docker run does not inherit
+          # the runner environment, so relying on it being "already true" left it
+          # unset inside the container and silently un-armed the hosted predicate.
           # CI=true selects the slow-Linux timing context and NO_COLOR keeps the
           # result lines anchorable below.
           docker run --rm --privileged --cpus=2 --memory=3g -v "$PWD:/repo:ro" oven/bun:1.3.14 bash -lc '
@@ -79,7 +80,7 @@ jobs:
             # assertion behind a flaky availability check produces a red that
             # people learn to re-run, which is how a real breach gets waved
             # through. The pure denial case below runs without the override.
-            CI=true NO_COLOR=1 bun test tests/containment-v2.test.ts
+            CI=true GITHUB_ACTIONS=true NO_COLOR=1 bun test tests/containment-v2.test.ts
           ' 2>&1 | tee containment.log
 
       - name: Refuse a vacuous pass
@@ -101,6 +102,12 @@ jobs:
             || { echo "::error::pure late-socket denial case did not PASS — skipped or failed, so this job proved nothing"; exit 1; }
           grep -qE '^\(pass\).*rejects x32 syscall numbers before native seccomp dispatch' containment.log \
             || { echo "::error::x32 alternate-ABI case did not PASS on x86-64"; exit 1; }
+          # Prove the hosted predicate was ARMED. If GITHUB_ACTIONS failed to
+          # reach the container, the combined relay case would RUN instead of
+          # skipping — and it would usually pass, so pure+x32 staying green
+          # would hide the regression. Requiring the skip makes that impossible.
+          grep -qE '^\(skip\).*denies a host Unix socket created after launch while broker' containment.log \
+            || { echo "::error::combined relay case was not skipped — GITHUB_ACTIONS did not reach the container, so the hosted predicate was not armed"; exit 1; }
           echo "pure late-socket denial and x32 cases executed and passed on x86-64"
 
       - name: Upload containment log
