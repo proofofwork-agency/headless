@@ -16,6 +16,7 @@ import {
   renderHelp,
   resolveCommand,
   runMcpInstall,
+  validateCommandFlags,
 } from "../src/cli";
 import { parseBudgetCommand } from "../src/cli/commands/budget";
 import { schedulingWindow } from "./support/timing";
@@ -108,7 +109,10 @@ describe("v0.2 CLI contracts", () => {
     for (const flag of ["--session-id", "--limit", "--check", "--timeout-ms", "--cwd", "--extension-config", "--lead"]) {
       expect(VALUE_FLAGS.has(flag)).toBe(true);
     }
-    expect(getPrompt(["exec", "--session-id", "session-1", "--limit", "2", "prompt"])).toBe("prompt");
+    expect(getPrompt(["exec", "--session-id", "session-1", "--timeout-ms", "2", "prompt"])).toBe("prompt");
+    // This assertion used to pass --limit, an events/collaboration/receipt flag,
+    // and only worked because the global union blessed it on every command.
+    expect(() => validateCommandFlags(["exec", "--limit", "2", "prompt"])).toThrow("Unknown flag for exec: --limit.");
     expect(flagArgsBeforeSeparator(["exec", "--cwd", "/repo", "--", "--cwd", "/prompt"])).toEqual(["exec", "--cwd", "/repo"]);
   });
 
@@ -352,6 +356,70 @@ async function waitForPendingApproval(project: string, env: Record<string, strin
   }
   throw new Error("Timed out waiting for the unpriced broker approval.");
 }
+
+describe("CLI usage errors are classified as operator input, not runtime faults", () => {
+  // Regression: the --json branch mapped CliUsageError to INVALID_REQUEST while
+  // the text branch fell through to INTERNAL_ERROR, so a typo told the operator
+  // the daemon had failed and sent them to `headless daemon status`.
+  const usageInvocations = [
+    ["lead", "bogus"],
+    ["mcp", "bogus"],
+    ["daemon", "bogus-sub"],
+    ["experimental", "ledger", "bogus"],
+  ];
+
+  for (const argv of usageInvocations) {
+    test(`\`${argv.join(" ")}\` reports invalid request in both output modes`, async () => {
+      const text = await runCli(argv);
+      expect(text.exitCode).toBe(1);
+      expect(text.stderr).not.toContain("Internal error");
+      expect(text.stderr).not.toContain("headless daemon status");
+      expect(text.stderr).toContain("Invalid request");
+      expect(text.stderr).toContain("Next: headless --help");
+
+      const json = await runCli([...argv, "--json"]);
+      expect(json.exitCode).toBe(1);
+      expect(JSON.parse(json.stdout).error.code).toBe("INVALID_REQUEST");
+    });
+  }
+
+  test("names a bad --cwd instead of leaking the filesystem error behind it", async () => {
+    // realpathSync surfaced `ENOENT: no such file or directory, lstat …`, which
+    // was then classified INTERNAL_ERROR and remedied with
+    // `headless daemon status --cwd <the same missing path>`.
+    const result = await runCli(["verify", "--cwd", "/nonexistent/path/xyz"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Project root does not exist: /nonexistent/path/xyz");
+    expect(result.stderr).not.toContain("ENOENT");
+    expect(result.stderr).not.toContain("lstat");
+    expect(result.stderr).not.toContain("Internal error");
+    expect(result.stderr).not.toContain("headless daemon status");
+
+    const json = await runCli(["verify", "--cwd", "/nonexistent/path/xyz", "--json"]);
+    expect(JSON.parse(json.stdout).error.code).toBe("INVALID_REQUEST");
+  });
+
+  test("tui refuses without a terminal instead of dumping Ink's stack trace", async () => {
+    // Ink puts stdin in raw mode; reaching render() without a TTY threw from
+    // inside React and reached the operator as a framework trace naming
+    // node_modules. Test processes have no TTY, so this exercises the guard.
+    const result = await runCli(["tui"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("interactive terminal");
+    expect(result.stderr).not.toContain("node_modules");
+    expect(result.stderr).not.toContain("Raw mode is not supported");
+    // The remedy must not blame the operating system: this fires on macOS.
+    expect(result.stderr).not.toContain("requires macOS or Linux.");
+
+    // tui renders a terminal UI and prints no JSON, so it does not accept
+    // --json — but the refusal still arrives as a JSON envelope, because error
+    // rendering reads raw argv rather than the command's declared flags.
+    const json = await runCli(["tui", "--json"]);
+    const parsed = JSON.parse(json.stdout);
+    expect(parsed.error.code).toBe("INVALID_REQUEST");
+    expect(parsed.error.message).toBe("Unknown flag for tui: --json.");
+  });
+});
 
 async function runCli(args: string[], extraEnv: Record<string, string> = {}) {
   const process = Bun.spawn(["bun", cliPath, ...args], {

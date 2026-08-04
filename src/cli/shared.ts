@@ -6,6 +6,7 @@ import type { RunResult } from "../contracts/run";
 import { redactAndTruncate } from "../runtime/redaction";
 import { HeadlessError, toStructuredError } from "../runtime/headless-error";
 import { VALUE_FLAGS } from "./command-specs";
+import { CliUsageError, flagArgsBeforeSeparator, readFlagValue } from "./argv";
 import { parseExecProfile } from "./profile";
 import { printRemedy } from "./remedy";
 
@@ -14,7 +15,8 @@ export const DEFAULT_RUN_TIMEOUT_MS = 180_000;
 export const MAX_EVENT_LIMIT = 1_000;
 export const EVENT_POLL_INTERVAL_MS = 250;
 
-export class CliUsageError extends Error {}
+// The argv grammar owns these; re-exported so every command import is unchanged.
+export { CliUsageError, flagArgsBeforeSeparator };
 
 let activeRun: { client: HeadlessDaemonClient; jobId: string } | null = null;
 let activeDaemon: { stop(): Promise<void> } | null = null;
@@ -28,17 +30,10 @@ export function signalWasReceived() {
   return receivedSignal;
 }
 
-export function flagArgsBeforeSeparator(argv: string[]) {
-  const index = argv.indexOf("--");
-  return index === -1 ? argv : argv.slice(0, index);
-}
-
 export function getArg(argv: string[], name: string) {
   const index = argv.indexOf(name);
   if (index < 0) return undefined;
-  const value = argv[index + 1];
-  if (value === undefined || value.startsWith("-")) throw new CliUsageError(`Missing value for ${name}.`);
-  return value;
+  return readFlagValue(argv, name, index);
 }
 
 export function requiredArg(argv: string[], name: string) {
@@ -51,8 +46,12 @@ export function getRepeatedArgs(argv: string[], name: string) {
   const values: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] !== name) continue;
-    const value = argv[index + 1];
-    if (!value || value.startsWith("-")) throw new CliUsageError(`Missing value for ${name}.`);
+    const value = readFlagValue(argv, name, index);
+    // getArg tolerates "" because callers spell their default as
+    // `getArg(...) || fallback` and the error renderer reads --cwd. A repeated
+    // flag has no such fallback — every value is a required identifier — so it
+    // keeps its stricter contract instead of letting "" reach the daemon.
+    if (value === "") throw new CliUsageError(`Missing value for ${name}.`);
     values.push(value);
     index += 1;
   }

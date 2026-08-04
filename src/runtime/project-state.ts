@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { HeadlessError } from "./headless-error";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { supportedPlatform, UnsupportedPlatformError } from "./validation";
@@ -62,12 +63,22 @@ export type ProjectStatePaths = {
 
 export function canonicalizeProjectRoot(projectRoot: string) {
   if (!projectRoot.trim()) {
-    throw new Error("Project root must not be empty.");
+    throw new HeadlessError("INVALID_REQUEST", "Project root must not be empty. Pass --cwd with a directory path.");
   }
 
-  const canonicalProjectRoot = realpathSync(resolve(projectRoot));
+  // realpathSync surfaces a raw `ENOENT: no such file or directory, lstat …`
+  // to the operator, which then gets classified INTERNAL_ERROR and remedied
+  // with `headless daemon status --cwd <the same bad path>`. A --cwd that does
+  // not resolve is operator input, so name it as such.
+  let canonicalProjectRoot: string;
+  try {
+    canonicalProjectRoot = realpathSync(resolve(projectRoot));
+  } catch (error) {
+    const reason = (error as NodeJS.ErrnoException).code === "EACCES" ? "is not readable" : "does not exist";
+    throw new HeadlessError("INVALID_REQUEST", `Project root ${reason}: ${projectRoot}`, { cause: error });
+  }
   if (!statSync(canonicalProjectRoot).isDirectory()) {
-    throw new Error(`Project root is not a directory: ${projectRoot}`);
+    throw new HeadlessError("INVALID_REQUEST", `Project root is not a directory: ${projectRoot}`);
   }
   return canonicalProjectRoot;
 }

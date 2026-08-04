@@ -1,3 +1,5 @@
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
 import {
   DEFAULT_RUN_TIMEOUT_MS,
   CliUsageError,
@@ -15,13 +17,16 @@ import {
 } from "../shared";
 
 export async function runLaunchCommand(args: string[]) {
-  const target = args[1];
+  const { action: target, argvWithoutAction } = resolveCommandAction(args);
   if (target === "opencode-serve") {
-    throw new CliUsageError("`headless launch opencode-serve` was removed in v0.2 because it bypasses daemon containment.");
+    throw new CliUsageError("`headless experimental launch opencode-serve` was removed in v0.2 because it bypasses daemon containment.");
   }
-  const backend = parseBackend(target || "");
+  // Fail on the missing backend before any daemon starts; parseBackend("") used
+  // to report an invalid --backend for an argument the operator never passed.
+  if (!target) throw new CliUsageError(renderCommandUsage("launch"));
+  const backend = parseBackend(target);
   const flags = flagArgsBeforeSeparator(args);
-  const prompt = getPrompt(["launch", ...args.slice(2)]) || "Respond with ready.";
+  const prompt = getPrompt(argvWithoutAction) || "Respond with ready.";
   const timeoutMs = parseIntegerArg(flags, "--timeout-ms") ?? DEFAULT_RUN_TIMEOUT_MS;
   const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
   const result = await submitAndWait(client, {

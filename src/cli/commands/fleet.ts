@@ -1,6 +1,8 @@
 import type { DaemonMethod } from "../../daemon/protocol";
 import type { HeadlessDaemonClient } from "../../daemon/client";
 import { getBackendDefinition } from "../../backends/registry";
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
 import {
   CliUsageError,
   daemonClient,
@@ -24,14 +26,14 @@ export async function parseFleetCommand(
   args: string[],
   existingProfile?: Record<string, unknown>,
 ): Promise<FleetCommandCall> {
-  const namespace = args[1] ?? "health";
-  const action = args[2];
+  const { action: namespace, operands } = resolveCommandAction(args, "health");
+  const action = operands[0];
   const flags = flagArgsBeforeSeparator(args);
-  if (namespace === "health" && (action === undefined || action.startsWith("-"))) {
+  if (namespace === "health" && action === undefined) {
     return { method: "fleet.health", params: optionalProfileId(flags) };
   }
   if (namespace !== "profile" || !action || !["create", "upsert", "get", "list", "remove"].includes(action)) {
-    throw new CliUsageError("Usage: headless fleet <health|profile create|upsert|get|list|remove> [options]");
+    throw new CliUsageError(renderCommandUsage("fleet"));
   }
   if (action === "list") return { method: "fleet.profile.list", params: {} };
   if (action === "get" || action === "remove") {
@@ -121,7 +123,8 @@ async function activeProfileForPartialUpdate(client: HeadlessDaemonClient, flags
 }
 
 function isProfileUpsert(args: string[]) {
-  return args[1] === "profile" && args[2] === "upsert";
+  const { action, operands } = resolveCommandAction(args, "health");
+  return action === "profile" && operands[0] === "upsert";
 }
 
 function createInlineProfile(flags: string[]): FleetCommandCall {
