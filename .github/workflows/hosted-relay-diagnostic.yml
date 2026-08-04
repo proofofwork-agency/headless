@@ -86,9 +86,14 @@ jobs:
           ( while true; do
               echo "--- $(date -u +%H:%M:%S) ---"
               ps -eo pid,ppid,etimes,stat,comm,args | grep -E 'bwrap|bun|headless' | grep -v grep || true
-              # Relay sockets, since the fault is a child holding one open past
-              # its response. The header claimed this before the sampler did it.
-              ss -xap 2>/dev/null | grep -E 'headless|run-tool|broker' || true
+              # Relay sockets AND the in-namespace loopback the supervisor
+              # forwards from. The first run filtered on 'headless|run-tool|broker'
+              # and therefore missed the run-tool socket entirely — it is named
+              # "<pid>-<id>.tool.sock" under /tmp/hd*, matching none of those. The
+              # decisive question is whether that socket is ever listening and
+              # connected, so match the real names and include TCP.
+              ss -xap 2>/dev/null | grep -E '\.sock|headless' || true
+              ss -tanp 2>/dev/null | grep -E '38471|LISTEN' | head -20 || true
               sleep 2
             done ) > process-tree.log 2>&1 &
           echo $! > sampler.pid
