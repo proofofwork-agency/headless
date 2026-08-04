@@ -132,7 +132,8 @@ const GATES: GateCoverage[] = [
       + "previously an early `return` inside the test body, which reports as a PASS with zero assertions — "
       + "invisible to this registry and to anyone reading the output. Declaring it as a gate makes the gap "
       + "countable; the strict-policy construction it guards is still covered by the non-installed "
-      + "buildCodexCommand cases on both legs.",
+      + "buildCodexCommand cases on both legs. EXECUTED 2026-08-04 on an operator machine with "
+      + "codex-cli 0.146.0 (>= the 0.144.1 floor): passes with 3 expect() calls.",
   },
   { gate: 'skipIf(process.platform !== "linux")', files: ["tests/broker.test.ts"], legs: ["ubuntu"] },
   {
