@@ -37,6 +37,7 @@ describe("adapter environments never carry ledger key material", () => {
       hmacKeyId: undefined,
       hmacKeyring: undefined,
       activeHmacKeyId: undefined,
+      hmacKeyOrigins: {},
     });
     // Non-secret operational vars still pass, so the rule is not over-broad.
     expect(env.PATH).toBe("/usr/bin:/bin");

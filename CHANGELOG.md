@@ -4,12 +4,15 @@
 
 ### Breaking
 
-- **Ledger HMAC keys must be at least 32 bytes and pass an entropy floor.** Shorter or low-entropy keys (repeated characters, pure digits, common password shapes) are refused at startup. A human-memorable 16-character secret provides false tamper-evidence, so it is rejected rather than accepted. **Rotate before upgrading**: generate with `openssl rand -base64 32`. The floor is enforced when the ledger is opened, so an existing short key blocks `headless verify` on historical records as well as new writes — rotate first, or keep the prior binary available to read an old chain.
+- **Ledger HMAC keys used to sign new records must be at least 32 bytes and pass an entropy floor.** Shorter or low-entropy keys (repeated characters, pure digits, common password shapes) are refused at the signing boundary: `append` and ledger tail repair fail closed, naming the key id and the variable that supplied it. A human-memorable 16-character secret provides false tamper-evidence, so it is rejected rather than accepted. **Rotate**: generate with `openssl rand -base64 32`, keep the old key in `HEADLESS_LEDGER_KEYS` so historical records stay verifiable, and point `HEADLESS_LEDGER_ACTIVE_KEY_ID` at the new one.
 - **Unix control sockets are created `0o700`, not `0o600`.** They are bound under `umask 0o077` instead of being chmod-ed after `listen`, which closes the window where the socket existed at the ambient umask. Owner-only either way; only the observed mode changed.
 - **The whole `HEADLESS_LEDGER_*` family is denied to worker environments**, by prefix rather than by name. A worker that could read the keyring could forge ledger entries, which is the property the HMAC exists to provide.
 
 ### Fixed
 
+- The ledger key floor no longer blocks reading an existing chain. It was enforced while parsing `HEADLESS_LEDGER_KEY` / `HEADLESS_LEDGER_KEYS`, so an operator holding a 16–31 byte key could not start a daemon at all and `headless verify` failed with `Timed out waiting for the detached Headless daemon` instead of anything about keys. Verification now proceeds and reports the weak key in the verdict (`weakKeys`, printed by `headless verify`); only signing is refused. A weak key kept solely for verifying history no longer blocks a strong active key, which is what makes the documented rotation possible.
+- A weak singular `HEADLESS_LEDGER_KEY` no longer reports `HEADLESS_LEDGER_KEYS` as the offending variable. The refusal names the key id and the variable that actually supplied it.
+- Ledger key failures no longer embed the first four characters of the key. That preview reached the `headless verify` verdict, which is printed and routinely pasted into bug reports; keys are now identified only by id.
 - Restored Unix-socket bind exclusivity. The bind helper cleared the socket path before every bind, so `listen()` could never raise `EADDRINUSE` — the kernel backstop that made each caller's check-then-bind safe. Stale-socket policy belongs to the caller, and every caller already implements it.
 - Concurrent socket binds no longer corrupt the process umask. The window is reference-counted and await-spanning binds are serialized, so the baseline is restored exactly once.
 - A Bun listener refused by post-bind ownership verification is now disposed instead of leaked; the caller never receives that handle and so cannot close it.

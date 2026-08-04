@@ -276,11 +276,17 @@ export class RunExecutionService {
                 // baseUrl remains for env BASE_URL + in-netns relay port selection;
                 // on Unix-socket-only brokers it may be a synthetic loopback URL
                 // that is not host-reachable (host TCP is gated off by default).
+                // hostLoopbackListener reports that fact from the one component
+                // that knows it, so the runner can refuse to hand a worker a
+                // bearer token addressed to a port with no owner. Both the
+                // directly issued and the linked/delegated lease carry the same
+                // broker edges, so one instance-level fact covers both.
                 broker: brokerLease ? {
                   provider: brokerLease.provider,
                   baseUrl: brokerLease.baseUrl,
                   token: brokerLease.token,
                   unixSocket: this.options.broker.unixSocketPath ?? brokerLease.unixSocket,
+                  hostLoopbackListener: this.options.broker.tcpListening,
                 } : undefined,
                 runTool: runToolEndpoint ? {
                   socketPath: runToolEndpoint.socketPath,

@@ -247,6 +247,19 @@ export class HeadlessDaemon {
       recoverLinkedProviderHolds({ budgets: this.budgets, broker: this.broker, jobs: this.jobs });
       this.reconcileManualLinkedRecoveries();
       this.broker.start();
+      if (!this.broker.tcpListening && process.platform !== "linux") {
+        // Only Linux contained workers can reach a Unix-socket-only broker (the
+        // in-namespace relay binds the synthetic port). Elsewhere every broker
+        // run will now be refused rather than handed an unowned endpoint, so
+        // say why once at startup instead of only per run.
+        recordRuntimeDiagnostic(
+          "state",
+          "broker.loopback-listener",
+          `The provider broker is Unix-socket-only on ${process.platform}, where no in-namespace relay exists. `
+            + "Broker-authenticated runs will be refused; clear HEADLESS_BROKER_ALLOW_LOOPBACK_TCP=0 to restore them.",
+          "warning",
+        );
+      }
       // The socket elects the local daemon; durable worktree leases additionally
       // fail closed on a live or foreign-host owner before recovery/admission.
       this.worktreeLeases.reconcile();

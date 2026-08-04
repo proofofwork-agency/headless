@@ -72,7 +72,9 @@ An unkeyed chain detects accidental or unaudited modification but can be recompu
 
 ### Ledger HMAC key generation
 
-HMAC ledger integrity is opt-in. When configured, Headless fails closed at startup if any key is shorter than 32 bytes or is obviously low-entropy (repeated characters, pure digits, common password patterns). Human-memorable 16-character secrets and similar passwords are insufficient and will be rejected — a weak key provides false tamper-evidence.
+HMAC ledger integrity is opt-in. A key shorter than 32 bytes or obviously low-entropy (repeated characters, pure digits, common password patterns) provides false tamper-evidence, so Headless refuses to **sign new records** with it: `append` and ledger tail repair fail closed, naming the key id and the variable that supplied it. Human-memorable 16-character secrets and similar passwords are insufficient.
+
+The floor is scoped to writing, not to opening or reading a ledger. A weak key still **verifies** an existing chain, and `headless verify` reports the weakness alongside the verdict (`weakKeys`) rather than withholding the operator's own history — refusing to read it would not raise the cost of forgery. To rotate, keep the old key in `HEADLESS_LEDGER_KEYS` so historical records stay verifiable and point `HEADLESS_LEDGER_ACTIVE_KEY_ID` at a new key that meets the floor.
 
 Generate a key with:
 

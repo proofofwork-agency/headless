@@ -19,7 +19,7 @@ import { canonicalReceiptJson, receiptSectionDigests, receiptSelfDigest } from "
 
 type VerificationKeys = Pick<
   LedgerV2Options,
-  "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId"
+  "hmacKey" | "hmacKeyId" | "hmacKeyring" | "activeHmacKeyId" | "hmacKeyOrigins"
 >;
 
 export type ReceiptSelfDigestVerdict = {

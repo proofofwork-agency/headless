@@ -348,7 +348,13 @@ export class ProviderBroker {
     if (this.unixSocketPath) rmSync(this.unixSocketPath, { force: true });
   }
 
-  /** True when a host-side 127.0.0.1 TCP listener is active. */
+  /**
+   * True when a host-side 127.0.0.1 TCP listener is active.
+   *
+   * Callers that hand a lease to a worker must propagate this, because it is the
+   * only place that knows whether `endpoint` names a real host listener or the
+   * synthetic relay port (see BrokerWorkerAccess.hostLoopbackListener).
+   */
   get tcpListening(): boolean {
     return this.server !== null;
   }
@@ -357,6 +363,9 @@ export class ProviderBroker {
     if (this.server) return `http://127.0.0.1:${this.server.port}`;
     // Unix-socket-only mode: baseUrl stays a loopback HTTP URL for worker env /
     // Linux relay port selection. Host TCP is not bound; dial via unixSocket.
+    // Nothing on the host owns this port, so it is inert outside a Linux
+    // contained worker whose in-namespace relay binds it; the runner refuses to
+    // hand it to any other worker (assertBrokerEndpointIsServed).
     if (this.unixServer) return `http://127.0.0.1:${BROKER_UNIX_ONLY_RELAY_PORT}`;
     throw new Error("Provider broker is not running.");
   }
