@@ -6,8 +6,6 @@ import { join } from "node:path";
 import { HeadlessError } from "../src/runtime/headless-error";
 import {
   assertSecureSocket,
-  captureSocketIdentity,
-  removeOwnedSocket,
   secureBunUnixServe,
   secureUnixListen,
 } from "../src/runtime/secure-socket";
@@ -326,97 +324,6 @@ describe("secureUnixListen", () => {
       process.getuid = original;
       process.umask(previous);
     }
-  });
-});
-
-/**
- * Every teardown here runs close-then-remove, and both runtimes unlink the bound
- * path inside close() — so the path is already free when the removal runs and a
- * successor may already own it. These tests build that successor state directly
- * instead of racing for it: the cross-process window is real (an idle daemon
- * shutting down while a CLI starts its replacement) but lands in roughly one run
- * in ten, which is a coin flip, not a regression guard.
- */
-describe("removeOwnedSocket", () => {
-  test("reclaims the entry whose identity it recorded", async () => {
-    const dir = tempDir("hl-own-self-");
-    const socketPath = join(dir, "c.sock");
-    const server = trackServer(createServer());
-    await secureUnixListen(server, socketPath);
-    const identity = captureSocketIdentity(socketPath);
-    expect(removeOwnedSocket(socketPath, identity)).toBe(true);
-    expect(existsSync(socketPath)).toBe(false);
-  });
-
-  // The damage step of the close-then-rmSync race, reproduced end to end: an
-  // unconditional rmSync here deletes a live listener and strands its owner.
-  test("leaves a successor that took the path over after close()", async () => {
-    const dir = tempDir("hl-own-succ-");
-    const socketPath = join(dir, "c.sock");
-    const departing = createServer();
-    await secureUnixListen(departing, socketPath);
-    const identity = captureSocketIdentity(socketPath);
-    // close() frees the path, which is exactly what opens the window.
-    await new Promise<void>((resolve) => departing.close(() => resolve()));
-    expect(existsSync(socketPath)).toBe(false);
-
-    const successor = trackServer(createServer((socket) => socket.end("successor")));
-    await secureUnixListen(successor, socketPath);
-    const successorInode = lstatSync(socketPath).ino;
-
-    expect(removeOwnedSocket(socketPath, identity)).toBe(false);
-    expect(lstatSync(socketPath).ino).toBe(successorInode);
-    const reply = await new Promise<string>((resolve, reject) => {
-      const client = createConnection(socketPath);
-      let buf = "";
-      client.setEncoding("utf8");
-      client.on("data", (chunk) => {
-        buf += chunk;
-      });
-      client.on("end", () => resolve(buf));
-      client.on("error", reject);
-    });
-    expect(reply).toBe("successor");
-  });
-
-  test("no-ops on a path that is already gone and without a recorded identity", async () => {
-    const dir = tempDir("hl-own-none-");
-    const socketPath = join(dir, "c.sock");
-    expect(captureSocketIdentity(socketPath)).toBeNull();
-    expect(removeOwnedSocket(socketPath, null)).toBe(false);
-
-    const server = trackServer(createServer());
-    await secureUnixListen(server, socketPath);
-    const identity = captureSocketIdentity(socketPath);
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    // close() already unlinked it, so the follow-up removal has nothing to do.
-    expect(removeOwnedSocket(socketPath, identity)).toBe(false);
-  });
-
-  // Genuinely concurrent: every teardown and every successor bind is in flight
-  // before any of them settles.
-  test("concurrent teardowns never reclaim each other's successors", async () => {
-    const dir = tempDir("hl-own-race-");
-    const paths = Array.from({ length: 6 }, (_unused, index) => join(dir, `c${index}.sock`));
-    const departing = await Promise.all(
-      paths.map(async (socketPath) => {
-        const server = createServer();
-        await secureUnixListen(server, socketPath);
-        return { socketPath, server, identity: captureSocketIdentity(socketPath) };
-      }),
-    );
-
-    const reclaimed = await Promise.all(
-      departing.map(async (owner) => {
-        await new Promise<void>((resolve) => owner.server.close(() => resolve()));
-        const successor = trackServer(createServer());
-        await secureUnixListen(successor, owner.socketPath);
-        return removeOwnedSocket(owner.socketPath, owner.identity);
-      }),
-    );
-
-    expect(reclaimed).toEqual(paths.map(() => false));
-    for (const socketPath of paths) expect(existsSync(socketPath)).toBe(true);
   });
 });
 

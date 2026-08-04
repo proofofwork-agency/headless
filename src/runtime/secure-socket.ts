@@ -1,4 +1,4 @@
-import { lstatSync, rmSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import type { Server } from "node:net";
 import { HeadlessError } from "./headless-error";
 
@@ -55,48 +55,30 @@ export function assertSecureSocket(socketPath: string): void {
   }
 }
 
-/** Which inode a socket path named at a known moment (dev+ino, exact via bigint). */
-export type BoundSocketIdentity = { readonly dev: bigint; readonly ino: bigint };
-
 /**
- * Snapshot the inode a socket path currently names.
+ * Both runtimes unlink a bound path from inside close()/stop(), so a caller has
+ * nothing left to clean up after a teardown and must not try.
  *
- * Null means "nothing is there", which every caller treats as holding no claim
- * on the path — a later removal then stays a no-op instead of a blind delete.
+ * Measured on Bun 1.3.14, macOS and Linux/ext4: after an awaited node:net
+ * close(), a synchronous Bun.serve().stop(true), and a synchronous
+ * Bun.listen().stop(true), the path was already absent — 1,000/1,000 iterations
+ * per runtime on Linux, immediately and after a tick.
+ *
+ * A post-close unlink therefore has no legitimate work available to it: by the
+ * time it runs, anything at that path was bound by somebody else. That is not
+ * hypothetical — the daemon socket path is deterministic per project and the
+ * daemon auto-stops when idle, so a CLI invocation arriving during idle
+ * shutdown starts a replacement daemon whose socket the departing one would
+ * delete, leaving a running but unreachable daemon.
+ *
+ * An earlier attempt guarded the unlink by comparing the path's dev+ino against
+ * the value recorded at bind. That does not work: on ext4 an immediate
+ * successor reused the freed inode number in 20,000/20,000 trials, and adding
+ * ctimeNs did not separate them in 19,825 of those, because the filesystem
+ * clock collides inside the same millisecond. Filesystem identity is not a
+ * correctness primitive here, so there is no cleanup to guard — only one to
+ * delete.
  */
-export function captureSocketIdentity(socketPath: string): BoundSocketIdentity | null {
-  try {
-    const info = lstatSync(socketPath, { bigint: true });
-    return { dev: info.dev, ino: info.ino };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Unlink socketPath only while it still names the inode recorded in `identity`.
- *
- * Both runtimes unlink a bound path from inside close()/stop() — verified on Bun
- * 1.3.14 for node:net and Bun.serve alike — so a teardown's path is already free
- * before its close callback even fires. An unconditional rmSync after that point
- * deletes whatever bound the path in the window instead of the caller's own
- * socket. The daemon socket path is deterministic per project and the daemon
- * auto-stops when idle, so the reachable case needs no attacker: a CLI
- * invocation arriving during idle shutdown starts a replacement daemon that
- * binds and is then unlinked by the departing one, leaving a running but
- * unreachable daemon. The same shape lets a daemon that lost a startup election
- * delete the winner's live socket after its staleness probe came back "dead".
- *
- * Comparing dev+ino keeps a removal scoped to the exact entry the caller proved
- * it owns. Returns true only when this call removed that entry.
- */
-export function removeOwnedSocket(socketPath: string, identity: BoundSocketIdentity | null): boolean {
-  if (!identity) return false;
-  const current = captureSocketIdentity(socketPath);
-  if (!current || current.dev !== identity.dev || current.ino !== identity.ino) return false;
-  rmSync(socketPath, { force: true });
-  return true;
-}
 
 /**
  * process.umask() is process-global, so a naive save/set/restore pair is unsafe

@@ -1,10 +1,11 @@
 import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createConnection, createServer } from "node:net";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { HeadlessError } from "../src/runtime/headless-error";
+import { listRuntimeDiagnostics } from "../src/runtime/diagnostics";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { DAEMON_PROTOCOL_VERSION, MAX_DAEMON_MESSAGE_BYTES } from "../src/daemon/protocol";
 import { connectLeadDaemon, connectOrStartDaemon } from "../src/daemon/connect";
@@ -98,40 +99,6 @@ describe("authenticated project daemon", () => {
     const ping = await client.call<{ projectId: string }>("ping");
     expect(ping.projectId).toBe(winner.state.projectId);
     expect(existsSync(winner.state.socketPath)).toBe(true);
-  });
-
-  // Regression: start() probed the socket for liveness and then unlinked the
-  // path unconditionally. A same-user daemon that finished its own election
-  // during that probe already owns a different entry there, and unlinking it put
-  // two daemons on one project with the EADDRINUSE backstop bypassed. Swapping
-  // one dead entry for another keeps the probe verdict identical, so the entry's
-  // identity is the only thing under test.
-  test("refuses a socket entry that replaced the one its staleness probe examined", async () => {
-    const fixture = createFixture();
-    const state = ensureProjectStateDirectories(getProjectStatePaths(fixture.project, fixture.state));
-    await seedStaleSocket(state.socketPath);
-    const probed = lstatSync(state.socketPath).ino;
-
-    // socketBecomesAvailable retries for ~100 ms before concluding "dead".
-    const swap = setTimeout(() => { void seedStaleSocket(state.socketPath); }, 40);
-    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, principal: "coordinator" });
-    const failure = await daemon.start().then(() => null, (error: unknown) => error);
-    clearTimeout(swap);
-
-    expect(failure).toBeInstanceOf(HeadlessError);
-    expect((failure as HeadlessError).code).toBe("DAEMON_ALREADY_RUNNING");
-    expect((failure as HeadlessError).retryable).toBe(true);
-    // The entry this daemon never proved dead is still there.
-    expect(existsSync(state.socketPath)).toBe(true);
-    expect(lstatSync(state.socketPath).ino).not.toBe(probed);
-
-    // Refusing must not wedge the project: the next start probes the entry that
-    // is actually present, proves that one dead, and wins the socket.
-    const retry = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, principal: "coordinator" });
-    daemons.push(retry);
-    await retry.start();
-    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state });
-    expect((await client.call<{ projectId: string }>("ping")).projectId).toBe(retry.state.projectId);
   });
 
   test("binds one owner-only socket to one canonical project and derives the principal", async () => {
@@ -326,21 +293,23 @@ describe("authenticated project daemon", () => {
       socket.once("connect", () => resolve());
       socket.once("error", reject);
     });
-    const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    const closed = new Promise<string>((resolve) => socket.once("close", () => resolve("closed")));
     // 60ms is far below the 300ms deadline, so an inactivity timer would be
     // reset by every write and never fire. Only an absolute deadline armed at
     // accept can end this. No newline is ever sent: the frame stays incomplete.
-    const startedAt = Date.now();
     const drip = setInterval(() => {
       if (!socket.destroyed) socket.write(".");
     }, 60);
+    // Bounded so a regression reports "the deadline never fired" instead of
+    // hanging to the file's own timeout — an opaque bun timeout here would look
+    // exactly like the product hang this deadline exists to prevent.
+    const watchdog = new Promise<string>((resolve) => setTimeout(() => resolve("still-open"), 3_000));
     try {
-      await closed;
+      expect(await Promise.race([closed, watchdog])).toBe("closed");
     } finally {
       clearInterval(drip);
+      if (!socket.destroyed) socket.destroy();
     }
-    const elapsed = Date.now() - startedAt;
-    expect(elapsed).toBeLessThan(5_000);
 
     // The daemon dropped one client, not its listener.
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
@@ -350,15 +319,21 @@ describe("authenticated project daemon", () => {
   test("does not apply the frame deadline once a complete frame has arrived", async () => {
     const fixture = createFixture();
     const token = "a".repeat(48);
-    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token, requestFrameTimeoutMs: 150 });
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token, requestFrameTimeoutMs: 200 });
     daemons.push(daemon);
     await daemon.start();
 
-    // The deadline is about waiting on the client, not about how long a handler
-    // takes. A completed request must still be answered after it elapses.
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    // The deadline bounds waiting on the CLIENT, not how long a handler runs.
+    // events.wait long-polls for its full timeoutMs with nothing to report, so
+    // the handler deliberately outlives the deadline: if the complete frame did
+    // not clear the timer, the socket is destroyed mid-request at 200ms and this
+    // response never arrives. A connection-time sleep would not test this — the
+    // timer is armed at accept, so the wait has to happen after the frame.
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
-    expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
+    const startedAt = Date.now();
+    const events = await client.call("events.wait", { afterCursor: Number.MAX_SAFE_INTEGER, timeoutMs: 600 });
+    expect(Date.now() - startedAt).toBeGreaterThan(400);
+    expect(events).toBeDefined();
   });
 
   test("records a post-bind transport error instead of crashing the process", async () => {
@@ -373,7 +348,14 @@ describe("authenticated project daemon", () => {
     // fault into an unhandled 'error' throw that takes the daemon down.
     const server = (daemon as unknown as { server: { listenerCount(event: string): number; emit(event: string, error: Error): boolean } }).server;
     expect(server.listenerCount("error")).toBeGreaterThan(0);
+    const before = listRuntimeDiagnostics().at(-1)?.sequence ?? 0;
     expect(() => server.emit("error", new Error("synthetic post-bind transport error"))).not.toThrow();
+
+    // Assert the handler body, not merely that *some* listener exists: a bare
+    // no-op would also stop the throw while losing the fault entirely.
+    const recorded = listRuntimeDiagnostics({ afterSequence: before })
+      .filter((entry) => entry.category === "transport" && entry.scope === "daemon.server");
+    expect(recorded.length).toBe(1);
 
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
     expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
@@ -1771,27 +1753,6 @@ function createFixture() {
   mkdirSync(bin);
   process.env.PATH = `${bin}:${originalPath}`;
   return { root, project, bin, state: { env: { ...process.env, HEADLESS_STATE_HOME: stateHome } } };
-}
-
-/**
- * Publish a dead socket entry at socketPath, the way a crashed daemon leaves one.
- *
- * The live entry is moved aside before its server closes — close() unlinks the
- * path it bound, so the moved entry survives it — and only then renamed into
- * place. socketPath therefore never names a *live* socket even for an instant,
- * which is what keeps the liveness probe's verdict constant across a swap.
- */
-async function seedStaleSocket(socketPath: string) {
-  const donorPath = `${socketPath}.donor`;
-  const holdPath = `${socketPath}.stale`;
-  const donor = createServer();
-  await new Promise<void>((resolve, reject) => {
-    donor.once("error", reject);
-    donor.listen(donorPath, () => resolve());
-  });
-  renameSync(donorPath, holdPath);
-  await new Promise<void>((resolve) => donor.close(() => resolve()));
-  renameSync(holdPath, socketPath);
 }
 
 function rawDaemonExchange(path: string, payload: string, allowReset = false) {

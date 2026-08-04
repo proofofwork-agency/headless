@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
-import { type BoundSocketIdentity, captureSocketIdentity, removeOwnedSocket, secureUnixListen } from "../runtime/secure-socket";
+import { secureUnixListen } from "../runtime/secure-socket";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { ZodError } from "zod";
@@ -208,9 +208,6 @@ export class HeadlessDaemon {
   private ready = false;
   private ownedStateInitialized = false;
   private server: Server | null = null;
-  // Which inode this daemon's own bind put at socketPath, so teardown can prove
-  // it is reclaiming its own entry and not a successor's (see removeOwnedSocket).
-  private socketIdentity: BoundSocketIdentity | null = null;
   private readonly sockets = new Set<Socket>();
   private routeHandlers!: DaemonRouteHandlerMap;
   private readonly idleTimeoutMs: number;
@@ -252,16 +249,18 @@ export class HeadlessDaemon {
     this.ready = false;
     this.jobAdmission?.dispose();
     if (existsSync(this.state.socketPath)) {
-      const abandoned = captureSocketIdentity(this.state.socketPath);
       if (await socketBecomesAvailable(this.state.socketPath)) throw new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`);
-      // Clear only the exact entry the probe proved dead. A same-user daemon that
-      // completed its own election while we were probing has already replaced
-      // that inode with a live socket, and unlinking that one would put two
-      // daemons on one project with the EADDRINUSE backstop bypassed.
-      removeOwnedSocket(this.state.socketPath, abandoned);
+      // KNOWN RACE, not yet closed: a same-user daemon that completes its own
+      // election while we are probing has a live socket here by now, and this
+      // unlink deletes it, bypassing the EADDRINUSE backstop and leaving two
+      // daemons on one project. It needs a prior crash (a stale socket only
+      // exists if a daemon died without cleanup) plus two concurrent starts.
+      // Filesystem identity cannot guard it — ext4 reuses a freed inode number
+      // immediately — so closing it requires serializing probe→unlink→bind
+      // under a crash-released cross-process lock, tracked separately.
+      rmSync(this.state.socketPath, { force: true });
     }
     const server = createServer((socket) => this.accept(socket));
-    let identity: BoundSocketIdentity | null = null;
     try {
       try {
         await secureUnixListen(server, this.state.socketPath);
@@ -273,7 +272,6 @@ export class HeadlessDaemon {
           ? new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`, { retryable: true })
           : error;
       }
-      identity = captureSocketIdentity(this.state.socketPath);
       // secureUnixListen removes its own bind-time 'error' handler once the
       // bind resolves, leaving listenerCount('error') at zero. EventEmitter
       // *throws* an unhandled 'error', so any post-bind transport fault the OS
@@ -312,7 +310,6 @@ export class HeadlessDaemon {
       this.reconcileTasks();
       this.ready = true;
       this.server = server;
-      this.socketIdentity = identity;
       this.writeMetadata(true);
     } catch (error) {
       this.ready = false;
@@ -322,7 +319,6 @@ export class HeadlessDaemon {
         await closed;
         this.sockets.clear();
       });
-      await cleanupWithDiagnostic("daemon.start.socket-remove", () => { removeOwnedSocket(this.state.socketPath, identity); });
       await cleanupWithDiagnostic("daemon.start.run-tools-revoke", () => this.runTools?.revokeAll());
       await cleanupWithDiagnostic("daemon.start.goal-runtime-dispose", () => this.goalRuntime?.dispose());
       await cleanupWithDiagnostic("daemon.start.job-admission-dispose", () => this.jobAdmission?.dispose());
@@ -421,17 +417,14 @@ export class HeadlessDaemon {
     if (this.server) {
       this.ready = false;
       const server = this.server;
-      const identity = this.socketIdentity;
       this.server = null;
-      this.socketIdentity = null;
       const closed = new Promise<void>((resolve) => server.close(() => resolve()));
       for (const socket of this.sockets) socket.destroy();
       await closed;
       this.sockets.clear();
-      // close() already unlinked the path, so by now a replacement daemon may own
-      // it — the deterministic project socket plus idle auto-stop makes that a
-      // plain CLI-arrives-during-shutdown race. Reclaim only our own inode.
-      removeOwnedSocket(this.state.socketPath, identity);
+      // No unlink here: close() already removed the path. A replacement daemon
+      // started by a CLI invocation arriving during idle shutdown may own it by
+      // now, and deleting that would strand a running daemon.
     }
     this.broker?.stop();
     if (this.ownedStateInitialized) {
@@ -2059,7 +2052,6 @@ function localPrincipal() {
   }
 }
 
-/** Zero disables the watchdog; anything else is clamped to a sane bounded window. */
 /**
  * Unlike the idle timeout, this one has no "disabled" value: every accepted
  * socket must carry a deadline, or a single silent client re-opens the hang.
@@ -2072,6 +2064,7 @@ function boundedRequestFrameTimeout(value: number | undefined) {
   return Math.min(MAX_DAEMON_REQUEST_FRAME_TIMEOUT_MS, value);
 }
 
+/** Zero disables the watchdog; anything else is clamped to a sane bounded window. */
 function boundedIdleTimeout(value: number | undefined) {
   if (value === undefined) return 0;
   if (!Number.isSafeInteger(value) || value < 0) {

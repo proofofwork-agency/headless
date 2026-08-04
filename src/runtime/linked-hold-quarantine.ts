@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
 import { userInfo } from "node:os";
 import { basename, join } from "node:path";
@@ -18,7 +18,7 @@ import {
   type ProjectStateOptions,
   type ProjectStatePaths,
 } from "./project-state";
-import { type BoundSocketIdentity, captureSocketIdentity, removeOwnedSocket, secureUnixListen } from "./secure-socket";
+import { secureUnixListen } from "./secure-socket";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const MAX_STORE_BYTES = 32 * 1024 * 1024;
@@ -150,33 +150,28 @@ function inspectLocked(paths: ProjectStatePaths, linkId: string) {
 
 async function withOfflineStateLock<T>(paths: ProjectStatePaths, operation: () => T | Promise<T>) {
   if (existsSync(paths.socketPath)) {
-    const abandoned = captureSocketIdentity(paths.socketPath);
     if (await socketAcceptsConnections(paths.socketPath)) {
       throw new HeadlessError("DAEMON_ALREADY_RUNNING", "Offline linked-hold recovery refuses while a daemon owns the project state.");
     }
     // secureUnixListen never unlinks — EADDRINUSE is the kernel-level backstop
     // that keeps this check-then-bind a single-owner election — so clearing a
-    // socket we just proved dead stays this caller's policy. The path is the
-    // deterministic project socket, so scope the removal to the exact inode the
-    // probe examined: a daemon that started while we probed owns a live socket
-    // there now, and unlinking that would defeat the same backstop.
-    removeOwnedSocket(paths.socketPath, abandoned);
+    // socket we just proved dead stays this caller's policy. This carries the
+    // same unclosed probe→unlink race as HeadlessDaemon.start and needs the
+    // same cross-process election lock; see the note there.
+    rmSync(paths.socketPath, { force: true });
   }
   const server = createServer((socket) => socket.destroy());
-  let identity: BoundSocketIdentity | null = null;
   try {
     // Binds under a restrictive umask so the lock socket is owner-only at
     // creation, then verifies it; a refused socket must still be torn down,
     // hence the server.listening check below rather than a success flag.
     await secureUnixListen(server, paths.socketPath);
-    identity = captureSocketIdentity(paths.socketPath);
     return await operation();
   } finally {
     if (server.listening) {
+      // close() releases the path itself; a follow-up unlink could only delete
+      // a socket someone else bound in the window.
       await closeServer(server);
-      // close() already released the path; reclaim only our own lock inode so a
-      // daemon that bound in that window keeps its socket.
-      removeOwnedSocket(paths.socketPath, identity);
     }
   }
 }
