@@ -436,6 +436,21 @@ describe("CLI usage errors are classified as operator input, not runtime faults"
     expect(parsed.error.code).toBe("INVALID_REQUEST");
     expect(parsed.error.message).toBe("Unknown flag for tui: --json.");
   });
+
+  test("gate validation failures remain one parseable JSON document", async () => {
+    const project = trackDaemonProjectRoot(mkdtempSync(join(tmpdir(), "headless-cli-gate-project-")));
+    const state = mkdtempSync(join(tmpdir(), "headless-cli-gate-state-"));
+    const result = await runCli(
+      ["experimental", "gate", "--check", "not-configured", "--cwd", project, "--json"],
+      { HEADLESS_STATE_HOME: state },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).not.toContain("Running daemon-owned release gate checks");
+    expect(JSON.parse(result.stdout).error).toMatchObject({
+      code: "INVALID_REQUEST",
+      message: "Unknown configured gate check: not-configured",
+    });
+  });
 });
 
 async function runCli(args: string[], extraEnv: Record<string, string> = {}) {

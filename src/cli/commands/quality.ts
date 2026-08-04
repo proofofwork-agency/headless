@@ -21,7 +21,6 @@ export async function runGateCommand(args: string[]) {
   const timeoutMs = parseIntegerArg(flags, "--timeout-ms") ?? 120_000;
   const checks = getRepeatedArgs(flags, "--check");
   const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
-  console.log("Running daemon-owned release gate checks...");
   const report = await client.call<{ ok: boolean }>("gate.run", {
     checks: checks.length ? checks : undefined,
     timeoutMs,
