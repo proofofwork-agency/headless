@@ -22,22 +22,27 @@ That produces the fixed canonical credential file `~/.codex/auth.json`. Headless
 
 ### Grant consent and confirm readiness
 
-Native login requires project trust plus explicit acknowledgement that native provider egress is unrestricted:
+Native login requires project trust plus explicit acknowledgement that native provider egress is unrestricted. Optional one-shot: `headless setup --yes --allow-native-direct-unrestricted --cwd "$PROJECT"` (also initializes external state and recommends a backend).
 
 ```bash
 PROJECT="/absolute/path/to/your/project"
 headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
+headless doctor --json --cwd "$PROJECT"
 headless experimental fleet health --cwd "$PROJECT"
 ```
 
-Fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If it does not, read the mode-specific credential, capsule, or trust reason before changing authentication — see [Understand "login required"](../troubleshooting/login-required.md).
+`doctor --json` reports structured readiness; fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If it does not, read the mode-specific credential, capsule, or trust reason before changing authentication — see [Understand "login required"](../troubleshooting/login-required.md).
 
 ## How to run it
 
-One bounded, read-only contained run on your subscription:
+One bounded, read-only contained run on your subscription — prefer a profile so the common flag set is not hand-assembled:
 
 ```bash
-headless exec --cwd "$PROJECT" --backend codex --auth-mode native-login --json -- "Inspect only."
+headless exec --cwd "$PROJECT" \
+  --backend codex \
+  --auth-mode native-login \
+  --profile read-only-native \
+  --json -- "Inspect only."
 ```
 
 - `--backend codex-cli` is an accepted alias.

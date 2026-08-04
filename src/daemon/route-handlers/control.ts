@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { BudgetSchema, GrantSchema, type Job } from "../../contracts/durable";
+import { brokerEnvReadiness } from "../../runtime/broker-env";
 import { HeadlessError } from "../../runtime/headless-error";
 import type { DaemonFamilyHandlerRegistrations } from "../route-dispatcher";
 import type { DaemonRouteContext } from "../route-context";
@@ -38,6 +39,7 @@ export function controlRouteHandlers(context: DaemonRouteContext): ControlFamili
           extensionAdapters: extensions.adapters,
           extensionProviders: extensions.providers,
           extensionPricing: extensions.pricing,
+          brokerEnv: brokerEnvReadiness(),
         };
       },
     },

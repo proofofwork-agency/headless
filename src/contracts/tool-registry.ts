@@ -218,6 +218,59 @@ export function headlessToolDefinition<Name extends HeadlessToolName>(name: Name
   return definition;
 }
 
+/**
+ * Lead-core MCP/plugin advertisement. Default is `core` so a foreground lead
+ * is not buried under 28 orchestration tools. Set HEADLESS_MCP_TOOLSET=full
+ * for the complete registry. Core is a subset only — never elevates daemon scopes.
+ */
+export const HEADLESS_MCP_TOOLSET_ENV = "HEADLESS_MCP_TOOLSET";
+export type HeadlessMcpToolset = "core" | "full";
+
+/** Hard-capped lead-facing core surface (must stay ≤ 10 and support round trips). */
+export const CORE_MCP_TOOL_NAMES = Object.freeze([
+  "headless_run",
+  "headless_deliberate",
+  "headless_project_trust",
+  "headless_read_context",
+  "headless_append_note",
+  "headless_task_state",
+  "headless_propose_final",
+  "send_message",
+  "headless_get_messages",
+  "headless_get_cooperation_instructions",
+] as const satisfies readonly HeadlessToolName[]);
+
+export const CORE_MCP_TOOL_NAME_SET = new Set<string>(CORE_MCP_TOOL_NAMES);
+
+export function resolveMcpToolset(value: string | undefined = process.env[HEADLESS_MCP_TOOLSET_ENV]): HeadlessMcpToolset {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "core") return "core";
+  if (normalized === "full") return "full";
+  throw new Error(`${HEADLESS_MCP_TOOLSET_ENV} must be "core" or "full" (got ${JSON.stringify(value)}).`);
+}
+
+export function isCoreMcpToolName(name: string) {
+  return CORE_MCP_TOOL_NAME_SET.has(name);
+}
+
+export function filterToolsByMcpToolset<T extends { name: string }>(
+  tools: readonly T[],
+  toolset: HeadlessMcpToolset = resolveMcpToolset(),
+): T[] {
+  if (toolset === "full") return [...tools];
+  return tools.filter((tool) => isCoreMcpToolName(tool.name));
+}
+
+export function assertMcpToolAllowed(
+  name: string,
+  toolset: HeadlessMcpToolset = resolveMcpToolset(),
+) {
+  if (toolset === "full" || isCoreMcpToolName(name)) return;
+  throw new Error(
+    `Tool ${name} is outside the lead-core MCP toolset. Set ${HEADLESS_MCP_TOOLSET_ENV}=full to enable the full registry.`,
+  );
+}
+
 function advertisedSchema(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Headless tool input schema must be an object.");
   return Object.fromEntries(Object.entries(value as Record<string, unknown>)

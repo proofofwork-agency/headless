@@ -54,10 +54,11 @@ describe("v0.2 CLI contracts", () => {
     const help = renderHelp();
     const experimentalHelp = renderHelp(true);
     for (const spec of COMMAND_SPECS) if ("valueFlags" in spec) for (const flag of spec.valueFlags) expect(VALUE_FLAGS.has(flag)).toBe(true);
-    for (const command of ["exec", "lead", "daemon", "project", "init", "status", "doctor", "mcp", "tui", "verify"]) {
+    for (const command of ["exec", "lead", "daemon", "project", "init", "setup", "status", "doctor", "mcp", "tui", "verify"]) {
       const spec = COMMAND_SPECS.find((candidate) => candidate.name === command);
       expect(spec && "help" in spec ? help : "").toContain(`  ${spec && "help" in spec ? spec.help : ""}`);
     }
+    expect(help).toContain("Golden path:");
     expect(help).not.toContain("workflow <");
     expect(experimentalHelp).toContain("workflow <");
     for (const spec of COMMAND_SPECS) if ("help" in spec) expect(experimentalHelp).toContain(spec.help);

@@ -79,9 +79,21 @@ For the exact operator surface, use the generated [command reference](https://gi
 
 ## Startup and crash reconciliation
 
-Durability is not just serialization. After binding the socket, startup reconstructs authority in a deliberate order: it restores manual linked-hold decisions, starts the broker, reconciles worktree leases and candidate integration journals, recovers interrupted jobs, repairs terminal run events, rebuilds missing receipts from their write-ahead journal, completes terminal persistent sessions and skill invocations, and recovers task and orchestration projections. Ambiguous budget, worktree, integration, or linked-hold state fails closed instead of returning authority that may have been spent.
+Durability is not just serialization. After binding the socket, startup reconstructs authority in a deliberate order:
 
-Receipt recovery is deliberately non-fatal to daemon availability: one malformed receipt marker is diagnosed and left for repair while unrelated state becomes ready. By contrast, an ambiguous primary-checkout integration journal can block readiness because continuing could mutate the wrong Git state.
+1. Restore manual linked-hold decisions and reconcile cross-provider hold journals.
+2. Start the provider broker.
+3. Reconcile worktree leases and candidate integration journals.
+4. Recover interrupted jobs and repair terminal run-event projections.
+5. Rebuild missing receipts from the receipt write-ahead journal.
+6. Complete terminal persistent sessions and skill invocations.
+7. Recover tasks and orchestration projections (workflows, councils, goals, loops).
+
+Ambiguous budget, worktree, integration, or linked-hold state fails closed (`recovery_required` and related) instead of returning authority that may have been spent. Non-terminal workflows and loops are re-launched only after that fail-closed core is ready.
+
+Receipt recovery is deliberately non-fatal to daemon availability: one malformed receipt marker is diagnosed and left as an explicit non-anchor artifact while unrelated state becomes ready. By contrast, an ambiguous primary-checkout integration journal can block readiness because continuing could mutate the wrong Git state.
+
+Sessions prefer provider-native resume when fingerprints still match, with a bounded redacted replay fallback when they do not — see [Persistent sessions](./sessions.md). For gate-driven repair loops, restartable DAGs, and the full recovery story operators use day to day, see [Repair and recovery](./repair-and-recovery.md).
 
 ## Build and restart boundary
 
@@ -102,3 +114,4 @@ Expected: `stop` terminates the authenticated socket owner. The next daemon-back
 - [Persistent sessions](./sessions.md) — multi-turn state and native resume.
 - [Portable skills](./skills.md) — immutable instruction bundles with durable invocation evidence.
 - [Leads and the fleet](./leads-and-fleet.md) — the visible lead and contained servants.
+- [Repair and recovery](./repair-and-recovery.md) — repair loops, workflow DAGs, idle autonomy, and crash recovery.

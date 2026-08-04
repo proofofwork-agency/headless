@@ -106,11 +106,18 @@ describe("authenticated project daemon", () => {
     await daemon.start();
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token: "a".repeat(48) });
 
-    const ping = await client.call<{ projectId: string; projectRoot: string; principal: string }>("ping");
+    const ping = await client.call<{
+      projectId: string;
+      projectRoot: string;
+      principal: string;
+      brokerEnv: Array<{ variable: string; present: boolean }>;
+    }>("ping");
 
     expect(ping.projectRoot).toBe(daemon.state.canonicalProjectRoot);
     expect(ping.projectId).toBe(daemon.state.projectId);
     expect(ping.principal).toBe("daemon-owner");
+    expect(ping.brokerEnv.map((entry) => entry.variable)).toContain("OPENAI_API_KEY");
+    expect(ping.brokerEnv.every((entry) => Object.keys(entry).sort().join(",") === "present,variable")).toBe(true);
     expect(statSync(daemon.state.socketPath).mode & 0o777).toBe(0o600);
     expect(statSync(daemon.state.daemonMetadataPath).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(daemon.state.daemonMetadataPath, "utf8")).running).toBe(true);

@@ -16,6 +16,13 @@ Follow the spirit of OpenCode's AGENTS.md (cloned in `opencode/AGENTS.md`) and t
 - First make `headless exec` rock-solid for opencode + parity for claude/codex.
 - Then layer superpowers, fleets, workflows.
 
+## Product Gate P (scope freeze)
+- Product quality oracle: `docs/product-gate.md`, OST: `docs/product-ost.md` (orthogonal UX oracle; does not authorize npm publish).
+- Security/release gates A/B/C remain in `docs/plan.md`. Current tree is unpublished private beta (`0.2.0-beta.6`).
+- **Do not add stable public CLI commands** without Product Gate owner acknowledgement and an outcome link in those docs. New work defaults to `headless experimental` / experimental namespaces.
+- Prefer golden-path improvements (`setup`, profiles, remedies, TUI next-actions) over new orchestration surfaces until Product Gate P is green.
+- Run `bun scripts/product-gate.ts` after UX/CLI surface changes. Kernel `bun run check` remains mandatory.
+
 See `docs/analysis-opencode.md`, `docs/analysis-contextrelay-reuse.md`, and the approved plan in the session dir.
 
 <!-- contextrelay:start -->

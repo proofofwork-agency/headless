@@ -6,7 +6,7 @@ sidebar_position: 1
 
 # Installation
 
-Headless is an unpublished private beta (`0.2.0-beta.5`). The packages are private and not on npm, so you build from source.
+Headless is an unpublished private beta (`0.2.0-beta.6`). The packages are private and not on npm, so you build from source.
 
 ## Requirements
 
@@ -44,9 +44,10 @@ The rest of this documentation assumes `headless` is on `PATH`; substitute `./di
 
 ```bash
 headless doctor
+headless doctor --json
 ```
 
-`doctor` shows the runtime, backend inventory, daemon state, and containment defaults. Run it before anything else: it tells you whether required containment is available on this machine and which coder CLIs Headless can see.
+`doctor` shows the runtime, backend inventory, daemon state, containment defaults, and project readiness (trust, native consent, recommended backend). Run it before anything else: it tells you whether required containment is available on this machine and which coder CLIs Headless can see. Use `--json` when you want machine-readable readiness for scripts or CI.
 
 ## Install and sign in the coder CLIs
 
@@ -67,4 +68,4 @@ Native login additionally requires per-project consent (`headless project trust 
 
 ## Next step
 
-Continue to the [quickstart](./quickstart.md): initialize a project, run your first contained job, and verify its execution receipt.
+Run `headless setup` in a disposable project, then follow the [quickstart](./quickstart.md): grant native trust, execute with `--profile read-only-native`, and verify the ledger.

@@ -1,16 +1,27 @@
 import type { Job } from "../../contracts/durable";
+import type { BrokerEnvReadiness } from "../../runtime/broker-env";
 import {
   daemonClient,
   ensureSupportedPlatform,
   flagArgsBeforeSeparator,
   getArg,
+  printJson,
+  shellCwdArg,
 } from "../shared";
+import { EXEC_PROFILES, profileChoices } from "../profile";
+import {
+  BACKEND_INVENTORY,
+  buildDoctorReport,
+  inventoryBackends,
+  printDoctorHuman,
+} from "../readiness";
 import { normalizeMcpHost, runMcpInstall } from "./mcp";
 
 export type InitCommandDependencies = {
   client?: typeof daemonClient;
   installMcp?: typeof runMcpInstall;
   log?: (message: string) => void;
+  which?: (command: string) => string | null;
 };
 
 export async function runTuiCommand(args: string[]) {
@@ -40,24 +51,109 @@ export async function runInitCommand(args: string[], dependencies: InitCommandDe
   }
 }
 
+/**
+ * Golden-path wizard: init external state, inventory CLIs, print the exact
+ * next commands. Does not auto-grant native trust unless the operator passes
+ * the same intentional-friction flags used by `project trust grant`.
+ */
+export async function runSetupCommand(args: string[], dependencies: InitCommandDependencies = {}) {
+  const flags = flagArgsBeforeSeparator(args);
+  const cwd = getArg(flags, "--cwd") || process.cwd();
+  const which = dependencies.which ?? ((name: string) => Bun.which(name));
+  const log = dependencies.log ?? console.log;
+  const yes = flags.includes("--yes");
+  const grantNative = flags.includes("--allow-native-direct-unrestricted");
+  const lead = getArg(flags, "--lead");
+
+  await runInitCommand(args, dependencies);
+
+  const backends = inventoryBackends({ which });
+  const found = backends.filter((backend) => backend.onPath);
+  const usable = backends.filter((backend) => backend.onPath && backend.nativeCapsulePresent);
+  const recommended = usable[0]?.id ?? found[0]?.id ?? "opencode";
+  log("");
+  log("Backend inventory:");
+  for (const backend of backends) {
+    const path = backend.onPath ? "found" : "not on PATH";
+    const capsule = backend.nativeCapsulePresent ? "capsule ok" : "capsule missing";
+    log(`  ${backend.id}: ${path} · ${capsule}`);
+    if (backend.remedy) log(`    Next: ${backend.remedy}`);
+  }
+  if (found.length === 0) {
+    log("No supported coder CLIs found. Install codex, opencode, claude, or grok, then re-run setup.");
+  } else {
+    log(`Recommended backend: ${recommended}`);
+  }
+
+  if (grantNative) {
+    const client = await (dependencies.client ?? daemonClient)(cwd, flags);
+    await client.call("project.trust.grant", {
+      nativeLoginAllowed: true,
+      nativeDirectUnrestrictedAcknowledged: true,
+      bypassAllowed: flags.includes("--allow-bypass"),
+    });
+    log("Granted project trust with native unrestricted-egress acknowledgement.");
+  }
+
+  const cwdArg = shellCwdArg(cwd);
+  log("");
+  log("Golden path (≤ 4 decisions after CLIs are installed):");
+  if (!grantNative) {
+    log(`  1) headless project trust grant --allow-native-direct-unrestricted --cwd ${cwdArg}`);
+    log("     (intentional friction: acknowledges unrestricted provider egress for native login)");
+  }
+  log(`  ${grantNative ? "1" : "2"}) headless exec --backend ${recommended} --auth-mode native-login --profile read-only-native --cwd ${cwdArg} -- "Explain this repository."`);
+  log(`  ${grantNative ? "2" : "3"}) headless verify --cwd ${cwdArg}`);
+  log(`  ${grantNative ? "3" : "4"}) headless tui --cwd ${cwdArg}   # optional observer`);
+  if (lead) log(`Lead host ${lead} was configured during init when --lead was passed.`);
+  log("");
+  log(`Profiles: ${profileChoices().join(", ")} — ${EXEC_PROFILES["read-only-native"].description}`);
+  log(`Doctor panel: headless doctor --json --cwd ${cwdArg}`);
+  if (!yes && !grantNative) {
+    log("Tip: re-run with --yes --allow-native-direct-unrestricted to init + grant native trust non-interactively.");
+  }
+}
+
 export async function runDoctorCommand(args: string[]) {
   const flags = flagArgsBeforeSeparator(args);
-  const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
-  const [ping, snapshot] = await Promise.all([
-    client.call<{ projectId: string; projectRoot: string; principal: string }>("ping"),
+  const cwd = getArg(flags, "--cwd") || process.cwd();
+  const client = await daemonClient(cwd, flags);
+  const [ping, snapshot, trust] = await Promise.all([
+    client.call<{
+      projectId: string;
+      projectRoot: string;
+      principal: string;
+      brokerEnv?: BrokerEnvReadiness[];
+    }>("ping"),
     client.call<{ jobs: Job[]; events: unknown[] }>("events.snapshot", { limit: 10 }),
+    client.call<{
+      trusted: boolean;
+      nativeLoginAllowed: boolean;
+      nativeDirectUnrestrictedAcknowledged: boolean;
+      bypassAllowed: boolean;
+    }>("project.trust.status"),
   ]);
-  console.log("headless doctor — v0.2 daemon and runtime self-check");
-  console.log(`Bun runtime: ${Bun.version}`);
-  console.log(`Project: ${ping.projectRoot}`);
-  console.log(`Project ID: ${ping.projectId}`);
-  console.log(`Authenticated principal: ${ping.principal}`);
-  console.log(`External state: ${client.state.projectDir}`);
-  for (const backend of ["opencode", "codex", "claude", "grok"]) {
-    console.log(`  backend ${backend}: ${Bun.which(backend) ? "found" : "not on PATH"}`);
+  const report = buildDoctorReport({
+    projectRoot: ping.projectRoot,
+    projectId: ping.projectId,
+    principal: ping.principal,
+    stateDir: client.state.projectDir,
+    trust: {
+      trusted: trust.trusted,
+      nativeLoginAllowed: trust.nativeLoginAllowed,
+      nativeDirectUnrestrictedAcknowledged: trust.nativeDirectUnrestrictedAcknowledged,
+      bypassAllowed: trust.bypassAllowed,
+    },
+    durableJobs: snapshot.jobs.length,
+    recentEvents: snapshot.events.length,
+    brokerEnv: ping.brokerEnv ?? [],
+    brokerEnvSource: ping.brokerEnv ? "daemon" : "unavailable",
+  });
+  if (flags.includes("--json") || flags.includes("-j")) {
+    printJson(report);
+    return;
   }
-  console.log(`Durable jobs: ${snapshot.jobs.length}; recent events: ${snapshot.events.length}`);
-  console.log("Containment defaults to required. Unsafe execution is explicit and never used by autonomy or councils.");
+  printDoctorHuman(report);
 }
 
 export async function runStatusCommand(args: string[]) {
@@ -72,3 +168,6 @@ export async function runStatusCommand(args: string[]) {
   ]);
   console.log(JSON.stringify({ daemon: ping, tasks, snapshot, orchestration }, null, 2));
 }
+
+// Re-export inventory for tests that pin the backend list.
+export { BACKEND_INVENTORY };

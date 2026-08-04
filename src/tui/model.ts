@@ -189,12 +189,79 @@ export function goalSummary(state: TuiControlRoomState) {
 }
 
 export type NextAction = { id: string; label: string; command: string; risk: "safe" | "confirm"; reason: string };
+
+/** Authority ladder for Config/Overview: trust → native consent → lead → write readiness. */
+export function authorityLadder(state: TuiControlRoomState) {
+  const trust = state.projectTrust;
+  const nativeReady = trust.trusted && trust.nativeLoginAllowed && trust.nativeDirectUnrestrictedAcknowledged;
+  return [
+    { id: "project-trust", label: "Project trust", ready: trust.trusted, detail: trust.trusted ? "trusted" : "not trusted" },
+    { id: "native-egress", label: "Native egress ack", ready: nativeReady, detail: nativeReady ? "acknowledged" : "required for native-login" },
+    { id: "lead", label: "Foreground lead", ready: Boolean(state.lead), detail: state.lead ? `${state.lead.host}:${state.lead.status}` : "not configured" },
+    { id: "write", label: "Write authority", ready: false, detail: "writes stay leased/gated; use CLI candidates" },
+  ] as const;
+}
+
 export function nextActions(state: TuiControlRoomState): NextAction[] {
   const actions: NextAction[] = [];
-  if (state.connection !== "connected") actions.push({ id: "refresh", label: "Reconnect", command: "automatic", risk: "safe", reason: "The observer is waiting for the daemon." });
-  if (!state.lead) actions.push({ id: "lead", label: "Configure a lead", command: "headless lead use <host>", risk: "safe", reason: "No foreground lead is configured." });
-  if (pendingApprovals(state)[0]) actions.push({ id: "approval", label: "Review in CLI", command: "headless experimental approval list", risk: "safe", reason: "The observer cannot resolve approvals." });
-  if (!state.projectTrust.trusted) actions.push({ id: "trust", label: "Review trust in CLI", command: "headless project trust status", risk: "safe", reason: "The observer cannot change project trust." });
+  const cwd = shellArg(state.projectRoot);
+  if (state.connection !== "connected") {
+    actions.push({ id: "refresh", label: "Reconnect", command: "automatic", risk: "safe", reason: "The observer is waiting for the daemon." });
+  }
+  if (!state.projectTrust.trusted) {
+    actions.push({
+      id: "trust",
+      label: "Grant project trust",
+      command: `headless project trust grant --cwd ${cwd}`,
+      risk: "confirm",
+      reason: "Project is not trusted yet.",
+    });
+  } else if (!state.projectTrust.nativeDirectUnrestrictedAcknowledged || !state.projectTrust.nativeLoginAllowed) {
+    actions.push({
+      id: "native-consent",
+      label: "Acknowledge native egress",
+      command: `headless project trust grant --allow-native-direct-unrestricted --cwd ${cwd}`,
+      risk: "confirm",
+      reason: "Native login needs unrestricted-egress acknowledgement.",
+    });
+  }
+  if (!state.lead) {
+    actions.push({
+      id: "lead",
+      label: "Configure a lead",
+      command: `headless lead use codex --cwd ${cwd}`,
+      risk: "safe",
+      reason: "No foreground lead is configured.",
+    });
+  }
+  if (pendingApprovals(state)[0]) {
+    actions.push({
+      id: "approval",
+      label: "Review in CLI",
+      command: `headless experimental approval list --cwd ${cwd}`,
+      risk: "safe",
+      reason: "The observer cannot resolve approvals.",
+    });
+  }
+  const loginAgent = state.fleetHealth.find((agent) => providerReadiness(agent) === "Login required");
+  if (loginAgent?.presentation?.recovery) {
+    actions.push({
+      id: "login",
+      label: `Fix ${loginAgent.backend} login`,
+      command: loginAgent.presentation.recovery,
+      risk: "safe",
+      reason: loginAgent.presentation.reason || "Provider login is incomplete.",
+    });
+  }
+  if (actions.length === 0) {
+    actions.push({
+      id: "first-exec",
+      label: "Run contained inspect",
+      command: `headless exec --auth-mode native-login --profile read-only-native --cwd ${cwd} -- "Explain this repository."`,
+      risk: "safe",
+      reason: "Golden path: one read-only native-login turn under required containment.",
+    });
+  }
   return actions.slice(0, 4);
 }
 
@@ -209,6 +276,7 @@ export type ConfigViewModel = {
   trust: string;
   lead: string;
   daemon: string;
+  authority: Array<{ id: string; label: string; ready: boolean; detail: string }>;
   budgets: Array<{ id: string; summary: string }>;
   backends: Array<{ id: string; backend: string; readiness: OperatorStatus; detail: string }>;
   delegations: Array<{ id: string; summary: string }>;
@@ -286,6 +354,7 @@ export function configViewModel(state: TuiControlRoomState): ConfigViewModel {
       ? `${state.lead.host} · generation ${state.lead.generation} · ${state.lead.status}`
       : "not configured",
     daemon: `${state.connection} · ${state.orchestration.mode} · ${state.orchestration.activeJobs} active · ${state.orchestration.queuedJobs} queued${state.observedAt === null ? "" : ` · snapshot ${new Date(state.observedAt).toISOString()}`}`,
+    authority: authorityLadder(state).map((rung) => ({ ...rung })),
     budgets: state.budgets.map((budget) => ({ id: budget.id, summary: budgetSummary(budget) })),
     backends: state.fleetHealth.map((backend) => ({
       id: backend.id,

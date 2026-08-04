@@ -47,8 +47,28 @@ and intervention rather than reporting them as green.
 
 ## Why publication remains blocked
 
-The root and plugin packages are still private at `0.2.0-beta.5`. No gate is
+The root and plugin packages are still private at `0.2.0-beta.6`. No gate is
 released until its full current-tree checklist is re-run, no P0/P1 security or
 data-integrity issue remains, clean package artifacts install, and the authorized
 release resolves through the public registry. The canonical checklist is
 [`docs/plan.md`](https://github.com/proofofwork-agency/headless/blob/main/docs/plan.md).
+
+:::note Product Gate P
+**Product Gate P** (documented in-repo as `docs/product-gate.md` / OST) is a UX
+and golden-path quality oracle for the stable CLI surface — not an npm publish
+gate. A green Product Gate P means first-run setup → trust → profile exec →
+verify is teachable and remedy-driven; it does not authorize a public package
+release. Publication still requires the cumulative A/B/C evidence above.
+:::
+
+:::note Dogfood posture
+Private-beta dogfood includes recorded cross-backend deliberate/council runs,
+native subscription smokes, Neon Breakout and rotating-lead write kernels, and
+Product Gate contrast verify (tests + manual golden-path dogfood). That is
+**partial** evidence — not continuous self-host of Headless development, not
+unattended production, and not a claim that Headless fully builds this monorepo
+day-to-day. Runtime `experimental loop --repair` (gate-oracle automation) is a
+different system from Product Gate P’s human UX loop protocol. See the
+[case studies](../case-studies/proven-runs.md#dogfood-posture) and in-repo
+`docs/product-gate.md`.
+:::

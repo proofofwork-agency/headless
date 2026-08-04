@@ -20,19 +20,20 @@ grok login
 grok login --device-auth
 ```
 
-Grok reads credentials **only** from `$GROK_HOME/auth.json` — by default `~/.grok/auth.json` — with no XDG fallback (confirmed against the open-sourced grok-build source). Headless accepts only that file: a canonical, non-symlinked, single-link regular file no larger than 2 MiB, copied owner-only (`0600`) into the isolated worker's `$HOME/.grok/auth.json` and fingerprinted. The copy is disposable: Headless sets `GROK_AUTH_EARLY_INVALIDATION_SECS=0` inside the worker so proactive refresh cannot rotate the operator's login. For recognized OIDC state, Headless also requires the access token to remain valid through the bounded turn plus a safety margin; otherwise Fleet reports `Login required` with `grok login` / `grok login --device-auth`. This prevents a reactive refresh in a disposable worker from rotating a refresh token that the next worker cannot reuse.
+Grok reads credentials **only** from `$GROK_HOME/auth.json` — by default `~/.grok/auth.json` — with no XDG fallback (confirmed against the open-sourced grok-build source). Headless accepts only that file: a canonical, non-symlinked, single-link regular file no larger than 2 MiB. Before isolation, Headless **strips `refresh_token` fields** from the capsule copy (load-bearing: an OIDC entry without a refresh token is non-refreshable in Grok's own auth model, so a disposable worker cannot rotate the operator's host login). The host file is never rewritten. As defense in depth the worker also gets `GROK_AUTH_EARLY_INVALIDATION_SECS=0`, which only disables *proactive* refresh — it alone does **not** stop a 401-driven refresh, which is why the capsule strip is required. For recognized OIDC state, Headless additionally requires the access token to remain valid through the bounded turn plus a safety margin; otherwise Fleet reports `Login required` with `grok login` / `grok login --device-auth`.
 
 ### Grant consent and confirm readiness
 
-Native login requires project trust plus explicit acknowledgement that native provider egress is unrestricted:
+Native login requires project trust plus explicit acknowledgement that native provider egress is unrestricted. Optional one-shot: `headless setup --yes --allow-native-direct-unrestricted --cwd "$PROJECT"` (also initializes external state and recommends a backend). Grok remains **experimental** and write-blocked regardless.
 
 ```bash
 PROJECT="/absolute/path/to/your/project"
 headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
+headless doctor --json --cwd "$PROJECT"
 headless experimental fleet health --cwd "$PROJECT"
 ```
 
-Fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If Grok reports blocked, its contained isolation attestation did not prove the required isolation — do not try to bypass it. For credential and trust diagnoses, see [Understand "login required"](../troubleshooting/login-required.md).
+`doctor --json` reports structured readiness; fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If Grok reports blocked, its contained isolation / trust-canary attestation did not prove the required isolation — do not try to bypass it. For credential and trust diagnoses, see [Understand "login required"](../troubleshooting/login-required.md).
 
 ### What the attestation gate does
 
@@ -46,14 +47,13 @@ A missing, failed, or contradictory attestation blocks the run with a structured
 
 ## How to run it
 
-One bounded, read-only contained run on your subscription:
+One bounded, read-only contained run on your subscription — prefer a profile so the common flag set is not hand-assembled. Grok is experimental: excluded from the required Gate A backends, trust-canary attested, and write-blocked.
 
 ```bash
 headless exec --cwd "$PROJECT" \
   --backend grok-build \
   --auth-mode native-login \
-  --approval-policy ask \
-  --timeout-ms 60000 \
+  --profile read-only-native \
   --json -- "Reply with OK only. Do not use tools."
 ```
 
@@ -127,6 +127,6 @@ Navigate with `Tab`/`Shift-Tab`, number keys `1`–`7`, arrows, `PgUp`/`PgDn`, a
 | Prompt delivery | native |
 | Default timeout | 180000 ms |
 | Minimum probed CLI version | 0.2.99 |
-| Containment notes | Bespoke isolation: Headless-owned `config.toml` in isolated `GROK_HOME`; every Cursor/Claude/Codex compatibility cell disabled; no memory, subagents, web fetch, auto-update, or telemetry; Headless system-prompt override; startup-snapshot masks over project control paths; contained network-denied `grok inspect --json` attestation plus trust-canary check required before provider access; credential source `~/.grok/auth.json` only, with in-worker proactive token refresh disabled |
+| Containment notes | Bespoke isolation: Headless-owned `config.toml` in isolated `GROK_HOME`; every Cursor/Claude/Codex compatibility cell disabled; no memory, subagents, web fetch, auto-update, or telemetry; Headless system-prompt override; startup-snapshot masks over project control paths; contained network-denied `grok inspect --json` attestation plus trust-canary check required before provider access; credential source `~/.grok/auth.json` only; capsule **strips `refresh_token`** (and sets `GROK_AUTH_EARLY_INVALIDATION_SECS=0` as defense in depth) so disposable workers cannot rotate the operator login |
 
 Full credential contract: the canonical [native-login.md](https://github.com/proofofwork-agency/headless/blob/main/docs/native-login.md) in the repository.

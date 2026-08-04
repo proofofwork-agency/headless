@@ -45,12 +45,20 @@ export type { ReadContextView, TaskState } from "./runtime/read-model";
 export { getCooperationInstructions } from "./runtime/cooperation";
 export { splitList } from "./utils/list";
 export {
+  CORE_MCP_TOOL_NAMES,
+  CORE_MCP_TOOL_NAME_SET,
   DEFAULT_DELIBERATION_BACKENDS,
   DEFAULT_TASK_LEASE_MS,
   DEFAULT_TOOL_APPROVAL_POLICY,
   DEFAULT_TOOL_AUTH_MODE,
+  HEADLESS_MCP_TOOLSET_ENV,
   HEADLESS_TOOL_REGISTRY,
+  assertMcpToolAllowed,
+  filterToolsByMcpToolset,
   headlessToolDefinition,
+  isCoreMcpToolName,
+  resolveMcpToolset,
+  type HeadlessMcpToolset,
   type HeadlessToolDefinition,
   type HeadlessToolInput,
   type HeadlessToolName,

@@ -109,6 +109,7 @@ export async function runIsolatedCliAudit(): Promise<AuditResult[]> {
     { id: "exec:conflicting-containment", command: "exec", args: ["exec", "--require-sandbox", "--unsafe-no-sandbox", "prompt"], expected: "EXPECTED_REJECTION", expectedError: "Choose either --require-sandbox or --unsafe-no-sandbox" },
     { id: "launch:legacy", command: "launch", args: ["experimental", "launch", "opencode-serve"], expected: "EXPECTED_REJECTION" },
     { id: "init", command: "init", args: ["init", "--cwd", project], expected: "PASS" },
+    { id: "setup", command: "setup", args: ["setup", "--cwd", project], expected: "PASS" },
     { id: "daemon:status", command: "daemon", args: ["daemon", "status", "--cwd", project], expected: "PASS" },
     { id: "lead:status", command: "lead", args: ["lead", "status", "--cwd", project], expected: "PASS" },
     { id: "doctor", command: "doctor", args: ["doctor", "--cwd", project], expected: "PASS" },

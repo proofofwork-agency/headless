@@ -6,8 +6,11 @@ import {
 } from "@proofofwork-agency/headless/daemon";
 import {
   DEFAULT_DELIBERATION_BACKENDS,
+  assertMcpToolAllowed,
+  filterToolsByMcpToolset,
   getCooperationInstructions,
   headlessToolDefinition,
+  resolveMcpToolset,
   splitList,
   type HeadlessToolInput,
   type HeadlessToolName,
@@ -16,8 +19,8 @@ import {
 
 export const id = "headless";
 
-export const server: Plugin = async () => ({
-  tool: {
+export const server: Plugin = async () => {
+  const tools = {
     headless_run: registryTool("headless_run", async (args, context) => {
         const client = await daemon(context);
         const submitted = await client.call<Job>("run.submit", {
@@ -121,8 +124,16 @@ export const server: Plugin = async () => ({
     headless_get_cooperation_instructions: registryTool("headless_get_cooperation_instructions", async () => {
         return result("headless_get_cooperation_instructions", getCooperationInstructions("opencode"));
     }),
-  },
-});
+  } as const;
+  // Match MCP lead-core default: only advertise core tools unless FULL toolset.
+  const advertised = filterToolsByMcpToolset(
+    Object.entries(tools).map(([name, definition]) => ({ name, definition })),
+    resolveMcpToolset(),
+  );
+  return {
+    tool: Object.fromEntries(advertised.map((entry) => [entry.name, entry.definition])),
+  };
+};
 
 export default { id, server };
 
@@ -221,6 +232,7 @@ function registryTool<Name extends HeadlessToolName>(
     description: definition.description,
     args: pluginToolArgs(definition.inputSchema),
     async execute(args, context) {
+      assertMcpToolAllowed(name);
       return execute(args as HeadlessToolInput<Name>, context);
     },
   });

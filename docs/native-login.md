@@ -1,12 +1,12 @@
 # Native login, sessions, and fleet operation
 
-Headless defaults to brokered provider access. Native login is an explicit private-alpha opt-in for trusted disposable projects because its outbound destination IPs are unrestricted. Both modes retain Headless's outer operating-system containment, project boundary, durable state, worktree isolation, budgets, and finality gates.
+Headless defaults to brokered provider access. Native login is an explicit private-beta (`0.2.0-beta.6`) opt-in for trusted disposable projects because its outbound destination IPs are unrestricted. Both modes retain Headless's outer operating-system containment, project boundary, durable state, worktree isolation, budgets, and finality gates.
 
-Examples assume the compiled `headless` binary is on `PATH`. From this checkout, run `bun run build` and use `./dist/cli.js` in its place.
+Examples assume the compiled `headless` binary is on `PATH`. From this checkout, run `bun run build` and use `./dist/cli.js` in its place. Prefer the golden path: `headless setup` → trust grant → `exec --auth-mode native-login --profile read-only-native` → `verify`. See also [cli-and-tui-guide.md](./cli-and-tui-guide.md).
 
 ## Project trust
 
-Native login is available only after an authenticated operator grants trust to the daemon's canonical project root. Trust is stored outside the repository and cannot be supplied in a run request. The CLI mirrors the `project.trust.status`, `project.trust.grant`, and `project.trust.revoke` daemon methods:
+Native login is available only after an authenticated operator grants trust to the daemon's canonical project root. Trust is stored outside the repository and cannot be supplied in a run request. The CLI mirrors the `project.trust.status`, `project.trust.grant`, and `project.trust.revoke` daemon methods. The setup wizard can grant trust noninteractively with `headless setup --yes --allow-native-direct-unrestricted`.
 
 ```bash
 PROJECT="${PROJECT:-$(pwd)}"
@@ -31,7 +31,7 @@ Plain `grant` records project trust without allowing backend-native credentials.
 
 Headless does not embed provider list prices. Broker USD attribution requires a trusted dated pricing entry supplied by a daemon extension. With an empty pricing registry, costs remain `amountUsd: null`; a configured USD ceiling fails closed because the broker cannot safely prove the request fits it, and the daemon emits one bounded operator warning when the first affected lease is issued. Request, token, artifact, concurrency, and deadline bounds remain enforceable without USD pricing.
 
-The authentication mode is part of every run and persisted execution record. Select native mode with `--auth-mode native-login`; omission selects broker. Experimental orchestration objects retain the same field but are outside the first beta contract. A goal's execution mode is separate: `read-only` is the default, while write mode requests the leased-worktree and integration-gate path.
+The authentication mode is part of every run and persisted execution record. Select native mode with `--auth-mode native-login` (or `--profile read-only-native`); omission selects broker (`--profile broker-readonly` also pins read-only required containment). Experimental orchestration objects retain the same field but are outside the Beta 1 stability promise. A goal's execution mode is separate: `read-only` is the default, while write mode requests the leased-worktree and integration-gate path.
 
 ## Minimal auth capsules
 
@@ -45,7 +45,7 @@ Headless never mounts the real home directory. It creates an owner-only worker r
 | OpenCode | `~/.local/share/opencode/auth.json` | `$XDG_DATA_HOME/opencode/auth.json` |
 | Grok | `~/.grok/auth.json` | `$HOME/.grok/auth.json` |
 
-Grok reads credentials only from `$GROK_HOME/auth.json` (the open-sourced grok-build confirms no XDG fallback). Sign in with `grok login` (browser OAuth) or `grok login --device-auth` on a display-less host. Because the contained credential copy is disposable, recognized OIDC state must remain valid for the complete bounded turn; an expired or near-expiry token is reported as `Login required` instead of being refreshed only inside a throwaway worker.
+Grok reads credentials only from `$GROK_HOME/auth.json` (the open-sourced grok-build confirms no XDG fallback). Sign in with `grok login` (browser OAuth) or `grok login --device-auth` on a display-less host. Disposable Grok capsules **strip `refresh_token`** so a worker cannot rotate the operator login; recognized OIDC state must remain valid for the complete bounded turn. An expired or near-expiry token is reported as `Login required` before launch rather than being refreshed only inside a throwaway worker. `GROK_AUTH_EARLY_INVALIDATION_SECS` only shortens the proactive buffer — it is **not** sufficient alone to protect the operator login.
 
 An ordinary auth file is limited to 2 MiB and the complete file capsule to 4 MiB. The Claude setup-token has a separate 4 KiB limit and must be owner-only. Installed files use mode `0600`; worker directories use `0700`. Headless fingerprints the selected backend and exact selected credential contents for session-recovery checks. The worker does not receive sibling-provider files, ambient API-key or OAuth-token variables, Git credentials, SSH keys or agents, shell startup files, keychain exports, project `.env` files, or host sockets. The only OAuth-token environment value Headless creates is the explicitly allowlisted Claude setup-token described below.
 
@@ -68,16 +68,17 @@ The trimmed file must be no larger than 4 KiB and match the `sk-ant-oat…` setu
 
 When valid, the setup-token takes exclusive precedence over `.credentials.json`. Headless hashes it into the native-auth fingerprint under the logical manifest entry `env:CLAUDE_CODE_OAUTH_TOKEN`, clears its temporary read buffers, and injects it only after the scrubbed baseline environment has been built for the contained Claude native-login process. The source file is never copied into the worker, and the token is never added to the daemon environment, persisted state, logs, ledger, or results. Redaction recognizes the complete setup-token alphabet as defense in depth. This is a long-lived subscription bearer: protect the source like a password, rotate it with Claude when necessary, and remove the file to return to the legacy `.credentials.json` path.
 
-Then run Claude through the normal trusted native-login path:
+Then run Claude through the normal trusted native-login path. On macOS, `headless doctor` is setup-token-oriented for Claude readiness and surfaces the mint remedy when the capsule is missing:
 
 ```bash
 PROJECT="${PROJECT:-$(pwd)}"
 
 headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
+headless doctor --cwd "$PROJECT"
 headless exec --cwd "$PROJECT" \
   --backend claude-code \
   --auth-mode native-login \
-  --approval-policy ask \
+  --profile read-only-native \
   --timeout-ms 60000 \
   --json -- "Reply with OK only. Do not use tools."
 ```
@@ -94,7 +95,7 @@ headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
 headless exec --cwd "$PROJECT" \
   --backend claude-code \
   --auth-mode native-login \
-  --approval-policy ask \
+  --profile read-only-native \
   --timeout-ms 60000 \
   --json -- "Reply with OK only. Do not use tools."
 ```
@@ -220,7 +221,7 @@ env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u XAI_API_KEY \
   -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN -u CODEX_API_KEY \
   -u GROK_API_KEY -u OPENAI_ACCESS_TOKEN \
   headless exec --cwd "$tmp" --backend claude-code --auth-mode native-login \
-  --approval-policy ask --timeout-ms 60000 --json "Reply with OK only. Do not use tools."
+  --profile read-only-native --timeout-ms 60000 --json "Reply with OK only. Do not use tools."
 
 # Repeat with --backend codex, opencode, and grok-build.
 ```

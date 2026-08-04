@@ -6,7 +6,11 @@ sidebar_position: 8
 
 # Leads and the fleet
 
-Headless turns any supported CLI coder into the visible **foreground lead**, while the others run as contained servants behind one local, auditable control plane. Claude Code, Codex, OpenCode, and Grok Build all use the same admission, containment, budget, approval, result, and ledger contracts — so the coder you talk to and the coders it delegates to are governed identically.
+:::note Complete the golden path first
+Fleet profiles, goals, councils, and most multi-agent surfaces are **experimental** (`headless experimental …`). Before orchestrating servants, finish the [quickstart golden path](../getting-started/quickstart.md): `setup` → native trust → `exec --profile read-only-native` → `verify`. Binding a lead is stable Beta 1; dispatching fleets and durable goals is not.
+:::
+
+Headless turns any supported CLI coder into the visible **foreground lead**, while the others run as contained servants behind one local, auditable control plane. Claude Code, Codex, OpenCode, and Grok Build all use the same admission, containment, budget, approval, result, and ledger contracts — so the coder you talk to and the coders it delegates to are governed identically. Cross-provider servant delegation uses crash-atomic linked holds over both provider quotas when a depth-zero worker asks the daemon for one read-only child on a different backend.
 
 ```text
 externally launched lead CLI
@@ -40,7 +44,7 @@ headless init --lead codex --cwd "$PROJECT"
 
 **Single occupancy, by construction.** There is exactly one configured foreground lead per project and no automatic election. `lead use` rotates a generation-specific credential: switching hosts invalidates state-changing access from the previous generation without deleting durable project history. `lead release` removes the binding without cancelling jobs or deleting state. The lead attaches and heartbeats; a host that stops heartbeating becomes `disconnected`, and Headless does not elect or launch a replacement.
 
-Once bound, the lead's MCP surface includes `headless_run` for one bounded servant, `headless_deliberate` for attributable read-only fan-out, `council_deliberate` for persisted council phases, and fleet, goal, workflow, collaboration, approval-inspection, candidate, ledger, and observer tools. The lead may *inspect* approvals and candidates, but root authority retains trust, credentials, budgets, recovery, approval resolution, and emergency integration. Automatic worker routing excludes the active lead's backend, so the lead never quietly delegates to itself.
+Once bound, the lead's MCP surface defaults to the **lead-core** toolset (10 tools): `headless_run`, `headless_deliberate`, trust/context/task/message helpers, and `headless_propose_final` — enough for a complete collaboration round trip without burying the host under orchestration surface. Set **`HEADLESS_MCP_TOOLSET=full`** in the MCP/plugin process environment to restore the complete registry (fleet health, goals, councils, workflows, release gates, and the rest). Non-core `tools/call` under the default core toolset fails closed with a message that names the env override; core is a **subset** of existing scopes, not a privilege elevation. The lead may *inspect* approvals and candidates where those tools are advertised, but root authority retains trust grants, credentials, budgets, recovery, approval resolution, and emergency integration. Automatic worker routing excludes the active lead's backend, so the lead never quietly delegates to itself.
 
 ## Fleet profiles
 
@@ -80,13 +84,35 @@ A complete `profile.json` names each agent and may override the bounds explicitl
 }
 ```
 
+### Idle autonomy
+
+`idleAutonomy` is a fleet-profile field, not a free-running product self-host. A **deterministic idle scanner** watches autonomous goals for settled evidence (failed gates, stalled work, idle workers, preserved candidates) and records opportunity lanes. What happens next depends on the posture:
+
+| Value | Operator meaning |
+| --- | --- |
+| `off` | Scanner does not act for goals on this profile. |
+| `suggest` (common default) | Publish visible idle-opportunity lanes only — no automatic verification or write spend. |
+| `read-only` | After publishing a lane, may run bounded **read-only** verification when configured; still no automatic integrate. |
+| `write` | May attempt managed write work only when goal approval policy, trust, budgets, and primary-checkout cleanliness allow — still under ordinary containment and candidate gates. |
+
+Treat **`suggest` as the default posture**, not unattended full write. Idle autonomy is **not** continuous self-host of Headless product development; it is a bounded, profile-scoped assist for goals that already opted into `autonomous` scheduling.
+
+Inspect and steer the experimental autonomy surface from the root CLI:
+
+```bash
+headless experimental autonomy status --cwd "$PROJECT"
+# start | stop | status | ask | backup
+```
+
+For gate-oracle repair loops and crash recovery that complement fleet goals, see [Repair and recovery](./repair-and-recovery.md). Application-shaped workflows and multi-agent product patterns are covered in [Building apps](../guides/building-apps.md).
+
 Check readiness with:
 
 ```bash
 headless experimental fleet health --cwd "$PROJECT"
 ```
 
-Defaults are deliberately bounded: four active workers, 64 queued delegations per project, one active turn per native session, eight deliberation rounds, two attempts per delegation, and a 60-minute goal deadline. Queue overflow returns `QUEUE_CAPACITY_EXCEEDED` — jobs are never silently dropped.
+Defaults are deliberately bounded: four active workers, 64 queued delegations per project, one active turn per native session, eight deliberation rounds (`maxDeliberationRounds`), two attempts per delegation, and a 60-minute goal deadline. Queue overflow returns `QUEUE_CAPACITY_EXCEEDED` — jobs are never silently dropped.
 
 :::note Read the mode-specific health reason
 Broker and native-login agents may both use the structured `login_required` code, but Fleet health now explains the selected mode: broker names the missing daemon credential variable, while native-login surfaces the capsule or setup-token remedy. Missing native project consent is separately `trust_required`. For the subscription path, grant native trust (`headless project trust grant --allow-native-direct-unrestricted`) **and** upsert a profile whose top level and every agent use `native-login`.
@@ -132,6 +158,8 @@ From the shell, the same state is available as commands: `headless experimental 
 
 ## Related
 
-- [Quickstart](../getting-started/quickstart.md) — initialize a project and bind your first lead.
-- [The safety model](./safety-model.md) — the containment, budget, and write gates every servant runs under.
+- [Quickstart](../getting-started/quickstart.md) — golden path before any fleet work.
+- [The safety model](./safety-model.md) — the containment, budget, and write gates every servant runs under (including linked-hold cross-provider delegation).
 - [Execution receipts](./receipts.md) — the verifiable record each servant run leaves behind.
+- [Repair and recovery](./repair-and-recovery.md) — repair loops, workflow DAGs, goal revision bounds, daemon recovery.
+- [Building apps](../guides/building-apps.md) — composing fleets, goals, and workflows into product workflows.

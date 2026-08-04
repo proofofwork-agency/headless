@@ -6,6 +6,8 @@ import type { RunResult } from "../contracts/run";
 import { redactAndTruncate } from "../runtime/redaction";
 import { HeadlessError, toStructuredError } from "../runtime/headless-error";
 import { VALUE_FLAGS } from "./command-specs";
+import { parseExecProfile } from "./profile";
+import { printRemedy } from "./remedy";
 
 export const MAX_TIMEOUT_MS = 86_400_000;
 export const DEFAULT_RUN_TIMEOUT_MS = 180_000;
@@ -102,6 +104,27 @@ export function getAuthMode(argv: string[]): "native-login" | "broker" | undefin
   return value;
 }
 
+/** Resolve --profile and optional explicit flags; profile never overrides an explicit flag. */
+export function resolveExecPolicy(argv: string[]) {
+  let profile;
+  try {
+    profile = parseExecProfile(getArg(argv, "--profile"));
+  } catch (error) {
+    throw new CliUsageError(error instanceof Error ? error.message : String(error));
+  }
+  const mode = getMode(argv) ?? profile?.mode;
+  const authMode = getAuthMode(argv) ?? profile?.authMode;
+  const containment = argv.includes("--unsafe-no-sandbox") || argv.includes("--require-sandbox")
+    ? parseContainment(argv)
+    : (profile?.containment ?? parseContainment(argv));
+  return { profile, mode, authMode, containment };
+}
+
+export function shellCwdArg(cwd: string) {
+  if (/^[A-Za-z0-9_./:-]+$/.test(cwd)) return cwd;
+  return JSON.stringify(cwd);
+}
+
 export function getApprovalPolicy(argv: string[]): "ask" | "auto" | "bypass" | undefined {
   const value = getArg(argv, "--approval-policy");
   if (!value) return undefined;
@@ -170,18 +193,40 @@ export async function waitForJob(client: HeadlessDaemonClient, job: Job, timeout
   }
 }
 
-export function printRunResult(result: RunResult, json: boolean, stream: boolean) {
+export function runResultNextCommands(result: RunResult, cwd = process.cwd()) {
+  const cwdArg = shellCwdArg(cwd);
+  if (!result.jobId) return null;
+  return {
+    verify: `headless verify --cwd ${cwdArg}`,
+    receipt: `headless experimental receipt show ${result.jobId} --cwd ${cwdArg}`,
+  };
+}
+
+export function printRunResult(result: RunResult, json: boolean, stream: boolean, options: { cwd?: string } = {}) {
+  const cwd = options.cwd ?? process.cwd();
+  const next = runResultNextCommands(result, cwd);
   if (json) {
-    printJson(result);
+    printJson(next ? { ...result, next } : result);
     return;
   }
   const output = result.output ? redactAndTruncate(result.output).text : "(no text output)";
   if (stream) process.stdout.write(output);
   else console.log(output);
+  const meta: string[] = [];
   if (result.cost.amountUsd != null || result.usage.providerTotal != null) {
-    console.error(`\n---\ncost: ${result.cost.amountUsd ?? "n/a"}  tokens: ${result.usage.providerTotal ?? "n/a"}  time: ${result.durationMs}ms`);
+    meta.push(`cost: ${result.cost.amountUsd ?? "n/a"}  tokens: ${result.usage.providerTotal ?? "n/a"}  time: ${result.durationMs}ms`);
   }
+  if (result.jobId) meta.push(`job: ${result.jobId}`);
+  if (meta.length) console.error(`\n---\n${meta.join("\n")}`);
   if (result.containment.unsafe) console.error("WARNING: result was produced without required OS containment.");
+  // Artifact-first aha (P.AHA): always point at verify / receipt after a durable job.
+  if (next && !stream) {
+    console.error(`Next: ${next.verify}`);
+    console.error(`Receipt: ${next.receipt}`);
+  }
+  if (result.error) {
+    printRemedy(result.error.code, result.error.message, cwd);
+  }
 }
 
 /** Write one complete JSON document without console/renderer byte clipping. */

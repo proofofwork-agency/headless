@@ -12,6 +12,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Core concepts',
       items: [
+        'concepts/why-headless',
         'concepts/architecture',
         'concepts/modes',
         'concepts/containment',
@@ -20,6 +21,7 @@ const sidebars: SidebarsConfig = {
         'concepts/skills',
         'concepts/receipts',
         'concepts/leads-and-fleet',
+        'concepts/repair-and-recovery',
       ],
     },
     {
@@ -35,7 +37,12 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Guides',
-      items: ['guides/cli', 'guides/tui', 'guides/test-scenarios'],
+      items: [
+        'guides/cli',
+        'guides/tui',
+        'guides/building-apps',
+        'guides/test-scenarios',
+      ],
     },
     {
       type: 'category',

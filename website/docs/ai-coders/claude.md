@@ -40,26 +40,26 @@ The file must be a non-symlinked, single-link regular file no larger than 2 MiB.
 
 ### Grant consent and confirm readiness
 
-Native login requires project trust plus explicit acknowledgement that native provider egress is unrestricted:
+Native login requires project trust plus explicit acknowledgement that native provider egress is unrestricted. Optional one-shot: `headless setup --yes --allow-native-direct-unrestricted --cwd "$PROJECT"` (also initializes external state and recommends a backend).
 
 ```bash
 PROJECT="/absolute/path/to/your/project"
 headless project trust grant --allow-native-direct-unrestricted --cwd "$PROJECT"
+headless doctor --json --cwd "$PROJECT"
 headless experimental fleet health --cwd "$PROJECT"
 ```
 
-Fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If Claude alone stays unavailable, its native-login reason explains whether the setup-token capsule is missing or invalid — see [Understand "login required"](../troubleshooting/login-required.md).
+`doctor --json` reports structured readiness; fleet health should report the backend as ready (the observer TUI shows this as `Ready` in its Fleet tab). If Claude alone stays unavailable, its native-login reason explains whether the setup-token capsule is missing or invalid — see [Understand "login required"](../troubleshooting/login-required.md).
 
 ## How to run it
 
-One bounded, read-only contained run on your subscription:
+One bounded, read-only contained run on your subscription — prefer a profile so the common flag set is not hand-assembled:
 
 ```bash
 headless exec --cwd "$PROJECT" \
   --backend claude-code \
   --auth-mode native-login \
-  --approval-policy ask \
-  --timeout-ms 60000 \
+  --profile read-only-native \
   --json -- "Reply with OK only. Do not use tools."
 ```
 

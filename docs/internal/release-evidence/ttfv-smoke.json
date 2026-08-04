@@ -1,0 +1,35 @@
+{
+  "gate": "product-P.TTFV",
+  "mode": "live",
+  "ok": true,
+  "totalMs": 4620,
+  "ceremonyMs": 858,
+  "budgetMs": 300000,
+  "project": "/var/folders/86/ttb_ll0s2h7dvx62qjf758km0000gn/T/headless-ttfv-QHXCOE/project",
+  "recommendedBackend": "codex",
+  "readyForNativeExec": true,
+  "doctorNextActions": 2,
+  "steps": [
+    {
+      "name": "setup",
+      "durationMs": 767,
+      "exitCode": 0
+    },
+    {
+      "name": "doctor",
+      "durationMs": 91,
+      "exitCode": 0
+    },
+    {
+      "name": "exec",
+      "durationMs": 3679,
+      "exitCode": 0
+    },
+    {
+      "name": "verify",
+      "durationMs": 83,
+      "exitCode": 0
+    }
+  ],
+  "completedAt": "2026-07-30T20:35:55.738Z"
+}

@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## 0.2.0-beta.6 — 2026-07-31
+
+Package publication remains blocked. Both package manifests are private at `0.2.0-beta.6`; npm publication and repository visibility remain separate human-authority decisions. This tree is an unpublished private beta (not alpha).
+
+### Added
+
+- Product Gate P and opportunity solution tree (`docs/product-gate.md`, `docs/product-ost.md`) with `bun scripts/product-gate.ts` / `bun run check:product` wired into `check`.
+- MCP **lead-core toolset** (default): ten round-trip tools are advertised/callable unless `HEADLESS_MCP_TOOLSET=full` restores the complete registry. Core includes context read/note, message receive/send, and completion proposal pairs while remaining a subset of existing scopes. Enforced on both `tools/list` and `tools/call` (and the OpenCode plugin).
+- Dual native-login validator: `bun run validate:dual-native` (codex + opencode).
+- Golden-path `headless setup` wizard: init, CLI inventory, optional native trust grant, printed next commands.
+- Exec `--profile read-only-native|broker-readonly` presets that collapse auth/mode/containment flags without weakening required containment.
+- CLI remedy matrix (`src/cli/remedy.ts`) so top structured failures print a copy-paste next command.
+- Artifact-first `exec` footer: job id plus `verify` and experimental `receipt show` one-liners.
+- TUI authority ladder and richer Overview next-actions (trust, native consent, lead, first exec).
+- `headless doctor --json` readiness panel: trust, backend PATH + native capsule presence (no secret reads), broker env flags, copy-paste next actions.
+- Setup/doctor surface Claude setup-token remedy on macOS when the capsule is missing.
+- `exec --json` embeds `next.verify` / `next.receipt` for scripted golden paths.
+- TTFV smoke: `bun run smoke:ttfv` (ceremony) and `bun run smoke:ttfv:live` (real native turn), evidence at `docs/internal/release-evidence/ttfv-smoke.json`.
+- Live validators now own bounded daemon shutdown, interrupt handling, and temporary-root cleanup; exact requested model output is required for live TTFV and dual-native success.
+
+### Changed
+
+- Default help banner documents the golden path; `setup` joins the Beta 1 stable command set.
+- README and website quickstart lead with one path instead of multi-flag ceremony.
+- Product Gate treats kernel verification and stale/ceremony TTFV evidence as manual instead of self-certifying them green.
+- Operator docs (root README, SECURITY, CLI/TUI guide, native-login, MCP, plan, plugin README) synced to `0.2.0-beta.6`: stable surface includes `setup` and `daemon serve|status|stop|reap`; cross-provider `run.delegate` linked holds documented as implemented; MCP lead-core default and auth-default split (MCP tools vs CLI/daemon) corrected; Grok disposable capsules strip `refresh_token`.
+- Version bump to `0.2.0-beta.6` in `src/version.ts`, root `package.json`, and plugin package/peer.
+
 ## 0.2.0-beta.5 — 2026-07-27
 
 Package publication remains blocked. Both package manifests are private at `0.2.0-beta.5`; npm publication and repository visibility remain separate human-authority decisions.
