@@ -406,7 +406,7 @@ async function main() {
     // ---- L3: durable evidence + non-execution tools ----
     await check("gate.run", "L3", async () => {
       const result = await run(["experimental", "gate", "--cwd", project, "--timeout-ms", "60000"], 150_000);
-      const report = parsePrefixedObject(result.stdout, "Running daemon-owned release gate checks...", "gate.run");
+      const report = parseObjectOrNull(result.stdout);
       const gateChecks = Array.isArray(report?.checks) ? report.checks.map(objectValue) : [];
       const ok = commandSucceeded(result)
         && report?.ok === true
@@ -801,13 +801,6 @@ function parseObject(text: string, label: string) {
   const parsed = parseObjectOrNull(text);
   if (!parsed) throw new Error(`${label} did not return exactly one structured JSON object`);
   return parsed;
-}
-
-function parsePrefixedObject(text: string, prefix: string, label: string) {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith(prefix)) return null;
-  const json = trimmed.slice(prefix.length).trim();
-  return parseObjectOrNull(json) ?? (() => { throw new Error(`${label} did not return its structured report after the expected prefix`); })();
 }
 
 function objectValue(value: unknown) {
