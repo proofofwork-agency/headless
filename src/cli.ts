@@ -3,7 +3,7 @@
 import { join } from "node:path";
 import { resolveCommand } from "./cli/command-table";
 import { parseCliInvocation, renderInvocationHelp } from "./cli/command-specs";
-import { validateCommandFlags } from "./cli/argv";
+import { validateCommandFlags, validateCommandPositionals } from "./cli/argv";
 import { printRemedy } from "./cli/remedy";
 import { CliUsageError, getArg, handleSignal } from "./cli/shared";
 import { toStructuredError } from "./runtime/headless-error";
@@ -11,7 +11,7 @@ import { isValidationError, validationErrorDetails, validationErrorMessage } fro
 
 export { COMMAND_TABLE, resolveCommand } from "./cli/command-table";
 export { COMMAND_SPECS, VALUE_FLAGS, parseCliInvocation, renderCommandUsage, renderHelp, renderInvocationHelp, resolveCommandSpec } from "./cli/command-specs";
-export { parseCommandArgv, resolveCommandAction, validateCommandFlags } from "./cli/argv";
+export { parseCommandArgv, resolveCommandAction, validateCommandFlags, validateCommandPositionals } from "./cli/argv";
 export { CLI_AUDIT_MANIFEST, auditManifestCommands } from "./cli/audit-manifest";
 export { COMMAND_REGISTRY_VERSION, UNIFIED_COMMAND_REGISTRY } from "./command-registry";
 export { mcpServerCommand, runMcpInstall } from "./cli/commands/mcp";
@@ -41,6 +41,7 @@ async function main() {
   // a typo cannot be read as a subcommand.
   const commandArgs = args[0] === "experimental" ? args.slice(1) : args;
   validateCommandFlags(commandArgs);
+  validateCommandPositionals(commandArgs);
   await command.handler(commandArgs);
 }
 
