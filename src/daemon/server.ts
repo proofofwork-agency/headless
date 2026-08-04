@@ -187,7 +187,9 @@ export class HeadlessDaemon {
   private runExecution!: RunExecutionService;
   private readonly writeGateChecks: GateCheck[];
   private readonly extensionConfig;
-  private readonly enableExperimentalSessions: boolean;
+  // Mutable: invoking the session namespace activates the capability on a live
+  // daemon (see activateExperimentalSessions). Monotonic within one process.
+  private enableExperimentalSessions: boolean;
   private loadedExtensions: LoadedDaemonExtensions;
   private readonly executions = new Set<Promise<void>>();
   private stopping = false;
@@ -1500,11 +1502,41 @@ export class HeadlessDaemon {
     }
   }
 
+  /**
+   * Activate persistent sessions on this running daemon.
+   *
+   * The flag gates nothing but request dispatch — it selects no credential,
+   * socket permission, containment policy or storage schema — so flipping it is
+   * the entire activation and cannot interrupt an in-flight job. That is why
+   * this is safe to do live, where a capability that gated store construction
+   * would have needed a restart.
+   *
+   * Idempotent, and monotonic within one process: a restart returns to the
+   * startup default, and the next session invocation reactivates it.
+   */
+  activateExperimentalSessions(credential: AuthenticatedCredential) {
+    if (!credential.scopes.includes("admin")) {
+      throw new HeadlessError("POLICY_DENIED", "Activating a daemon capability requires an admin-scoped credential.");
+    }
+    const alreadyEnabled = this.enableExperimentalSessions;
+    this.enableExperimentalSessions = true;
+    if (!alreadyEnabled) {
+      this.ledger.append("daemon.capability.activate", {
+        capability: "persistent-sessions",
+        principal: credential.principal,
+      });
+    }
+    return { capability: "persistent-sessions", enabled: true, alreadyEnabled };
+  }
+
   private initializeRouteHandlers() {
     this.routeHandlers = createDaemonRouteHandlers({
       projectId: this.state.projectId,
       projectRoot: this.state.canonicalProjectRoot,
-      experimentalSessionsEnabled: this.enableExperimentalSessions,
+      // Read live, not snapshotted: the capability can be activated after the
+      // route handlers are built.
+      experimentalSessionsEnabled: () => this.enableExperimentalSessions,
+      activateExperimentalSessions: (credential) => this.activateExperimentalSessions(credential),
       stateOptions: this.stateOptions,
       extensionInfo: () => ({
         digest: this.loadedExtensions.digest,
