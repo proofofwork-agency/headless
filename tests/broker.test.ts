@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BROKER_UNIX_ONLY_RELAY_PORT, ProviderBroker, type BrokerLinkedOperation } from "../src/broker/server";
@@ -276,6 +276,55 @@ describe("provider broker", () => {
       unixSocketPath: join(root, "broker.sock"),
     });
     expect(broker.allowLoopbackTcp).toBe(false);
+  });
+
+  // Regression: start() refused an occupied socket path and then rmSync'd that
+  // very path on its way out, so the refusal deleted what it was protecting and
+  // the next start walked straight in. The daemon already got this right with a
+  // bound flag; the broker never did.
+  test("refusing an occupied socket path leaves the occupant's socket intact", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-occupied-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const socket = join(root, "broker.sock");
+    const occupant = Bun.serve({ unix: socket, fetch: () => new Response("occupant") });
+    closers.push(() => occupant.stop(true));
+    const occupantInode = lstatSync(socket).ino;
+
+    const broker = new ProviderBroker({
+      credentials: { OPENAI_API_KEY: "parent-key" },
+      env: { HEADLESS_BROKER_ALLOW_LOOPBACK_TCP: "0" },
+      unixSocketPath: socket,
+    });
+    expect(() => broker.start()).toThrow(/socket already exists/i);
+    expect(existsSync(socket)).toBe(true);
+    expect(lstatSync(socket).ino).toBe(occupantInode);
+    // Still refuses on a retry, because the occupant is still the owner.
+    expect(() => broker.start()).toThrow(/socket already exists/i);
+  });
+
+  // stop() runs after Bun.serve().stop() has already unlinked the path, so an
+  // unconditional rmSync there deletes whichever successor bound in the window.
+  test("stop() reclaims only the socket inode the broker itself bound", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-broker-successor-"));
+    closers.push(() => rmSync(root, { recursive: true, force: true }));
+    const socket = join(root, "broker.sock");
+    const broker = new ProviderBroker({
+      credentials: { OPENAI_API_KEY: "parent-key" },
+      env: { HEADLESS_BROKER_ALLOW_LOOPBACK_TCP: "0" },
+      unixSocketPath: socket,
+    });
+    broker.start();
+    broker.stop();
+    expect(existsSync(socket)).toBe(false);
+
+    // A successor takes the freed path over, then the departing broker's stop()
+    // runs again (idempotent teardown paths do exactly this).
+    const successor = Bun.serve({ unix: socket, fetch: () => new Response("successor") });
+    closers.push(() => successor.stop(true));
+    const successorInode = lstatSync(socket).ino;
+    broker.stop();
+    expect(existsSync(socket)).toBe(true);
+    expect(lstatSync(socket).ino).toBe(successorInode);
   });
 
   test("rejects an invalid loopback policy instead of silently enabling TCP", () => {

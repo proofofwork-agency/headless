@@ -1,9 +1,11 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { HeadlessDaemon } from "../src/daemon/server";
+import { HeadlessError } from "../src/runtime/headless-error";
+import { listRuntimeDiagnostics } from "../src/runtime/diagnostics";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { DAEMON_PROTOCOL_VERSION, MAX_DAEMON_MESSAGE_BYTES } from "../src/daemon/protocol";
 import { connectLeadDaemon, connectOrStartDaemon } from "../src/daemon/connect";
@@ -30,6 +32,7 @@ import { parseGrokJsonl } from "../src/backends/grok";
 import { parseOpenCodeJsonl } from "../src/backends/opencode";
 import { exec as headlessExec } from "../src/index";
 import { schedulingAttempts, schedulingDeadline, schedulingWindow, setTestTimeout, testTimeout } from "./support/timing";
+import { withSocketElection } from "../src/runtime/socket-election";
 
 // The council-resume cases poll for 30s, so the file budget has to outlast that
 // window; a 20s default made their ceiling unreachable on every CI leg.
@@ -99,6 +102,33 @@ describe("authenticated project daemon", () => {
     const ping = await client.call<{ projectId: string }>("ping");
     expect(ping.projectId).toBe(winner.state.projectId);
     expect(existsSync(winner.state.socketPath)).toBe(true);
+  });
+
+  test("does not enter stale-socket recovery while another election owns the database", async () => {
+    const fixture = createFixture();
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, principal: "coordinator" });
+    daemons.push(daemon);
+
+    // Drive the real stale-socket branch without racing the scheduler: rename a
+    // bound donor before closing it, then hold the persistent election while
+    // start() tries to recover that entry. Removing start()'s election wrapper
+    // makes it probe, unlink, bind, and fulfill, so this regression fails.
+    const donorPath = join(daemon.state.daemonRuntimeDir, "daemon-donor.sock");
+    const donor = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve, reject) => {
+      donor.once("error", reject);
+      donor.listen(donorPath, resolve);
+    });
+    renameSync(donorPath, daemon.state.socketPath);
+    await new Promise<void>((resolve) => donor.close(() => resolve()));
+    const staleIdentity = lstatSync(daemon.state.socketPath).ino;
+
+    await withSocketElection(daemon.state.socketPath, { busyMessage: "Test owns the election." }, async () => {
+      const failure = await daemon.start().then(() => null, (error: unknown) => error);
+      expect(failure).toBeInstanceOf(HeadlessError);
+      expect(failure).toMatchObject({ code: "DAEMON_ALREADY_RUNNING", retryable: true });
+      expect(lstatSync(daemon.state.socketPath).ino).toBe(staleIdentity);
+    });
   });
 
   test("binds one owner-only socket to one canonical project and derives the principal", async () => {
@@ -275,6 +305,87 @@ describe("authenticated project daemon", () => {
     await daemon.start();
 
     await rawDaemonExchange(daemon.state.socketPath, "x".repeat(MAX_DAEMON_MESSAGE_BYTES + 1), true);
+
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
+    expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
+  });
+
+  test("drops a connection that drips bytes without ever completing a frame", async () => {
+    const fixture = createFixture();
+    const token = "a".repeat(48);
+    // Short absolute deadline so the drip below outlives it several times over.
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token, requestFrameTimeoutMs: 300 });
+    daemons.push(daemon);
+    await daemon.start();
+
+    const socket = createConnection(daemon.state.socketPath);
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
+    });
+    const closed = new Promise<string>((resolve) => socket.once("close", () => resolve("closed")));
+    // 60ms is far below the 300ms deadline, so an inactivity timer would be
+    // reset by every write and never fire. Only an absolute deadline armed at
+    // accept can end this. No newline is ever sent: the frame stays incomplete.
+    const drip = setInterval(() => {
+      if (!socket.destroyed) socket.write(".");
+    }, 60);
+    // Bounded so a regression reports "the deadline never fired" instead of
+    // hanging to the file's own timeout — an opaque bun timeout here would look
+    // exactly like the product hang this deadline exists to prevent.
+    const watchdog = new Promise<string>((resolve) => setTimeout(() => resolve("still-open"), 3_000));
+    try {
+      expect(await Promise.race([closed, watchdog])).toBe("closed");
+    } finally {
+      clearInterval(drip);
+      if (!socket.destroyed) socket.destroy();
+    }
+
+    // The daemon dropped one client, not its listener.
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
+    expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });
+  });
+
+  test("does not apply the frame deadline once a complete frame has arrived", async () => {
+    const fixture = createFixture();
+    const token = "a".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token, requestFrameTimeoutMs: 200 });
+    daemons.push(daemon);
+    await daemon.start();
+
+    // The deadline bounds waiting on the CLIENT, not how long a handler runs.
+    // events.wait long-polls for its full timeoutMs with nothing to report, so
+    // the handler deliberately outlives the deadline: if the complete frame did
+    // not clear the timer, the socket is destroyed mid-request at 200ms and this
+    // response never arrives. A connection-time sleep would not test this — the
+    // timer is armed at accept, so the wait has to happen after the frame.
+    const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
+    const startedAt = Date.now();
+    const events = await client.call("events.wait", { afterCursor: Number.MAX_SAFE_INTEGER, timeoutMs: 600 });
+    expect(Date.now() - startedAt).toBeGreaterThan(400);
+    expect(events).toBeDefined();
+  });
+
+  test("records a post-bind transport error instead of crashing the process", async () => {
+    const fixture = createFixture();
+    const token = "a".repeat(48);
+    const daemon = new HeadlessDaemon({ projectRoot: fixture.project, state: fixture.state, token });
+    daemons.push(daemon);
+    await daemon.start();
+
+    // secureUnixListen removes its bind-time handler on success. With no
+    // persistent replacement, EventEmitter turns any post-bind OS transport
+    // fault into an unhandled 'error' throw that takes the daemon down.
+    const server = (daemon as unknown as { server: { listenerCount(event: string): number; emit(event: string, error: Error): boolean } }).server;
+    expect(server.listenerCount("error")).toBeGreaterThan(0);
+    const before = listRuntimeDiagnostics().at(-1)?.sequence ?? 0;
+    expect(() => server.emit("error", new Error("synthetic post-bind transport error"))).not.toThrow();
+
+    // Assert the handler body, not merely that *some* listener exists: a bare
+    // no-op would also stop the throw while losing the fault entirely.
+    const recorded = listRuntimeDiagnostics({ afterSequence: before })
+      .filter((entry) => entry.category === "transport" && entry.scope === "daemon.server");
+    expect(recorded.length).toBe(1);
 
     const client = new HeadlessDaemonClient({ projectRoot: fixture.project, state: fixture.state, token });
     expect(await client.call("ping")).toMatchObject({ projectId: daemon.state.projectId });

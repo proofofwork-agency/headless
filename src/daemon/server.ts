@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 import { secureUnixListen } from "../runtime/secure-socket";
+import { withSocketElection } from "../runtime/socket-election";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { ZodError } from "zod";
@@ -105,6 +106,9 @@ export const DEFAULT_DAEMON_IDLE_TIMEOUT_MS = 900_000;
 const MAX_DAEMON_IDLE_TIMEOUT_MS = 86_400_000;
 const MIN_DAEMON_IDLE_TIMEOUT_MS = 1_000;
 const IDLE_WATCHDOG_INTERVAL_MS = 15_000;
+/** How long an accepted socket may go without delivering a complete request frame. */
+const DEFAULT_DAEMON_REQUEST_FRAME_TIMEOUT_MS = 30_000;
+const MAX_DAEMON_REQUEST_FRAME_TIMEOUT_MS = 300_000;
 const TERMINAL_JOB_STATES = new Set<Job["state"]>(["succeeded", "failed", "timed_out", "cancelled", "blocked"]);
 
 type JobWaiter = {
@@ -135,6 +139,14 @@ export type HeadlessDaemonOptions = {
    * default for embedded daemons that a host process already owns.
    */
   idleTimeoutMs?: number;
+  /**
+   * Drop an accepted connection that has not delivered a complete request frame
+   * within this many milliseconds. Deliberately separate from idleTimeoutMs:
+   * one bounds how long the daemon waits for a client that already connected,
+   * the other how long it stays alive with no clients at all. Tests and
+   * embedders override it; there is no way to disable it.
+   */
+  requestFrameTimeoutMs?: number;
   /**
    * Invoked once the idle deadline passes and the daemon is quiescent. The
    * bootstrapped `daemon serve` host uses this to stop and exit; embedded
@@ -200,6 +212,7 @@ export class HeadlessDaemon {
   private readonly sockets = new Set<Socket>();
   private routeHandlers!: DaemonRouteHandlerMap;
   private readonly idleTimeoutMs: number;
+  private readonly requestFrameTimeoutMs: number;
   private readonly onIdleShutdown?: () => void;
   private idleTimer: ReturnType<typeof setInterval> | null = null;
   private idleShutdownInFlight = false;
@@ -215,6 +228,7 @@ export class HeadlessDaemon {
     this.jobAdmissionLimits = { maxConcurrency: options.maxConcurrency, maxQueued: options.maxQueued };
     this.enableExperimentalSessions = options.enableExperimentalSessions === true;
     this.idleTimeoutMs = boundedIdleTimeout(options.idleTimeoutMs);
+    this.requestFrameTimeoutMs = boundedRequestFrameTimeout(options.requestFrameTimeoutMs);
     this.onIdleShutdown = options.onIdleShutdown;
     this.extensionConfig = resolveDaemonExtensionConfig({
       configPath: options.extensionConfigPath,
@@ -235,15 +249,38 @@ export class HeadlessDaemon {
     this.stopping = false;
     this.ready = false;
     this.jobAdmission?.dispose();
-    if (existsSync(this.state.socketPath)) {
-      if (await socketBecomesAvailable(this.state.socketPath)) throw new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`);
-      rmSync(this.state.socketPath, { force: true });
-    }
     const server = createServer((socket) => this.accept(socket));
-    let bound = false;
     try {
-      await secureUnixListen(server, this.state.socketPath);
-      bound = true;
+      await withSocketElection(
+        this.state.socketPath,
+        { busyMessage: `A Headless daemon already owns ${this.state.canonicalProjectRoot}.` },
+        async () => {
+          if (existsSync(this.state.socketPath)) {
+            if (await socketBecomesAvailable(this.state.socketPath)) {
+              throw new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`);
+            }
+            // Only the SQLite election holder may clear a socket proven stale.
+            // The transaction stays exclusive through the replacement bind, so
+            // no cooperating starter can bind inside this check-then-act window.
+            rmSync(this.state.socketPath, { force: true });
+          }
+          try {
+            await secureUnixListen(server, this.state.socketPath);
+          } catch (error) {
+            // EADDRINUSE means a non-cooperating same-user process claimed the
+            // path. Preserve the public single-owner refusal instead of leaking
+            // a raw errno; the election database itself is never removed.
+            throw isAddressInUse(error)
+              ? new HeadlessError("DAEMON_ALREADY_RUNNING", `A Headless daemon already owns ${this.state.canonicalProjectRoot}.`, { retryable: true })
+              : error;
+          }
+          // secureUnixListen removes its own bind-time 'error' handler once the
+          // bind resolves, leaving listenerCount('error') at zero. EventEmitter
+          // *throws* an unhandled 'error', so any post-bind transport fault the
+          // OS reports would crash the daemon instead of surfacing a diagnostic.
+          server.on("error", (error) => recordRuntimeDiagnostic("transport", "daemon.server", error, "error"));
+        },
+      );
       this.loadedExtensions = await loadDaemonExtensions(this.extensionConfig);
       this.initializeOwnedState();
       recoverLinkedProviderHolds({ budgets: this.budgets, broker: this.broker, jobs: this.jobs });
@@ -285,7 +322,6 @@ export class HeadlessDaemon {
         await closed;
         this.sockets.clear();
       });
-      if (bound) await cleanupWithDiagnostic("daemon.start.socket-remove", () => { rmSync(this.state.socketPath, { force: true }); });
       await cleanupWithDiagnostic("daemon.start.run-tools-revoke", () => this.runTools?.revokeAll());
       await cleanupWithDiagnostic("daemon.start.goal-runtime-dispose", () => this.goalRuntime?.dispose());
       await cleanupWithDiagnostic("daemon.start.job-admission-dispose", () => this.jobAdmission?.dispose());
@@ -389,7 +425,9 @@ export class HeadlessDaemon {
       for (const socket of this.sockets) socket.destroy();
       await closed;
       this.sockets.clear();
-      rmSync(this.state.socketPath, { force: true });
+      // No unlink here: close() already removed the path. A replacement daemon
+      // started by a CLI invocation arriving during idle shutdown may own it by
+      // now, and deleting that would strand a running daemon.
     }
     this.broker?.stop();
     if (this.ownedStateInitialized) {
@@ -402,8 +440,23 @@ export class HeadlessDaemon {
   private accept(socket: Socket) {
     this.markActivity();
     this.sockets.add(socket);
-    socket.once("close", () => this.sockets.delete(socket));
+    // An accepted socket counts against isQuiescent(), so a client that never
+    // completes a frame would otherwise pin the daemon alive forever and defeat
+    // idle shutdown entirely. This is an *absolute* deadline armed once at
+    // accept, not socket.setTimeout: an inactivity timer is reset by every byte,
+    // so a client dripping one character per interval would hold the connection
+    // open indefinitely while never being idle.
+    const frameDeadline = setTimeout(() => {
+      if (!socket.destroyed) socket.destroy();
+    }, this.requestFrameTimeoutMs);
+    frameDeadline.unref?.();
+    const clearFrameDeadline = () => clearTimeout(frameDeadline);
+    socket.once("close", () => {
+      clearFrameDeadline();
+      this.sockets.delete(socket);
+    });
     socket.once("error", () => {
+      clearFrameDeadline();
       this.sockets.delete(socket);
       if (!socket.destroyed) socket.destroy();
     });
@@ -415,6 +468,7 @@ export class HeadlessDaemon {
       buffer += chunk;
       if (Buffer.byteLength(buffer) > MAX_DAEMON_MESSAGE_BYTES) {
         handled = true;
+        clearFrameDeadline();
         socket.destroy();
         return;
       }
@@ -426,6 +480,9 @@ export class HeadlessDaemon {
       // not dispatch pipelined lines that would race multiple half-closes.
       handled = true;
       buffer = "";
+      // The frame arrived, so the connection is no longer waiting on a client;
+      // handler duration is governed by the request itself, not this deadline.
+      clearFrameDeadline();
       void this.respond(socket, line);
     });
   }
@@ -1963,6 +2020,11 @@ async function waitForExecutions(executions: Set<Promise<void>>, timeoutMs: numb
   return outcome !== marker;
 }
 
+/** EADDRINUSE is the kernel's single-owner verdict, not an internal fault. */
+function isAddressInUse(error: unknown) {
+  return (error as NodeJS.ErrnoException | undefined)?.code === "EADDRINUSE";
+}
+
 async function socketBecomesAvailable(path: string) {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if (await socketAcceptsConnections(path)) return true;
@@ -1991,6 +2053,18 @@ function localPrincipal() {
     recordRuntimeDiagnostic("state", "local-principal", error, "warning");
     return `local:pid-${process.pid}`;
   }
+}
+
+/**
+ * Unlike the idle timeout, this one has no "disabled" value: every accepted
+ * socket must carry a deadline, or a single silent client re-opens the hang.
+ */
+function boundedRequestFrameTimeout(value: number | undefined) {
+  if (value === undefined) return DEFAULT_DAEMON_REQUEST_FRAME_TIMEOUT_MS;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError("Daemon request frame timeout must be a positive bounded integer.");
+  }
+  return Math.min(MAX_DAEMON_REQUEST_FRAME_TIMEOUT_MS, value);
 }
 
 /** Zero disables the watchdog; anything else is clamped to a sane bounded window. */

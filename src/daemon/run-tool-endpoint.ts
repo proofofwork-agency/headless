@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { z } from "zod";
@@ -193,8 +193,10 @@ export class RunToolEndpointManager {
       server.on("error", () => { void this.revoke(id); });
       return { id, socketPath, token, scope: structuredClone(scope), operations: [...allowed] };
     } catch (error) {
-      server.close();
-      rmSync(socketPath, { force: true });
+      // No unlink either way. An EADDRINUSE bind never owned the path, so
+      // removing it would delete the occupant's socket; a post-bind ownership
+      // refusal did bind, and close() removes that path itself.
+      await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => {});
       throw error;
     }
   }
@@ -208,7 +210,8 @@ export class RunToolEndpointManager {
     for (const socket of record.sockets) socket.destroy();
     await new Promise<void>((resolve) => record.server.close(() => resolve())).catch(() => {});
     record.tokenDigest.fill(0);
-    rmSync(record.socketPath, { force: true });
+    // close() above already freed the path; anything there now belongs to
+    // whoever bound it next.
     return true;
   }
 

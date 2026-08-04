@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { z } from "zod";
 import { HeadlessError } from "../runtime/headless-error";
 import { redactAndTruncate } from "../runtime/redaction";
@@ -338,7 +338,8 @@ export class ProviderBroker {
       this.unixServer?.stop(true);
       this.server = null;
       this.unixServer = null;
-      if (this.unixSocketPath) rmSync(this.unixSocketPath, { force: true });
+      // No unlink: the refusal above fires precisely because something else
+      // already owns the path, and stop(true) removes anything we did bind.
       throw error;
     }
     return this.endpoint;
@@ -349,7 +350,8 @@ export class ProviderBroker {
     this.unixServer?.stop(true);
     this.server = null;
     this.unixServer = null;
-    if (this.unixSocketPath) rmSync(this.unixSocketPath, { force: true });
+    // stop(true) unlinks the bound path itself; a follow-up removal could only
+    // delete a successor's socket.
   }
 
   /**

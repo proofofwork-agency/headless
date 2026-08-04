@@ -56,6 +56,31 @@ export function assertSecureSocket(socketPath: string): void {
 }
 
 /**
+ * Both runtimes unlink a bound path from inside close()/stop(), so a caller has
+ * nothing left to clean up after a teardown and must not try.
+ *
+ * Measured on Bun 1.3.14, macOS and Linux/ext4: after an awaited node:net
+ * close(), a synchronous Bun.serve().stop(true), and a synchronous
+ * Bun.listen().stop(true), the path was already absent — 1,000/1,000 iterations
+ * per runtime on Linux, immediately and after a tick.
+ *
+ * A post-close unlink therefore has no legitimate work available to it: by the
+ * time it runs, anything at that path was bound by somebody else. That is not
+ * hypothetical — the daemon socket path is deterministic per project and the
+ * daemon auto-stops when idle, so a CLI invocation arriving during idle
+ * shutdown starts a replacement daemon whose socket the departing one would
+ * delete, leaving a running but unreachable daemon.
+ *
+ * An earlier attempt guarded the unlink by comparing the path's dev+ino against
+ * the value recorded at bind. That does not work: on ext4 an immediate
+ * successor reused the freed inode number in 20,000/20,000 trials, and adding
+ * ctimeNs did not separate them in 19,825 of those, because the filesystem
+ * clock collides inside the same millisecond. Filesystem identity is not a
+ * correctness primitive here, so there is no cleanup to guard — only one to
+ * delete.
+ */
+
+/**
  * process.umask() is process-global, so a naive save/set/restore pair is unsafe
  * the moment two binds overlap: each captures the other's temporary 0o077 as its
  * "previous" value and restores that instead of the real baseline, permanently

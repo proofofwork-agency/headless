@@ -7,6 +7,7 @@ import { HeadlessError } from "../src/runtime/headless-error";
 import { inspectLinkedHoldOffline } from "../src/runtime/linked-hold-quarantine";
 import { writeOwnerOnlyJson } from "../src/runtime/owner-json";
 import { getProjectStatePaths } from "../src/runtime/project-state";
+import { withSocketElection } from "../src/runtime/socket-election";
 
 const temporaryPaths: string[] = [];
 
@@ -69,6 +70,27 @@ describe("offline linked-hold lock socket", () => {
     const inspected = await inspectLinkedHoldOffline(fixture.projectRoot, fixture.linkId, fixture.stateOptions);
     expect(inspected.linkId).toBe(fixture.linkId);
     expect(existsSync(fixture.paths.socketPath)).toBe(false);
+  });
+
+  test("does not examine a stale socket while the shared election is held", async () => {
+    const fixture = lockFixture();
+    const donorPath = join(fixture.paths.daemonRuntimeDir, "held-donor.sock");
+    const donor = createServer((socket) => socket.destroy());
+    await listen(donor, donorPath);
+    renameSync(donorPath, fixture.paths.socketPath);
+    await close(donor);
+    const staleIdentity = lstatSync(fixture.paths.socketPath).ino;
+
+    // Deterministically hold the same database used by daemon startup. Removing
+    // the offline path's wrapper makes it probe, unlink, bind, and succeed, so
+    // this test is a mutation check on the integration rather than a race.
+    await withSocketElection(fixture.paths.socketPath, { busyMessage: "Test owns the election." }, async () => {
+      const failure = await inspectLinkedHoldOffline(fixture.projectRoot, fixture.linkId, fixture.stateOptions)
+        .then(() => null, (error: unknown) => error);
+      expect(failure).toBeInstanceOf(HeadlessError);
+      expect(failure).toMatchObject({ code: "DAEMON_ALREADY_RUNNING", retryable: true });
+      expect(lstatSync(fixture.paths.socketPath).ino).toBe(staleIdentity);
+    });
   });
 
   test("releases the lock socket when the guarded operation fails", async () => {
