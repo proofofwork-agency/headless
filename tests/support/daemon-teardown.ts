@@ -43,6 +43,23 @@ export async function stopTrackedDaemons(timeoutMs = 10_000) {
   }
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline && countDaemonsForRoots(roots) > 0) await Bun.sleep(50);
+
+  // Returning the SIGNALLED pids says nothing about whether they died, and this
+  // loop exits on the deadline just as happily as on a drained inventory. A
+  // daemon that outlives the signal therefore left silently, and the caller's
+  // next rmSync turned it into the `missing-root` stray that fails the daemon
+  // hygiene gate — a leak reported far from the fixture that caused it, and
+  // permanent for a `--no-idle-timeout` daemon that has no watchdog to reclaim
+  // it. Fail here instead, where the fixture is still named.
+  const survivors = listDaemonInventory()
+    .filter((entry) => entry.projectRoot && wanted.has(canonicalPath(entry.projectRoot)));
+  if (survivors.length > 0) {
+    throw new Error(
+      `${survivors.length} daemon(s) survived teardown after ${timeoutMs}ms: `
+      + survivors.map((entry) => `pid=${entry.pid} root=${entry.projectRoot}`).join(", ")
+      + ". A test that spawns a daemon must stop it on every path, including a failing assertion.",
+    );
+  }
   return targets.map((target) => target.pid);
 }
 

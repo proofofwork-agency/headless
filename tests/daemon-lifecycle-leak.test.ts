@@ -107,41 +107,60 @@ describe("bootstrapped daemon lifecycle", () => {
   test("exits on its own once the idle deadline passes", async () => {
     const fixture = idleFixture("headless-idle-exit-");
     const daemon = spawnDaemon(fixture, ["--idle-timeout-ms", String(IDLE_MS)]);
-    await waitForDaemonReady(daemon);
-    const exitCode = await Promise.race([
-      daemon.exited,
-      Bun.sleep(schedulingWindow(20_000)).then(() => "timeout" as const),
-    ]);
+    let exitCode: number | "timeout";
+    try {
+      await waitForDaemonReady(daemon);
+      exitCode = await Promise.race([
+        daemon.exited,
+        Bun.sleep(schedulingWindow(20_000)).then(() => "timeout" as const),
+      ]);
+    } finally {
+      // Idle shutdown is the behaviour under test, so on the happy path this is
+      // already gone; it matters when readiness throws or the watchdog does not
+      // fire, which is exactly the failure that would otherwise leak.
+      if (!daemon.killed) daemon.kill("SIGTERM");
+      await daemon.exited;
+    }
     expect(exitCode).toBe(0);
   }, 60_000);
 
   test("stays resident while a client keeps using it", async () => {
     const fixture = idleFixture("headless-idle-busy-");
     const daemon = spawnDaemon(fixture, ["--idle-timeout-ms", String(BUSY_IDLE_MS)]);
-    await waitForDaemonReady(daemon);
-    // Outlast the idle window while pinging: activity must reset the deadline.
-    const deadline = Date.now() + BUSY_IDLE_MS * 3;
-    while (Date.now() < deadline) {
-      const ping = await runCli(["daemon", "status", "--cwd", fixture.project], fixture.env);
-      expect(ping.exitCode, ping.stderr).toBe(0);
-      await Bun.sleep(BUSY_IDLE_MS / 4);
+    try {
+      await waitForDaemonReady(daemon);
+      // Outlast the idle window while pinging: activity must reset the deadline.
+      const deadline = Date.now() + BUSY_IDLE_MS * 3;
+      while (Date.now() < deadline) {
+        const ping = await runCli(["daemon", "status", "--cwd", fixture.project], fixture.env);
+        expect(ping.exitCode, ping.stderr).toBe(0);
+        await Bun.sleep(BUSY_IDLE_MS / 4);
+      }
+      expect(daemon.killed).toBe(false);
+    } finally {
+      // A failing assertion above must not also leak the daemon: the failure
+      // would then surface later as a stray with no link to this fixture.
+      daemon.kill("SIGTERM");
+      await daemon.exited;
     }
-    expect(daemon.killed).toBe(false);
-    daemon.kill("SIGTERM");
-    await daemon.exited;
   }, 60_000);
 
   test("never arms the watchdog when the operator opts out", async () => {
     const fixture = idleFixture("headless-idle-optout-");
     const daemon = spawnDaemon(fixture, ["--no-idle-timeout"]);
-    await waitForDaemonReady(daemon);
-    const outcome = await Promise.race([
-      daemon.exited.then((code) => `exited:${code}`),
-      Bun.sleep(IDLE_MS * 3).then(() => "resident" as const),
-    ]);
-    expect(outcome).toBe("resident");
-    daemon.kill("SIGTERM");
-    await daemon.exited;
+    try {
+      await waitForDaemonReady(daemon);
+      const outcome = await Promise.race([
+        daemon.exited.then((code) => `exited:${code}`),
+        Bun.sleep(IDLE_MS * 3).then(() => "resident" as const),
+      ]);
+      expect(outcome).toBe("resident");
+    } finally {
+      // This daemon opted out of the idle watchdog, so nothing will ever
+      // reclaim it on its own. Leaking it here is permanent.
+      daemon.kill("SIGTERM");
+      await daemon.exited;
+    }
   }, 60_000);
 
   test("classifies a suite fixture root as disposable so reaping can find it", () => {
