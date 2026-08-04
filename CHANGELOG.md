@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Breaking
+
+- **Unknown flags are rejected instead of silently ignored.** Validation is per command, from each command's own declared flags, so a flag valid for one command no longer passes for another. A typo'd or removed flag now fails fast rather than being dropped. `--flag=value` is not accepted; pass `--flag value`. Validated against 261 documented invocations across the docs, website, scripts and README with no failures, but wrappers that append one flag set to every command will need adjusting.
+
+### Fixed
+
+- **CLI actions are resolved from grammar rather than from a physical argv index.** Every handler read its subcommand as `args[1]`, so a global flag became the action: `headless daemon --cwd DIR` and `headless lead --cwd DIR` failed with a usage error, and `headless mcp --cwd DIR` consumed the flag *and its value* and then reported the operator's own project path as `Unknown MCP host`. One scanner now consumes each registered value flag together with its value as a single unit; 27 index reads across 18 handlers went through it.
+- **Usage errors are no longer reported as internal faults.** A `CliUsageError` was classified as `INVALID_REQUEST` only under `--json`; text mode fell through to `INTERNAL_ERROR`, so a typo printed "the daemon or runner hit an unexpected failure" and sent the operator to `headless daemon status` to debug a healthy daemon. Classified once now, before the output-mode split, so the two modes cannot diverge again.
+- Usage strings name the namespace the operator has to type: experimental commands print `headless experimental <command>` instead of a stable form that the top-level gate rejects.
+- `--after-sequence -1` and other negative numeric values report the range error from the semantic parser instead of "Missing value", which blamed the flag for being absent.
+- `headless experimental events --errors --activity` keeps its actionable conflict message under `--json` instead of degrading to a generic `INTERNAL_ERROR`.
+- `headless experimental launch` requires its backend before starting a daemon, instead of consuming `--cwd` as the backend name.
+- `headless tui` refuses without a terminal instead of reaching Ink's renderer, which threw from inside React and printed a framework stack trace citing `node_modules`.
+- The `UNSUPPORTED_PLATFORM` remedy no longer blames the operating system for failures that are not about the operating system.
+
 ## 0.2.0-beta.6 — 2026-07-31
 
 Package publication remains blocked. Both package manifests are private at `0.2.0-beta.6`; npm publication and repository visibility remain separate human-authority decisions. This tree is an unpublished private beta (not alpha).
