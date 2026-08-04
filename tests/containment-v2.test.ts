@@ -494,7 +494,14 @@ describe("Linux bubblewrap profiles", () => {
       "const tool=Bun.spawnSync(['headless-run-tool','task_status','{}'],{env:process.env,stdout:'pipe',stderr:'pipe'});",
       "const observed={unixError,brokerStatus:response.status,brokerBody:await response.text(),toolCode:tool.exitCode,toolOutput:tool.stdout.toString()};",
       "console.log(JSON.stringify(observed));",
-      "if(unixError==='CONNECTED'||!response.ok||tool.exitCode!==0||!observed.toolOutput.includes('run-tool-ok'))process.exit(82);",
+      // Deliberately NO aggregate failure exit here. This used to exit 82 when
+      // any observation was wrong, which collapsed four distinct outcomes into
+      // one opaque code AND short-circuited the parent's per-field assertions
+      // below, because the parent checks the exit code first. A real hosted-CI
+      // failure was therefore unclassifiable: exit 82 covers both a connectable
+      // late socket — a containment BREACH — and a merely unreachable broker or
+      // run-tool, which is a relay-availability problem. The child now reports
+      // and exits 0; the parent decides, and names which property failed.
     ].join("");
     const wrapped = maybeWrapWithSandbox(
       ["bun", "-e", script],
@@ -528,14 +535,16 @@ describe("Linux bubblewrap profiles", () => {
         new Response(child.stdout).text(),
         new Response(child.stderr).text(),
       ]);
-      // stdout carries the probe's own observations and is the ONLY thing that
-      // says WHICH of its four conditions failed — a connectable late socket is
-      // a containment breach, while an unreachable broker or run-tool is a
-      // relay-lifecycle problem, and exit 82 covers both. Reporting stderr
-      // alone made a real hosted-CI failure undiagnosable from the log.
+      // A non-zero exit now means the child crashed or never reported, which is
+      // a distinct failure from any observation being wrong. Both streams are in
+      // the message because this runs on hosted CI where the log is all there is.
       expect(exitCode, `stdout: ${stdout}\nstderr: ${stderr}`).toBe(0);
       const observed = JSON.parse(stdout) as { unixError: string; brokerStatus: number; brokerBody: string; toolCode: number; toolOutput: string };
-      expect(observed.unixError).not.toBe("CONNECTED");
+      // THE SECURITY PROPERTY, asserted first and on its own. A connectable
+      // late socket is a containment breach; everything below it is
+      // availability. Keeping them separate means a flaky relay can never
+      // obscure — or be mistaken for — a sandbox that leaked.
+      expect(observed.unixError, `late socket was reachable from inside the sandbox: ${stdout}`).not.toBe("CONNECTED");
       expect(observed.brokerStatus).toBe(200);
       expect(observed.brokerBody).toContain('"broker":"ok"');
       expect(observed.toolCode).toBe(0);
