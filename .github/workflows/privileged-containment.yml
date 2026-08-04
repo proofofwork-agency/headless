@@ -10,12 +10,13 @@ name: Privileged containment
 # What this job adds that the ordinary gate does not:
 #   - the privileged-container shape, exercising the same invariants under
 #     --privileged rather than the runner's default capabilities;
-#   - explicit anti-vacuity. The ordinary gate reports "0 fail" whether these
-#     cases ran or silently skipped. Here the architecture is asserted by
+#   - per-CASE anti-vacuity. The ordinary gate does fail-close on capability:
+#     it runs probeLinuxBwrap and exits non-zero if bubblewrap is unusable. What
+#     it does not do is witness individual cases — bun's summary reads "0 fail"
+#     whether a given case ran or skipped. Here the architecture is asserted by
 #     whole-line sentinel, each case name is anchored to (pass), and the
-#     combined case is required to appear as (skip) — which is the only proof
-#     that GITHUB_ACTIONS actually reached the container and armed the hosted
-#     predicate.
+#     combined case is required to appear as (skip), which is the only proof
+#     that GITHUB_ACTIONS reached the container and armed the hosted predicate.
 #
 # It deliberately does NOT cover the combined
 # "denied while broker and run tools remain reachable" case: that one also
