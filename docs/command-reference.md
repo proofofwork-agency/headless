@@ -27,7 +27,7 @@ Default help contains only the Beta 1 execution, project-lifecycle, foreground-l
 | `status` | Beta 1 | — | `status [--cwd dir]              Show project and daemon status.` |
 | `doctor` | Beta 1 | — | `doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, daemon broker env, next commands.` |
 | `tui` | Beta 1 | — | `tui [--cwd dir]                 Open the read-only observer log and configuration pane.` |
-| `mcp` | Beta 1 | — | `mcp <serve|install|remove|status> [codex|grok|claude|opencode] [--cwd dir]` |
+| `mcp` | Beta 1 | — | `mcp <serve [host]|install <host>|remove <host>|status [host]> [--cwd dir]   Install/remove require an explicit codex, grok, claude, or opencode host.` |
 | `launch` | Experimental | — | `experimental launch <backend> [options]        Compatibility one-shot routed through the daemon.` |
 | `skill` | Experimental | skills | `experimental skill | skills <list|inspect|import|enable|use|revoke> [options]` |
 | `loop` | Experimental | — | `experimental loop <start|list|status|pause|resume|cancel> --confirm [--repair --check name] [finite policy options]` |

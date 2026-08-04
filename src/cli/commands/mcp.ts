@@ -32,9 +32,18 @@ export async function runMcpCommand(args: string[]) {
     await import("../../mcp/server.js").then((module) => module.startMcpServer({ host }));
     return;
   }
+  if (action === "install" || action === "remove") {
+    const hostValue = operands[0];
+    if (!hostValue) {
+      throw new CliUsageError(
+        `MCP host is required for ${action}. Usage: headless mcp ${action} <codex|grok|claude|opencode> [--cwd dir]`,
+      );
+    }
+    const host = normalizeMcpHost(hostValue);
+    if (action === "install") return runMcpInstall(host, { checkoutRoot });
+    return runMcpRemove(host);
+  }
   const host = normalizeMcpHost(operands[0] ?? "codex");
-  if (action === "install") return runMcpInstall(host, { checkoutRoot });
-  if (action === "remove") return runMcpRemove(host);
   if (action === "status") return runMcpStatus(host);
   throw new CliUsageError("Usage: headless mcp <serve|install|remove|status> [codex|grok|claude|opencode] [--cwd dir]");
 }

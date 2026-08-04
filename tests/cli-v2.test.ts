@@ -14,6 +14,7 @@ import {
   parseCliInvocation,
   parseIntegerArg,
   renderHelp,
+  renderInvocationHelp,
   resolveCommand,
   runMcpInstall,
   validateCommandFlags,
@@ -87,6 +88,22 @@ describe("v0.2 CLI contracts", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe(`${renderHelp()}\n`);
     expect(result.stderr).toBe("");
+  });
+
+  test("renders command-local help without weakening namespace or separator handling", async () => {
+    const daemon = await runCli(["daemon", "--help"]);
+    expect(daemon.exitCode).toBe(0);
+    expect(daemon.stdout).toBe(`${renderInvocationHelp(["daemon", "--help"])}\n`);
+    expect(daemon.stdout).toContain("Usage: headless daemon");
+    expect(daemon.stdout).not.toContain("Commands:");
+
+    const fleet = await runCli(["experimental", "fleet", "--help"]);
+    expect(fleet.exitCode).toBe(0);
+    expect(fleet.stdout).toContain("Usage: headless experimental fleet");
+    expect(fleet.stdout).not.toContain("Commands:");
+
+    expect(renderInvocationHelp(["fleet", "--help"])).toBe(renderHelp());
+    expect(parseCliInvocation(["exec", "--", "--help"]).kind).toBe("command");
   });
 
   test("prints large JSON responses as one complete parseable document", async () => {
@@ -418,6 +435,21 @@ describe("CLI usage errors are classified as operator input, not runtime faults"
     const parsed = JSON.parse(json.stdout);
     expect(parsed.error.code).toBe("INVALID_REQUEST");
     expect(parsed.error.message).toBe("Unknown flag for tui: --json.");
+  });
+
+  test("gate validation failures remain one parseable JSON document", async () => {
+    const project = trackDaemonProjectRoot(mkdtempSync(join(tmpdir(), "headless-cli-gate-project-")));
+    const state = mkdtempSync(join(tmpdir(), "headless-cli-gate-state-"));
+    const result = await runCli(
+      ["experimental", "gate", "--check", "not-configured", "--cwd", project, "--json"],
+      { HEADLESS_STATE_HOME: state },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).not.toContain("Running daemon-owned release gate checks");
+    expect(JSON.parse(result.stdout).error).toMatchObject({
+      code: "INVALID_REQUEST",
+      message: "Unknown configured gate check: not-configured",
+    });
   });
 });
 

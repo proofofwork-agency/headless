@@ -139,7 +139,7 @@ export const COMMAND_SPECS = [
   {
     name: "mcp",
     valueFlags: ["--cwd"],
-    help: "mcp <serve|install|remove|status> [codex|grok|claude|opencode] [--cwd dir]",
+    help: "mcp <serve [host]|install <host>|remove <host>|status [host]> [--cwd dir]   Install/remove require an explicit codex, grok, claude, or opencode host.",
   },
   {
     name: "launch",
@@ -246,6 +246,17 @@ export function renderHelp(includeExperimental = false) {
       : "Run `headless experimental --help` to list commands outside the beta stability promise.",
     "Use a literal -- before prompts that begin with a flag.",
   ].join("\n");
+}
+
+/** Render local usage when help names a public command, otherwise the catalog. */
+export function renderInvocationHelp(args: string[]) {
+  const experimental = args[0] === "experimental";
+  const name = experimental ? args[1] : args[0];
+  const spec = resolveCommandSpec(name);
+  if (spec && "help" in spec && (experimental || STABLE_COMMAND_NAMES.has(spec.name))) {
+    return renderCommandUsage(spec.name);
+  }
+  return renderHelp(experimental || args.includes("--experimental"));
 }
 
 /**
