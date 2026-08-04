@@ -43,7 +43,13 @@ const results: Result[] = [];
 async function run(c: Case): Promise<Result> {
   const started = Date.now();
   const proc = Bun.spawn(["bun", CLI, ...c.argv], {
-    cwd: ROOT,
+    // The disposable project, not ROOT. Cases like `--cwd ""` and the ones that
+    // pass no --cwd at all deliberately fall back to process.cwd(), and with
+    // ROOT that meant running against this actual checkout: `experimental gate`
+    // then does real release-gate work on a real tree and blows the 20s budget,
+    // so the sweep reported a hang that only reproduces on a developer machine.
+    // CLI is an absolute path, so the spawn does not need ROOT.
+    cwd: project,
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
