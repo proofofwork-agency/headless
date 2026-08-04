@@ -4,6 +4,7 @@ import { parseLogDisplayMode, selectLogEvents, strictLogIdentity, type LogChanne
 import {
   EVENT_POLL_INTERVAL_MS,
   MAX_EVENT_LIMIT,
+  CliUsageError,
   daemonClient,
   flagArgsBeforeSeparator,
   getArg,
@@ -18,7 +19,8 @@ export async function runEventsCommand(args: string[]) {
   const limit = parseIntegerArg(flags, "--limit", MAX_EVENT_LIMIT) ?? 20;
   const sessionId = getArg(flags, "--session-id");
   const displayMode = parseLogDisplayMode(getArg(flags, "--display-mode"), "verbose");
-  if (flags.includes("--errors") && flags.includes("--activity")) throw new TypeError("Choose either --errors or --activity, not both.");
+  // A TypeError here degraded to INTERNAL_ERROR under --json and lost the cause.
+  if (flags.includes("--errors") && flags.includes("--activity")) throw new CliUsageError("Choose either --errors or --activity, not both.");
   const channel: LogChannel = flags.includes("--errors") ? "errors" : flags.includes("--activity") ? "activity" : "all";
   const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
   await printEventSnapshots(client, { follow, pretty, limit, sessionId, displayMode, channel });

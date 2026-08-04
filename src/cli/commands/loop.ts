@@ -1,7 +1,9 @@
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
 import { CliUsageError, daemonClient, flagArgsBeforeSeparator, getApprovalPolicy, getArg, getAuthMode, getMode, getPrompt, getRepeatedArgs, parseIntegerArg, requiredArg } from "../shared";
 
 export async function runLoopCommand(args: string[]) {
-  const action = args[1] || "list";
+  const { action, argvWithoutAction } = resolveCommandAction(args, "list");
   const flags = flagArgsBeforeSeparator(args);
   const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
   if (action === "list") return print(await client.call("loop.list"));
@@ -14,10 +16,10 @@ export async function runLoopCommand(args: string[]) {
     const file = getArg(flags, "--file");
     const policy = file
       ? JSON.parse(await Bun.file(file).text())
-      : flags.includes("--repair") ? repairPolicy(flags) : goalPolicy(args, flags);
+      : flags.includes("--repair") ? repairPolicy(flags) : goalPolicy(argvWithoutAction, flags);
     return print(await client.call("loop.start", { policy }));
   }
-  throw new CliUsageError("Usage: headless loop <start|list|status|pause|resume|cancel> [--confirm] [--repair] [options]");
+  throw new CliUsageError(renderCommandUsage("loop"));
 }
 
 /**
@@ -64,8 +66,8 @@ function repairPolicy(flags: string[]) {
   };
 }
 
-function goalPolicy(args: string[], flags: string[]) {
-  const objective = getPrompt(["loop", ...args.slice(2)]);
+function goalPolicy(argvWithoutAction: string[], flags: string[]) {
+  const objective = getPrompt(argvWithoutAction);
   if (!objective) throw new CliUsageError("A loop objective or --file policy is required.");
   const deadlineMs = parseIntegerArg(flags, "--deadline-ms") ?? 7_200_000;
   const maxIterations = parseIntegerArg(flags, "--max-iterations", 1_000) ?? 5;

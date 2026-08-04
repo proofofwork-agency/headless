@@ -1,13 +1,15 @@
 import type { LedgerVerificationVerdict } from "../../runtime/ledger-v2";
+import { resolveCommandAction } from "../argv";
 import { CliUsageError, daemonClient, flagArgsBeforeSeparator, getArg, printJson } from "../shared";
 
 export async function runLedgerCommand(args: string[]) {
+  const { action } = resolveCommandAction(args);
   const flags = flagArgsBeforeSeparator(args);
-  if (flags[1] === "verify") {
+  if (action === "verify") {
     await verify(flags);
     return;
   }
-  if (flags[1] === "repair-tail" && flags.includes("--confirm")) {
+  if (action === "repair-tail" && flags.includes("--confirm")) {
     const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
     printJson(await client.call("ledger.repairTail", { confirm: true }));
     return;

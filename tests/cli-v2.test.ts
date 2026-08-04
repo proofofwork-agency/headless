@@ -16,6 +16,7 @@ import {
   renderHelp,
   resolveCommand,
   runMcpInstall,
+  validateCommandFlags,
 } from "../src/cli";
 import { parseBudgetCommand } from "../src/cli/commands/budget";
 import { schedulingWindow } from "./support/timing";
@@ -108,7 +109,10 @@ describe("v0.2 CLI contracts", () => {
     for (const flag of ["--session-id", "--limit", "--check", "--timeout-ms", "--cwd", "--extension-config", "--lead"]) {
       expect(VALUE_FLAGS.has(flag)).toBe(true);
     }
-    expect(getPrompt(["exec", "--session-id", "session-1", "--limit", "2", "prompt"])).toBe("prompt");
+    expect(getPrompt(["exec", "--session-id", "session-1", "--timeout-ms", "2", "prompt"])).toBe("prompt");
+    // This assertion used to pass --limit, an events/collaboration/receipt flag,
+    // and only worked because the global union blessed it on every command.
+    expect(() => validateCommandFlags(["exec", "--limit", "2", "prompt"])).toThrow("Unknown flag for exec: --limit.");
     expect(flagArgsBeforeSeparator(["exec", "--cwd", "/repo", "--", "--cwd", "/prompt"])).toEqual(["exec", "--cwd", "/repo"]);
   });
 

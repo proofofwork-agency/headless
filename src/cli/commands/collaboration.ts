@@ -1,4 +1,6 @@
 import type { DaemonMethod } from "../../daemon/protocol";
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
 import {
   MAX_EVENT_LIMIT,
   CliUsageError,
@@ -17,7 +19,7 @@ export type CollaborationCommandCall = {
 };
 
 export function parseCollaborationCommand(args: string[]): CollaborationCommandCall {
-  const action = args[1] ?? "turns";
+  const { action } = resolveCommandAction(args, "turns");
   const flags = flagArgsBeforeSeparator(args);
   const goalId = requiredArg(flags, "--goal-id");
   if (action === "turns" || action === "messages") {
@@ -44,7 +46,7 @@ export function parseCollaborationCommand(args: string[]): CollaborationCommandC
       params: { goalId, messageIds, prune: !flags.includes("--retain") },
     };
   }
-  throw new CliUsageError("Usage: headless collaboration <turns|messages|acknowledge|transfer-synthesizer> --goal-id id [options]");
+  throw new CliUsageError(renderCommandUsage("collaboration"));
 }
 
 export async function runCollaborationCommand(args: string[]) {

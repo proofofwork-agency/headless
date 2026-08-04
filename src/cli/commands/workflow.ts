@@ -1,4 +1,6 @@
 import type { Workflow } from "../../contracts/durable";
+import { resolveCommandAction } from "../argv";
+import { renderCommandUsage } from "../command-specs";
 import {
   DEFAULT_RUN_TIMEOUT_MS,
   MAX_TIMEOUT_MS,
@@ -16,7 +18,7 @@ import {
 const workflowActions = new Set(["status", "wait", "pause", "resume", "cancel"]);
 
 export async function runWorkflowCommand(args: string[]) {
-  const action = args[1] || "list";
+  const { action } = resolveCommandAction(args, "list");
   const flags = flagArgsBeforeSeparator(args);
   const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
   if (action === "run") {
@@ -44,7 +46,7 @@ export async function runWorkflowCommand(args: string[]) {
     return;
   }
   if (!workflowActions.has(action)) {
-    throw new CliUsageError("Usage: headless workflow <run|validate|draft-create|draft-list|draft-get|draft-launch|list|status|wait|pause|resume|cancel> [options]");
+    throw new CliUsageError(renderCommandUsage("workflow"));
   }
   const workflowId = requiredArg(flags, "--workflow-id");
   const method = action === "status" ? "workflow.status" : action === "cancel" ? "workflow.cancel" : action === "pause" ? "workflow.pause" : action === "resume" ? "workflow.resume" : "workflow.wait";

@@ -1,3 +1,4 @@
+import { resolveCommandAction } from "../argv";
 import {
   CliUsageError,
   daemonClient,
@@ -17,7 +18,7 @@ import { basename } from "node:path";
 const DAEMON_STOP_TIMEOUT_MS = 35_000;
 
 export async function runDaemonCommand(args: string[]) {
-  const action = args[1] || "status";
+  const { action } = resolveCommandAction(args, "status");
   const flags = flagArgsBeforeSeparator(args);
   const projectRoot = getArg(flags, "--cwd") || process.cwd();
   ensureSupportedPlatform();

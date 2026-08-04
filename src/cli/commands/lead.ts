@@ -1,7 +1,8 @@
+import { resolveCommandAction } from "../argv";
 import { CliUsageError, daemonClient, flagArgsBeforeSeparator, getArg, printJson } from "../shared";
 
 export async function runLeadCommand(args: string[]) {
-  const action = args[1] ?? "status";
+  const { action, operands } = resolveCommandAction(args, "status");
   const flags = flagArgsBeforeSeparator(args);
   const client = await daemonClient(getArg(flags, "--cwd") || process.cwd(), flags);
   if (action === "status") {
@@ -13,8 +14,8 @@ export async function runLeadCommand(args: string[]) {
     return;
   }
   if (action === "use") {
-    const host = args[2]?.trim().toLowerCase();
-    if (!host || host.startsWith("-")) throw new CliUsageError("Usage: headless lead use <host> [--cwd dir]");
+    const host = operands[0]?.trim().toLowerCase();
+    if (!host) throw new CliUsageError("Usage: headless lead use <host> [--cwd dir]");
     printJson(await client.call("lead.use", { host }));
     return;
   }

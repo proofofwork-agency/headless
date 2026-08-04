@@ -9,26 +9,27 @@ import {
   type ReceiptVerificationVerdict,
 } from "../../runtime/receipt-verify";
 import { safeJsonParse } from "../../runtime/safe-json";
-import { VALUE_FLAGS } from "../command-specs";
+import { resolveCommandAction } from "../argv";
 import { CliUsageError, daemonClient, flagArgsBeforeSeparator, getArg, parseIntegerArg, printJson } from "../shared";
 
 const USAGE = "Usage: headless experimental receipt <show <runId> | list [--limit n] | export <runId> [--out file] | "
   + "verify <runId> | verify --file <export.json> [--ledger <ledger.jsonl>] | diff <runIdA> <runIdB>> [--json] [--cwd dir]";
 
 export async function runReceiptCommand(args: string[]) {
+  const { action, operands } = resolveCommandAction(args);
   const flags = flagArgsBeforeSeparator(args);
-  switch (flags[1]) {
-    case "show": return show(flags);
+  switch (action) {
+    case "show": return show(flags, operands);
     case "list": return list(flags);
-    case "export": return exportReceipt(flags);
-    case "verify": return verify(flags);
-    case "diff": return diff(flags);
+    case "export": return exportReceipt(flags, operands);
+    case "verify": return verify(flags, operands);
+    case "diff": return diff(flags, operands);
     default: throw new CliUsageError(USAGE);
   }
 }
 
-async function show(flags: string[]) {
-  const runId = positional(flags, 0);
+async function show(flags: string[], operands: string[]) {
+  const runId = positional(operands, 0);
   const client = await daemonClient(projectCwd(flags), flags);
   const receipt = await client.call<Receipt>("receipt.get", { runId });
   if (flags.includes("--json")) printJson(receipt);
@@ -47,8 +48,8 @@ async function list(flags: string[]) {
   else for (const receipt of receipts) console.log(summaryLine(receipt));
 }
 
-async function exportReceipt(flags: string[]) {
-  const runId = positional(flags, 0);
+async function exportReceipt(flags: string[], operands: string[]) {
+  const runId = positional(operands, 0);
   const client = await daemonClient(projectCwd(flags), flags);
   const exported = await client.call<ExportedReceipt>("receipt.export", { runId });
   const serialized = `${JSON.stringify(exported, null, 2)}\n`;
@@ -61,13 +62,13 @@ async function exportReceipt(flags: string[]) {
   }
 }
 
-async function verify(flags: string[]) {
+async function verify(flags: string[], operands: string[]) {
   const file = getArg(flags, "--file");
   if (file) {
     verifyOffline(flags, file);
     return;
   }
-  const runId = positional(flags, 0);
+  const runId = positional(operands, 0);
   const client = await daemonClient(projectCwd(flags), flags);
   const verdict = await client.call<ReceiptVerificationVerdict>("receipt.verify", { runId });
   if (flags.includes("--json")) printJson(verdict);
@@ -88,9 +89,9 @@ function verifyOffline(flags: string[], file: string) {
   process.exitCode = verdict.ok ? 0 : 1;
 }
 
-async function diff(flags: string[]) {
-  const runIdA = positional(flags, 0);
-  const runIdB = positional(flags, 1);
+async function diff(flags: string[], operands: string[]) {
+  const runIdA = positional(operands, 0);
+  const runIdB = positional(operands, 1);
   const client = await daemonClient(projectCwd(flags), flags);
   const [left, right] = await Promise.all([
     client.call<Receipt>("receipt.get", { runId: runIdA }),
@@ -196,18 +197,9 @@ function projectCwd(flags: string[]) {
   return getArg(flags, "--cwd") || process.cwd();
 }
 
-/** The nth positional argument after the `receipt <verb>` prefix, skipping flags and their values. */
-function positional(flags: string[], index: number) {
-  const positionals: string[] = [];
-  for (let i = 2; i < flags.length; i += 1) {
-    const token = flags[i]!;
-    if (token.startsWith("-")) {
-      if (VALUE_FLAGS.has(token)) i += 1;
-      continue;
-    }
-    positionals.push(token);
-  }
-  const value = positionals[index];
+/** The nth run id after the `receipt <verb>` prefix; the argv grammar already dropped flags. */
+function positional(operands: string[], index: number) {
+  const value = operands[index];
   if (!value) throw new CliUsageError(USAGE);
   return value;
 }
