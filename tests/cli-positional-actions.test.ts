@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CliUsageError } from "../src/cli/argv";
 import { parseApprovalCommand } from "../src/cli/commands/approval";
@@ -115,12 +116,36 @@ describe("launch and events fail on operator input before any daemon starts", ()
   });
 
   /**
-   * daemon/lead/ledger/receipt only export handlers that reach the daemon, so
-   * they cannot be pinned behaviourally without spawning one. They were also
-   * the four whose fix had no coverage at all: reverting them left every test
-   * green while `daemon --cwd X` was broken again. Pin the migration itself —
-   * a raw positional index in a handler IS the defect, wherever it reappears.
+   * daemon/lead/ledger/receipt export only daemon-reaching handlers, and they
+   * were the four whose fix had no coverage at all: reverting them left every
+   * test green while `daemon --cwd X` was broken again. These spawn the CLI and
+   * assert on behaviour, choosing invocations that resolve WITHOUT starting a
+   * daemon so the suite stays cheap.
    */
+  test("stable and nested commands honour an action that follows --cwd", async () => {
+    const state = mkdtempSync(join(tmpdir(), "hl-action-state-"));
+    const runtime = mkdtempSync(join(tmpdir(), "hl-action-rt-"));
+    const project = mkdtempSync(join(tmpdir(), "hl-action-proj-"));
+    const env = { HEADLESS_STATE_HOME: state, HEADLESS_RUNTIME_HOME: runtime };
+    try {
+      const daemon = await runCliIsolated(["daemon", "--cwd", project, "stop"], env);
+      expect(daemon.stderr + daemon.stdout).not.toContain("Usage: headless daemon");
+
+      const ledger = await runCliIsolated(["experimental", "ledger", "--cwd", project, "verify"], env);
+      expect(ledger.stderr + ledger.stdout).not.toContain("Usage: headless experimental ledger");
+
+      const receipt = await runCliIsolated(["experimental", "receipt", "--cwd", project, "list"], env);
+      expect(receipt.stderr + receipt.stdout).not.toContain("Usage: headless experimental receipt");
+
+      // And an genuinely unknown action is still rejected, so the assertions
+      // above are not passing merely because usage never renders.
+      const bogus = await runCliIsolated(["daemon", "--cwd", project, "not-a-subcommand"], env);
+      expect(bogus.stderr).toContain("Usage: headless daemon");
+    } finally {
+      for (const dir of [state, runtime, project]) rmSync(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   test("no handler reads its action from a physical argv index", () => {
     const directory = new URL("../src/cli/commands/", import.meta.url).pathname;
     const offenders: string[] = [];
@@ -134,3 +159,20 @@ describe("launch and events fail on operator input before any daemon starts", ()
     expect(offenders).toEqual([]);
   });
 });
+
+const cliEntry = new URL("../src/cli.ts", import.meta.url).pathname;
+
+async function runCliIsolated(argv: string[], extraEnv: Record<string, string>) {
+  const child = Bun.spawn(["bun", cliEntry, ...argv], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+    env: { ...process.env, NO_COLOR: "1", ...extraEnv } as Record<string, string>,
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}

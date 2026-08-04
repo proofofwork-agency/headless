@@ -20,6 +20,7 @@ export const COMMAND_SPECS = [
   {
     name: "lead",
     valueFlags: ["--cwd", "--extension-config", "--extension-module"],
+    booleanFlags: ["--json"],
     help: "lead <use <host>|status|release> [--cwd dir]   Configure the externally launched foreground lead.",
   },
   {
@@ -32,66 +33,68 @@ export const COMMAND_SPECS = [
   {
     name: "daemon",
     valueFlags: ["--cwd", "--extension-config", "--extension-module", "--idle-timeout-ms"],
-    booleanFlags: ["--no-idle-timeout", "--experimental-sessions", "--all", "--confirm"],
+    booleanFlags: ["--no-idle-timeout", "--experimental-sessions", "--all", "--confirm", "--json"],
     help: "daemon <serve|status|stop|reap> [--cwd dir] [--extension-config /absolute/trusted.json] [--idle-timeout-ms ms | --no-idle-timeout] [reap: --confirm] [reap: --all]",
   },
   {
     name: "project",
     valueFlags: ["--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--allow-native-direct-unrestricted", "--allow-bypass"],
+    booleanFlags: ["--allow-native-direct-unrestricted", "--allow-bypass", "--json"],
     help: "project trust <status|grant|revoke> [--allow-native-direct-unrestricted] [--allow-bypass] [--cwd dir]",
   },
   {
     name: "fleet",
     valueFlags: ["--profile-id", "--agent", "--file", "--auth-mode", "--approval-policy", "--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--activate", "--no-activate"],
+    booleanFlags: ["--activate", "--no-activate", "--json"],
     help: "fleet <health|profile get|list|remove> [--profile-id id] | fleet profile create --profile-id id --agent backend [--agent backend ...] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate] | fleet profile upsert [--file profile.json | [--profile-id id] --auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--activate|--no-activate]",
   },
   {
     name: "goal",
     valueFlags: ["--goal-id", "--fleet-profile-id", "--synthesizer", "--mode", "--auth-mode", "--approval-policy", "--timeout-ms", "--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--autonomous", "--detach"],
+    booleanFlags: ["--autonomous", "--detach", "--json"],
     help: "goal <start|run|send|follow|status|list|cancel|result> [--goal-id id] [--mode read-only|write] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--detach] [--timeout-ms n]",
   },
   {
     name: "collaboration",
     valueFlags: ["--goal-id", "--after-sequence", "--limit", "--agent-id", "--message-id", "--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--retain"],
+    booleanFlags: ["--retain", "--json"],
     help: "collaboration <turns|messages|acknowledge|transfer-synthesizer> --goal-id id [--message-id id ...] [--retain]",
   },
   {
     name: "approval",
     valueFlags: ["--goal-id", "--status", "--approval-id", "--decision", "--resolution", "--cwd", "--extension-config", "--extension-module"],
+    booleanFlags: ["--json"],
     help: "approval <list|resolve> [--goal-id id] [--approval-id id --decision approved|rejected --resolution text]",
   },
   {
     name: "candidate",
     valueFlags: ["--candidate-id", "--cwd", "--extension-config", "--extension-module"],
+    booleanFlags: ["--json"],
     help: "candidate <inspect|integrate|reject> --candidate-id id",
   },
   {
     name: "session",
     valueFlags: ["--backend", "--model", "--agent", "--session-id", "--timeout-ms", "--cwd", "--extension-config", "--extension-module", "--auth-mode", "--approval-policy"],
-    booleanFlags: ["--unsafe-no-sandbox", "--require-sandbox"],
+    booleanFlags: ["--unsafe-no-sandbox", "--require-sandbox", "--json"],
     help: "session <create|send|resume|cancel|status|result> [options]",
   },
   {
     name: "workflow",
     valueFlags: ["--file", "--workflow-id", "--draft-id", "--timeout-ms", "--auth-mode", "--approval-policy", "--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--unsafe-no-sandbox"],
+    booleanFlags: ["--unsafe-no-sandbox", "--json"],
     help: "workflow <run|validate|draft-create|draft-list|draft-get|draft-launch|list|status|wait|pause|resume|cancel> [options]",
   },
   {
     name: "events",
     aliases: ["logs"],
     valueFlags: ["--limit", "--session-id", "--display-mode", "--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--follow", "-f", "--pretty", "-p", "--errors", "--activity"],
+    booleanFlags: ["--follow", "-f", "--pretty", "-p", "--errors", "--activity", "--json"],
     help: "events | logs [--display-mode compact|verbose|strict] [--errors|--activity] [--follow] [--pretty] [--limit n]",
   },
   {
     name: "autonomy",
     valueFlags: ["--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--unsafe-no-sandbox"],
+    booleanFlags: ["--unsafe-no-sandbox", "--json"],
     help: "autonomy <start|stop|status|ask|backup> [options]",
   },
   {
@@ -103,13 +106,14 @@ export const COMMAND_SPECS = [
   {
     name: "council",
     valueFlags: ["--agent", "--mode", "--timeout-ms", "--auth-mode", "--approval-policy", "--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--unsafe-no-sandbox"],
+    booleanFlags: ["--unsafe-no-sandbox", "--json"],
     help: 'council [--agent backend ...] [--mode read-only|write] [--auth-mode native-login|broker] [--approval-policy ask|auto|bypass] [--timeout-ms n] "question"',
   },
   {
     name: "gate",
     aliases: ["release-gate"],
     valueFlags: ["--check", "--timeout-ms", "--session-id", "--cwd", "--extension-config", "--extension-module"],
+    booleanFlags: ["--json"],
     help: "gate [--check check|build|test|pack] [--timeout-ms n] [--cwd dir]",
   },
   {
@@ -126,6 +130,7 @@ export const COMMAND_SPECS = [
   {
     name: "status",
     valueFlags: ["--session-id", "--cwd", "--extension-config", "--extension-module"],
+    booleanFlags: ["--json"],
     help: "status [--cwd dir]              Show project and daemon status.",
   },
   { name: "doctor", valueFlags: ["--cwd", "--extension-config", "--extension-module"], booleanFlags: ["--json", "-j"], help: "doctor [--json] [--cwd dir]     Readiness panel: trust, backends, capsules, daemon broker env, next commands." },
@@ -163,7 +168,7 @@ export const COMMAND_SPECS = [
   {
     name: "budget",
     valueFlags: ["--id", "--principal", "--session-id", "--workflow-id", "--provider", "--max-requests", "--max-input-tokens", "--max-output-tokens", "--max-cost-usd", "--max-artifact-bytes", "--max-concurrency", "--max-retries", "--expires-at", "--link-id", "--expected-digest", "--resolution", "--cwd", "--extension-config", "--extension-module"],
-    booleanFlags: ["--confirm"],
+    booleanFlags: ["--confirm", "--json"],
     help: "budget <list|upsert|linked-hold inspect|linked-hold quarantine> [options] [--cwd dir]",
   },
 ] as const satisfies readonly CliCommandSpec[];

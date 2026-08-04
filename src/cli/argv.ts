@@ -24,12 +24,18 @@ export type ResolvedAction = {
 };
 
 /**
- * src/cli.ts renders every failure as a JSON document when --json is present,
- * whatever the command, so the flag is accepted everywhere even where the
- * handler ignores it. Help and version are intercepted before dispatch; they
- * are listed so direct callers of validateCommandFlags agree with the CLI.
+ * Help and version are intercepted before dispatch; they are listed so direct
+ * callers of validateCommandFlags agree with the CLI.
+ *
+ * --json is deliberately NOT here. src/cli.ts renders every *failure* as JSON
+ * whenever --json appears in argv, which is why it was once accepted globally —
+ * but that made it a silent no-op on commands that print human text, so
+ * `headless init --json` exited 0 with prose. Each command whose success output
+ * is JSON declares the flag itself; the rest reject it as unknown, and that
+ * rejection is still delivered as a JSON envelope because error rendering reads
+ * raw argv.
  */
-const ALWAYS_ACCEPTED_FLAGS = ["--json", "--help", "-h", "--version", "-V"] as const;
+const ALWAYS_ACCEPTED_FLAGS = ["--help", "-h", "--version", "-V"] as const;
 
 const VALUE_FLAGS_BY_COMMAND = new Map(COMMAND_SPECS.map((spec) => [
   spec.name,

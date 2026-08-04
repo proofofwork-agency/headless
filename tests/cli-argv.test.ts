@@ -145,10 +145,25 @@ describe("validateCommandFlags rejects flags the command does not accept", () =>
     }
   });
 
-  test("accepts --json everywhere because src/cli.ts renders every failure as JSON", () => {
-    for (const name of ["lead", "daemon", "mcp", "fleet", "goal", "status"]) {
+  test("accepts --json only where the command's own output is JSON", () => {
+    // Accepting it everywhere made it a silent no-op: `headless init --json`
+    // exited 0 with prose. A command whose success output is human text must
+    // refuse the flag rather than ignore the operator's request.
+    for (const name of ["lead", "daemon", "fleet", "goal", "status", "events", "council"]) {
       expect(() => validateCommandFlags([name, "--json"])).not.toThrow();
     }
+    for (const name of ["init", "setup", "mcp", "tui"]) {
+      expect(() => validateCommandFlags([name, "--json"])).toThrow(`Unknown flag for ${name}: --json.`);
+    }
+  });
+
+  test("a repeated flag still rejects an empty value", () => {
+    // getArg tolerates "" so the top-level error renderer can read --cwd, but
+    // unifying getRepeatedArgs under that let `--agent ""` through to the
+    // daemon as a real agent id instead of failing in the parser.
+    expect(() => getRepeatedArgs(["fleet", "--agent", ""], "--agent")).toThrow("Missing value for --agent.");
+    expect(() => getRepeatedArgs(["fleet", "--agent", "a", "--agent", ""], "--agent")).toThrow("Missing value for --agent.");
+    expect(getRepeatedArgs(["fleet", "--agent", "a", "--agent", "b"], "--agent")).toEqual(["a", "b"]);
   });
 
   test("never inspects tokens after the separator", () => {

@@ -383,10 +383,20 @@ describe("CLI usage errors are classified as operator input, not runtime faults"
     });
   }
 
-  test("keeps INTERNAL_ERROR for failures that are not operator input", async () => {
+  test("names a bad --cwd instead of leaking the filesystem error behind it", async () => {
+    // realpathSync surfaced `ENOENT: no such file or directory, lstat …`, which
+    // was then classified INTERNAL_ERROR and remedied with
+    // `headless daemon status --cwd <the same missing path>`.
     const result = await runCli(["verify", "--cwd", "/nonexistent/path/xyz"]);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("Internal error");
+    expect(result.stderr).toContain("Project root does not exist: /nonexistent/path/xyz");
+    expect(result.stderr).not.toContain("ENOENT");
+    expect(result.stderr).not.toContain("lstat");
+    expect(result.stderr).not.toContain("Internal error");
+    expect(result.stderr).not.toContain("headless daemon status");
+
+    const json = await runCli(["verify", "--cwd", "/nonexistent/path/xyz", "--json"]);
+    expect(JSON.parse(json.stdout).error.code).toBe("INVALID_REQUEST");
   });
 
   test("tui refuses without a terminal instead of dumping Ink's stack trace", async () => {
@@ -401,8 +411,13 @@ describe("CLI usage errors are classified as operator input, not runtime faults"
     // The remedy must not blame the operating system: this fires on macOS.
     expect(result.stderr).not.toContain("requires macOS or Linux.");
 
+    // tui renders a terminal UI and prints no JSON, so it does not accept
+    // --json — but the refusal still arrives as a JSON envelope, because error
+    // rendering reads raw argv rather than the command's declared flags.
     const json = await runCli(["tui", "--json"]);
-    expect(JSON.parse(json.stdout).error.code).toBe("UNSUPPORTED_PLATFORM");
+    const parsed = JSON.parse(json.stdout);
+    expect(parsed.error.code).toBe("INVALID_REQUEST");
+    expect(parsed.error.message).toBe("Unknown flag for tui: --json.");
   });
 });
 

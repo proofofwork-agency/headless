@@ -46,7 +46,13 @@ export function getRepeatedArgs(argv: string[], name: string) {
   const values: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] !== name) continue;
-    values.push(readFlagValue(argv, name, index));
+    const value = readFlagValue(argv, name, index);
+    // getArg tolerates "" because callers spell their default as
+    // `getArg(...) || fallback` and the error renderer reads --cwd. A repeated
+    // flag has no such fallback — every value is a required identifier — so it
+    // keeps its stricter contract instead of letting "" reach the daemon.
+    if (value === "") throw new CliUsageError(`Missing value for ${name}.`);
+    values.push(value);
     index += 1;
   }
   return values;
