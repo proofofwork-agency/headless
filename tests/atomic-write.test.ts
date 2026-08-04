@@ -51,6 +51,10 @@ if (!failed) throw new Error("atomicWriteFile unexpectedly succeeded");`,
     expect(child.exitCode, child.stderr.toString()).toBe(0);
     expect(existsSync(path)).toBe(false);
     expect(readdirSync(root).filter((name) => name.includes(".tmp-"))).toEqual([]);
+    // close(2) releases the descriptor even when it reports an error, so a
+    // retry can close a number another operation has since reused. Exactly one
+    // attempt — cleanup must unlink the temp file without re-closing.
+    expect(child.stderr.toString()).toContain("ATOMIC_CLOSE_ATTEMPTS=1");
   });
 
   test("appends content in order and applies owner-only mode", () => {
