@@ -112,6 +112,9 @@ const GATES: GateCoverage[] = [
     gate: "installedCodexTest",
     files: ["tests/backend-hardening.test.ts"],
     legs: [],
+    cases: [
+      { file: "tests/backend-hardening.test.ts", name: "installed Codex accepts the complete strict policy before provider access" },
+    ],
     undeclaredReason:
       "Requires a locally installed codex CLI at >= 0.144.1, and CI installs no provider CLIs. It was "
       + "previously an early `return` inside the test body, which reports as a PASS with zero assertions — "
@@ -119,19 +122,6 @@ const GATES: GateCoverage[] = [
       + "countable; the strict-policy construction it guards is still covered by the non-installed "
       + "buildCodexCommand cases on both legs.",
   },
-  { gate: 'skipIf(process.platform !== "linux")', files: ["tests/broker.test.ts"], legs: ["ubuntu"] },
-  {
-    gate: 'skipIf(process.platform !== "darwin" && process.platform !== "linux")',
-    files: ["tests/control-plane-utils.test.ts", "tests/daemon.test.ts"],
-    legs: ["ubuntu", "macos"],
-  },
-  {
-    gate: "skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())",
-    files: ["tests/daemon-run-tool.test.ts"],
-    legs: ["macos"],
-  },
-  { gate: "skipIf(!strictContainmentAvailable())", files: ["tests/runtime-fault-audit.test.ts"], legs: ["ubuntu", "macos"] },
-  { gate: 'skipIf(process.platform !== "darwin")', files: ["tests/run-tool-endpoint.test.ts"], legs: ["macos"] },
   { gate: 'skipIf(process.platform !== "linux")', files: ["tests/broker.test.ts"], legs: ["ubuntu"] },
   {
     gate: 'skipIf(process.platform !== "darwin" && process.platform !== "linux")',
@@ -229,6 +219,7 @@ function scanBodyGuards(source: string) {
   const opener = new RegExp(String.raw`^(\s*)(?:\w*(?:test|Test)|it)(?:\.\w+\([\s\S]*?\))?\(` + CASE_NAME);
   const guards: { predicate: string; test: string }[] = [];
   let open: { indent: number; name: string } | undefined;
+  let pendingGuard: { predicate: string; indent: number } | undefined;
   for (const line of source.split("\n")) {
     const opened = line.match(opener);
     if (opened) {
@@ -236,9 +227,23 @@ function scanBodyGuards(source: string) {
       continue;
     }
     if (!open) continue;
-    const guard = line.match(/^(\s*)if \((.*)\) return;\s*$/);
+    // Both shapes. The brace-less one-liner was all this caught, while the
+    // live defect it was written for — tests/secure-socket.test.ts returning
+    // with zero assertions — was brace-form, so the class it claimed to cover
+    // stayed invisible. `{` here only opens a guard we then confirm returns.
+    const guard = line.match(/^(\s*)if \((.*)\) (?:return;|\{)\s*$/);
     if (guard && guard[1]!.length === open.indent + 2) {
-      guards.push({ predicate: normalize(guard[2]!), test: open.name });
+      if (line.trimEnd().endsWith("{")) pendingGuard = { predicate: normalize(guard[2]!), indent: guard[1]!.length };
+      else guards.push({ predicate: normalize(guard[2]!), test: open.name });
+      continue;
+    }
+    if (pendingGuard) {
+      // A brace-form guard counts only when its body is a bare `return;`.
+      if (/^\s*return;\s*$/.test(line) && line.search(/\S/) === pendingGuard.indent + 2) {
+        guards.push({ predicate: pendingGuard.predicate, test: open.name });
+      }
+      if (/^\s*\}/.test(line) || /^\s*return;\s*$/.test(line)) pendingGuard = undefined;
+      if (!/^\s*return;\s*$/.test(line)) continue;
       continue;
     }
     if (new RegExp(String.raw`^\s{0,${open.indent}}\}\)`).test(line)) open = undefined;
@@ -344,6 +349,45 @@ describe("capability gate coverage", () => {
     const unregistered = [...new Set(FOUND.map((found) => key(found.file, found.gate)))]
       .filter((found) => !declared.has(found));
     expect(unregistered, "new capability gate must be added to the coverage registry").toEqual([]);
+  });
+
+
+  /**
+   * The teeth for the executable-case data. Without these, `cases` was inert
+   * metadata: it was declared, `caseKey` was defined and never called, and
+   * adding a fifth test under an already-uncovered gate left the suite green —
+   * the exact hole the data was added to close.
+   */
+  test("every uncovered gate enumerates the exact cases it hides", () => {
+    const uncovered = GATES.filter((gate) => gate.legs.length === 0);
+    // A zero-leg gate with no case list hides an unknown amount of behaviour.
+    expect(uncovered.filter((gate) => !(gate.cases ?? []).length).map((gate) => gate.gate)).toEqual([]);
+
+    const declared = uncovered.flatMap((gate) => (gate.cases ?? []).map((entry) => caseKey(gate.gate, entry))).sort();
+    const scanned = FOUND
+      .filter((found) => uncovered.some((gate) => gate.gate === found.gate && gate.files.includes(found.file)))
+      .flatMap((found) => found.cases.map((entry) => caseKey(found.gate, entry)))
+      .sort();
+    // Both directions: a new gated case must be declared, and a declared case
+    // that no longer exists must be removed.
+    expect([...new Set(scanned)], "a test hidden by an uncovered gate is not enumerated").toEqual([...new Set(declared)]);
+  });
+
+  test("every use of an uncovered gate yielded a readable case name", () => {
+    // uses > cases.length means the scanner saw an application it could not
+    // name, so the enumeration above would silently under-report.
+    const unreadable = FOUND
+      .filter((found) => GATES.some((gate) => gate.legs.length === 0 && gate.gate === found.gate && gate.files.includes(found.file)))
+      .filter((found) => found.uses !== found.cases.length)
+      .map((found) => `${found.file}:${found.gate} (${found.uses} uses, ${found.cases.length} named)`);
+    expect(unreadable).toEqual([]);
+  });
+
+  test("no gate is registered twice for the same file", () => {
+    // Map/Set lookups silently collapse duplicates, so a duplicated row cannot
+    // fail any other assertion here — five of them shipped unnoticed.
+    const keys = GATES.flatMap((gate) => gate.files.map((file) => key(file, gate.gate)));
+    expect(keys.filter((entry, index) => keys.indexOf(entry) !== index)).toEqual([]);
   });
 
   test("registry names no gate the suite has stopped declaring", () => {
