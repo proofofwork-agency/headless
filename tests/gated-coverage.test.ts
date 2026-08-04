@@ -216,7 +216,7 @@ function scanGates(file: string, source: string): FoundGate[] {
  * none of the evidence: bun prints it as a pass and counts zero assertions.
  * tests/backend-hardening.test.ts:186 returns when codex is absent, which is
  * every CI run, and no `test.skip` token exists there for the scan above to
- * find — so "exactly two gates are knowingly uncovered" counted neither exit
+ * find — so "the gate-count assertion are knowingly uncovered" counted neither exit
  * from that body and no assertion here could have caught it. Measured: with
  * this scan removed, planting a fresh `if (…) return;` in a test body left
  * this file at 5 pass / 0 fail. Only a top-level `if (…) return;`
@@ -321,7 +321,7 @@ describe("capability gate coverage", () => {
    * number. The enumeration above is the human-readable record, kept here so
    * the understatement is visible at the assertion rather than inferred.
    *
-   * The first of those three is no longer merely declared: it is measured
+   * The containment case, the first of those four, is no longer merely declared: it is measured
    * off-CI on privileged Linux with real bubblewrap. See
    * docs/internal/hosted-linux-relay-follow-up.md for the command, the pass
    * counts, and the architecture limit that still applies.
@@ -403,7 +403,7 @@ describe("capability gate coverage", () => {
   /**
    * A declared leg is a claim about the CI runner, and nothing inside the suite
    * can check it — which for `gitTest` is the dangerous case. Measured with git
-   * off PATH, its five files report `2 pass, 53 skip, 0 fail` and exit 0: all
+   * off PATH, its five files report `2 pass, 54 skip, 0 fail` and exit 0: all
    * 54 tests vanish and CI stays green, indistinguishable from a gate that runs
    * nowhere, except the registry above asserts it runs on both legs. Git is a
    * hard product prerequisite, so .github/workflows/ci.yml executes the gate's

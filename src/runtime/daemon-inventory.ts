@@ -36,9 +36,16 @@ export type DaemonInventoryEntry = DaemonProcessEntry & {
 };
 
 /**
- * Parses `ps -eo pid=,uid=,command=` output into the daemons this user owns.
- * Only our own `daemon serve` entrypoints match, so an unrelated process that
- * merely mentions the words is never a reap candidate.
+ * Parses `ps -eo pid=,uid=,command=` output into candidate daemons this user
+ * owns.
+ *
+ * The argv[1]/argv[2] anchor rejects a process that merely QUOTES a daemon
+ * command line — a shell echoing the string, or a message containing it, which
+ * was observed producing a "project root" full of backticks and a newline. It
+ * does NOT prove identity: matching is by basename, so an unrelated same-user
+ * program genuinely launched as `bun /elsewhere/cli.ts daemon serve` matches
+ * too. See the note on DAEMON_ENTRYPOINTS; anything acting on this list
+ * destructively must stay behind explicit human confirmation.
  */
 export function parseDaemonProcessTable(output: string, uid: number, selfPid: number): DaemonProcessEntry[] {
   const entries: DaemonProcessEntry[] = [];

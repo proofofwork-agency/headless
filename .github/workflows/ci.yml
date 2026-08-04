@@ -99,7 +99,7 @@ jobs:
 
       # Git is a hard product prerequisite, yet every worktree, candidate, and
       # write-integration test hides behind `gitAvailable ? test : test.skip`.
-      # Measured on a PATH without git, those files report `2 pass, 53 skip,
+      # Measured on a PATH without git, those files report `2 pass, 54 skip,
       # 0 fail` and exit 0: 54 tests disappear and CI still goes green. The
       # ubuntu/macos legs that tests/gated-coverage.test.ts claims for `gitTest`
       # are therefore a claim about this runner, not something the suite can
