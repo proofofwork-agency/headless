@@ -40,10 +40,10 @@ The first three steps must happen in this order. Steps 4–6 may be interleaved.
    read-only provider exec against the operator's native logins and spends their
    quota, so it is never run unattended.
 
-   **Read the gate before committing the evidence file.** Committing it moves
-   `HEAD` past the commit the evidence names and P.TTFV reverts to `manual`.
-   That is by design. Commit the evidence as the durable record afterwards, and
-   do not re-run chasing a green that no committed state can hold.
+   **Read the gate now, and do NOT commit the evidence yet.** Committing it moves
+   `HEAD` past the commit the evidence names, and the tag must name the commit
+   that was actually measured. The evidence is committed in step 7, after the
+   tag. Do not re-run chasing a green that no committed state can hold.
 
 4. **Full release check from the final tree.**
 
@@ -71,8 +71,19 @@ The first three steps must happen in this order. Steps 4–6 may be interleaved.
 
 ## Then, and only then
 
-Tag and publish. Both are human acts requiring explicit authorization; nothing in
-this repository performs them, and a green gate does not grant permission.
+7. **Tag and publish the measured commit**, then commit the evidence file on top
+   as the durable record.
+
+   The order matters and is easy to get backwards. The cut commit C is what the
+   live smoke measured, so C is what gets tagged. Committing the evidence first
+   would produce C+1 and you would tag a commit whose evidence names its parent —
+   precisely the failure this runbook warns about below. Recording the evidence
+   after the tag means `main` moves on while the tag stays pinned to the
+   validated tree.
+
+   Tagging and publishing are human acts requiring explicit authorization;
+   nothing in this repository performs them, and a green gate does not grant
+   permission.
 
 ## Things that have gone wrong before
 
