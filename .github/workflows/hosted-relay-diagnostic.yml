@@ -20,8 +20,9 @@ name: Hosted relay diagnostic
 # gates a merge: continue-on-error keeps a red diagnostic from blocking anyone,
 # and the artifact is the deliverable.
 #
-# Manual only. It deliberately reproduces a known failure and would otherwise
-# burn a runner on every push for a result we already expect.
+# Manual only. It samples a fixed 10 iterations plus a full cooperation run, so
+# it would burn a runner on every push for a result the ordinary gates already
+# cover.
 on:
   workflow_dispatch:
 
@@ -89,9 +90,11 @@ jobs:
         continue-on-error: true
         run: |
           set -uo pipefail
-          # Sample the process tree every 2s for the life of the run. The fault
-          # is a child that outlives its response, so the interesting evidence
-          # is what is STILL ALIVE, which a post-hoc dump cannot show.
+          # Sample the process tree every 2s for the life of the run. The
+          # original theory -- a child outliving its response -- was DISPROVED;
+          # the fault was the relay discarding the request. The sampler is kept
+          # because live process/socket state during the run is what made that
+          # findable, and a post-hoc dump cannot show it.
           ( while true; do
               echo "--- $(date -u +%H:%M:%S) ---"
               ps -eo pid,ppid,etimes,stat,comm,args | grep -E 'bwrap|bun|headless' | grep -v grep || true
@@ -108,8 +111,9 @@ jobs:
           echo $! > sampler.pid
           trap 'kill "$(cat sampler.pid)" 2>/dev/null || true' EXIT
 
-          # HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 is what makes the guarded
-          # cases run here at all; that is the point of this job.
+          # HEADLESS_PRIVILEGED_CONTAINMENT_CI no longer gates these -- they run
+          # on the ordinary Ubuntu leg now. It is left set because it is inert
+          # and harmless, not because it enables anything.
           HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 CI=true NO_COLOR=1 \
             bun test tests/daemon-run-tool.test.ts 2>&1 | tee cooperation.log
           echo "exit=${PIPESTATUS[0]}" | tee -a cooperation.log
