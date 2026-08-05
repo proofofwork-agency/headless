@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { atomicWriteFile } from "../../runtime/atomic-write";
+import { resolveLeadProjectRoot } from "../../runtime/lead-project-root";
 import { resolveCommandAction } from "../argv";
 import { CliUsageError, ensureSupportedPlatform, flagArgsBeforeSeparator, getArg } from "../shared";
 
@@ -18,14 +19,19 @@ export type McpInstallOptions = {
 export async function runMcpCommand(args: string[]) {
   const { action, operands } = resolveCommandAction(args, "serve");
   const flags = flagArgsBeforeSeparator(args);
-  const checkoutRoot = getArg(flags, "--cwd") || process.cwd();
+  const explicitRoot = getArg(flags, "--cwd");
+  const checkoutRoot = explicitRoot || process.cwd();
   if (action === "serve" || action === "server") {
     ensureSupportedPlatform();
     const host = normalizeMcpHost(operands[0] ?? "codex");
     // Prefer env so nested resolution and any residual entrypoint probes agree.
     process.env.HEADLESS_LEAD_HOST = host;
     if (!process.env.HEADLESS_PROJECT_ROOT) {
-      process.env.HEADLESS_PROJECT_ROOT = checkoutRoot;
+      // An MCP host launches this with whatever cwd it happens to hold, often
+      // the operator's home directory. `--cwd` stays authoritative; otherwise
+      // find the project rather than hashing the wrong directory into a new,
+      // empty project id.
+      process.env.HEADLESS_PROJECT_ROOT = explicitRoot || resolveLeadProjectRoot();
     }
     // Stdio MCP: keep stderr free of noise that hosts might treat as protocol.
     // Operators can still see attach status via lead status / doctor.

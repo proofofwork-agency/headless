@@ -79,7 +79,7 @@ import { ReceiptJournal, type ReceiptJournalRecord } from "../runtime/receipt-jo
 import { ExportedReceiptSchema, verifyReceipt as verifyStoredReceipt } from "../runtime/receipt-verify";
 import { PersistentMessageQueue } from "../runtime/message-queue";
 import { CredentialStore, type AuthenticatedCredential } from "../runtime/credential-store";
-import { LeadBindingStore, leadCredentialName } from "../runtime/lead-binding";
+import { LEAD_ATTACHMENT_REQUIRED, LeadBindingStore, leadCredentialName } from "../runtime/lead-binding";
 import { migrateSingleLeadState } from "../runtime/project-state-migration";
 import { assertPrincipalOwns } from "./auth";
 import { RunToolEndpointManager } from "./run-tool-endpoint";
@@ -517,7 +517,13 @@ export class HeadlessDaemon {
       try {
         const binding = this.leads.assertCurrent(credential.principal);
         if (binding.status !== "connected" && leadMutationRequiresAttachment(request.method)) {
-          throw new HeadlessError("POLICY_DENIED", "The configured foreground lead must attach before changing project state.");
+          // Structured reason: this is the one denial a client may repair by
+          // re-attaching, and it must be distinguishable from a real refusal.
+          throw new HeadlessError(
+            "POLICY_DENIED",
+            "The configured foreground lead must attach before changing project state.",
+            { details: { reason: LEAD_ATTACHMENT_REQUIRED } },
+          );
         }
       } catch (error) {
         endSocketResponse(socket, `${JSON.stringify(failure(request.id, error))}\n`);

@@ -7,6 +7,17 @@ import { ensureProjectStateDirectories, type ProjectStatePaths } from "./project
 export const LeadHostSchema = z.string().trim().toLowerCase()
   .regex(/^[a-z0-9][a-z0-9._-]{0,63}$/);
 
+/**
+ * Structured reason marking the ONE lead failure a client may repair by
+ * re-attaching: the binding is current and owned, but not presently attached.
+ *
+ * Everything else that surfaces as POLICY_DENIED — an admin-only route, a
+ * rotated generation, a revoked credential — is a real denial. Retrying those
+ * after an attach would re-issue a forbidden request and, worse, dress a
+ * legitimate refusal up as a lead-configuration problem the operator cannot fix.
+ */
+export const LEAD_ATTACHMENT_REQUIRED = "LEAD_ATTACHMENT_REQUIRED";
+
 export const LeadBindingSchema = z.object({
   host: LeadHostSchema,
   backendId: BackendIdSchema,
@@ -142,4 +153,44 @@ export class LeadBindingStore {
 
 export function leadCredentialName(host: string, generation: number) {
   return `lead-${LeadHostSchema.parse(host)}-g${generation}`;
+}
+
+/**
+ * Read a persisted lead binding WITHOUT creating project state.
+ *
+ * `new LeadBindingStore(...)` calls `ensureProjectStateDirectories` and then
+ * `persist()` in its constructor, so merely asking "is there a lead here?"
+ * materializes a full state tree and writes a lead-binding.json. Root
+ * resolution has to ask that question of every ancestor directory, so using the
+ * store for it would litter the machine with state for projects that do not
+ * exist — and, worse, make the wrong root look configured on the next probe.
+ */
+export function readLeadBinding(paths: ProjectStatePaths): LeadBinding | null {
+  const state = readOwnerOnlyJson(paths.leadBindingPath, LeadBindingStateSchema);
+  if (!state) return null;
+  if (state.projectId !== paths.projectId) {
+    throw new HeadlessError("CONFLICT", `Lead binding at ${paths.leadBindingPath} belongs to another project.`);
+  }
+  return state.binding;
+}
+
+/**
+ * Discovery variant: ask whether a CANDIDATE directory has a usable lead, making
+ * no writes and never throwing.
+ *
+ * Tolerance here is about the wrong candidate, not about bad state. A binding
+ * that is corrupt, foreign, symlinked or group-readable answers "no" — the
+ * directory is not a configured lead — so an insecure file can never steer which
+ * project gets attached. That is the opposite of `readLeadBinding`, which is used
+ * once the project is SELECTED and must surface corruption loudly rather than
+ * report it as a missing credential the operator is told to recreate.
+ */
+export function probeLeadBinding(paths: ProjectStatePaths): LeadBinding | null {
+  try {
+    const state = readOwnerOnlyJson(paths.leadBindingPath, LeadBindingStateSchema, { repairPermissions: false });
+    if (!state || state.projectId !== paths.projectId) return null;
+    return state.binding;
+  } catch {
+    return null;
+  }
 }

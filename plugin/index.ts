@@ -130,8 +130,14 @@ export const server: Plugin = async () => {
     Object.entries(tools).map(([name, definition]) => ({ name, definition })),
     resolveMcpToolset(),
   );
+  // Acquire the lease ONLY once every throwing step is behind us. Taking it at
+  // the top leaked a permanent ghost lease whenever construction failed (a bad
+  // HEADLESS_MCP_TOOLSET makes `resolveMcpToolset` throw): the count could never
+  // return to zero, so a later healthy instance would dispose and still never
+  // release the connections.
   return {
     tool: Object.fromEntries(advertised.map((entry) => [entry.name, entry.definition])),
+    dispose: acquireLeadPool(),
   };
 };
 
@@ -293,6 +299,41 @@ function recordValue(value: unknown, label: string): Record<string, unknown> {
 }
 
 const leadClients = new LeadDaemonClientPool();
+let leadPoolUsers = 0;
+
+/**
+ * Release the lead binding when OpenCode disposes this plugin.
+ *
+ * Without it the daemon holds the binding `connected` until the 45s heartbeat
+ * window lapses, so an operator who restarts OpenCode and reattaches immediately
+ * races their own stale attachment.
+ *
+ * This hangs off the host's awaited `dispose` hook rather than a process event.
+ * `beforeExit` was the wrong choice: it fires only on natural event-loop
+ * exhaustion, not on `process.exit` and not on default SIGINT/SIGTERM
+ * termination — i.e. not on the paths that actually end an editor session. And a
+ * guest plugin must NOT install SIGINT/SIGTERM listeners, because registering one
+ * suppresses Node's default termination for the entire host process. The
+ * dedicated `headless-mcp` entrypoint owns its process and may hook signals; a
+ * guest inside someone else's process does not get to make that choice for them.
+ *
+ * The pool is module-global, so disposal is reference-counted: if the host ever
+ * instantiates this plugin for two project contexts in one process, the first
+ * dispose must not tear the second one's connections down.
+ */
+/** Test hook: a leaked lease is invisible from outside, so it must be observable. */
+export const __leadPoolUsersForTest = () => leadPoolUsers;
+
+function acquireLeadPool() {
+  leadPoolUsers += 1;
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    leadPoolUsers -= 1;
+    if (leadPoolUsers === 0) await leadClients.disconnectAll();
+  };
+}
 
 async function daemon(context: ToolContext) {
   const projectRoot = runtimeCwd(context);

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { atomicWriteFile } from "./atomic-write";
-import { ensureOwnerOnlyDirectory, ensureOwnerOnlyFile } from "./project-state";
+import { assertOwnerOnlyFileUnrepaired, ensureOwnerOnlyDirectory, ensureOwnerOnlyFile } from "./project-state";
 
 const MAX_STORE_BYTES = 32 * 1024 * 1024;
 
@@ -9,9 +9,19 @@ type RuntimeSchema<T> = {
   parse(value: unknown): T;
 };
 
-export function readOwnerOnlyJson<T>(path: string, schema: RuntimeSchema<T>) {
+export function readOwnerOnlyJson<T>(
+  path: string,
+  schema: RuntimeSchema<T>,
+  options: { repairPermissions?: boolean } = {},
+) {
   if (!existsSync(path)) return null;
-  ensureOwnerOnlyFile(path);
+  // `ensureOwnerOnlyFile` chmods, so it is a WRITE. Discovery probes must not
+  // tighten permissions on every candidate they inspect — but they must still
+  // VALIDATE. Skipping the checks would let a symlinked or group-writable file
+  // be trusted, so the no-repair path asserts the same properties and refuses
+  // instead of repairing.
+  if (options.repairPermissions === false) assertOwnerOnlyFileUnrepaired(path);
+  else ensureOwnerOnlyFile(path);
 
   const size = statSync(path).size;
   if (size > MAX_STORE_BYTES) {

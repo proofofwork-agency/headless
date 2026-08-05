@@ -10,7 +10,7 @@ import {
   serializeDaemonExtensionManifest,
   type ResolvedDaemonExtensionConfig,
 } from "../runtime/daemon-extensions";
-import { LeadBindingStore, leadCredentialName } from "../runtime/lead-binding";
+import { LEAD_ATTACHMENT_REQUIRED, leadCredentialName, readLeadBinding } from "../runtime/lead-binding";
 
 export type ConnectDaemonOptions = {
   projectRoot: string;
@@ -116,7 +116,10 @@ export async function connectExistingDaemon(options: ConnectDaemonOptions) {
 
 export async function connectLeadDaemon(options: Omit<ConnectDaemonOptions, "credential" | "bootstrapObserver"> & { host: string }) {
   const state = getProjectStatePaths(options.projectRoot, options.state);
-  const binding = new LeadBindingStore(state).status();
+  // Read, never construct: `new LeadBindingStore(...)` materializes the whole
+  // project state tree from its constructor, so probing a root that turns out to
+  // be wrong would leave real-looking state behind for a project nobody created.
+  const binding = readLeadBinding(state);
   const host = options.host.trim().toLowerCase();
   if (!binding || binding.host !== host) {
     throw new HeadlessError("CREDENTIAL_MISSING", `No active ${host} foreground lead is configured. Run \`headless lead use ${host}\` first.`);
@@ -133,6 +136,14 @@ export class LeadDaemonClientPool {
   private readonly connections = new Map<string, Promise<{ client: HeadlessDaemonClient; generation: number }>>();
   private readonly heartbeats = new Map<string, ReturnType<typeof setInterval>>();
 
+  /**
+   * `heartbeatIntervalMs` exists so the recovery path can be observed without a
+   * 15s wall-clock wait. Both recovery mechanisms — this timer and the one-shot
+   * retry in `selfHealing` — must be independently provable, or a regression in
+   * either hides behind the other.
+   */
+  constructor(private readonly heartbeatIntervalMs = 15_000) {}
+
   async client(options: Omit<ConnectDaemonOptions, "credential" | "bootstrapObserver"> & { host: string }) {
     const state = getProjectStatePaths(options.projectRoot, options.state);
     const host = options.host.trim().toLowerCase();
@@ -142,8 +153,8 @@ export class LeadDaemonClientPool {
       connection = connectLeadDaemon({ ...options, projectRoot: state.canonicalProjectRoot, host }).then(async ({ client, binding }) => {
         await client.call("lead.attach", { generation: binding.generation });
         const timer = setInterval(() => {
-          void client.call("lead.heartbeat", { generation: binding.generation }, 5_000).catch(() => {});
-        }, 15_000);
+          void this.beat(key, client, binding.generation);
+        }, this.heartbeatIntervalMs);
         timer.unref?.();
         this.heartbeats.set(key, timer);
         return { client, generation: binding.generation };
@@ -153,7 +164,80 @@ export class LeadDaemonClientPool {
       });
       this.connections.set(key, connection);
     }
-    return (await connection).client;
+    const { client, generation } = await connection;
+    return this.selfHealing(key, client, generation);
+  }
+
+  /**
+   * One heartbeat, with recovery.
+   *
+   * A lead that is merely idle past the 45s window is marked `disconnected`
+   * (`lead-binding.ts:127-135`), and every later heartbeat then fails. Attach is
+   * legal from `disconnected` — `assertCurrent` checks principal and generation
+   * and never looks at status — so the lapse is recoverable in one call. The
+   * previous `.catch(() => {})` swallowed it instead, and because the cache entry
+   * was only ever deleted on INITIAL connect failure, the pool then handed out a
+   * permanently unusable client for the life of the process. That is the whole of
+   * defect #1: the daemon was always willing to take the lead back.
+   */
+  private async beat(key: string, client: HeadlessDaemonClient, generation: number) {
+    try {
+      await client.call("lead.heartbeat", { generation }, 5_000);
+    } catch {
+      try {
+        await client.call("lead.attach", { generation }, 5_000);
+      } catch {
+        // The binding is gone for good (rotated, released, revoked). Drop the
+        // connection so the next caller rebuilds against current state rather
+        // than inheriting a credential the daemon will keep refusing.
+        this.evict(key);
+      }
+    }
+  }
+
+  private evict(key: string) {
+    const timer = this.heartbeats.get(key);
+    if (timer) clearInterval(timer);
+    this.heartbeats.delete(key);
+    this.connections.delete(key);
+  }
+
+  /**
+   * The heartbeat closes the lapse within one interval, but a tool call landing
+   * inside that window would still fail. Give the caller a client that re-attaches
+   * and retries exactly once, so an idle harness's next request succeeds instead of
+   * surfacing POLICY_DENIED for something the operator did not do wrong.
+   */
+  private selfHealing(key: string, client: HeadlessDaemonClient, generation: number): HeadlessDaemonClient {
+    const pool = this;
+    return new Proxy(client, {
+      get(target, property) {
+        // Everything else is read from, and bound to, the REAL client. Passing
+        // the proxy as the receiver would re-bind `this` for any accessor or
+        // method, which is the standard way these wrappers break a class that
+        // uses genuine `#private` fields. Nothing here needs that, so do not
+        // take on the hazard.
+        if (property !== "call") {
+          const value = Reflect.get(target, property);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async function call(this: unknown, ...args: Parameters<HeadlessDaemonClient["call"]>) {
+          try {
+            return await target.call(...args);
+          } catch (error) {
+            // `lead.*` is the recovery path itself; retrying it would recurse.
+            if (!lapsedLeadAttachment(error) || String(args[0]).startsWith("lead.")) throw error;
+            try {
+              await target.call("lead.attach", { generation }, 5_000);
+            } catch {
+              pool.evict(key);
+              throw error;
+            }
+            return await target.call(...args);
+          }
+        };
+      },
+    });
   }
 
   async disconnectAll() {
@@ -165,6 +249,22 @@ export class LeadDaemonClientPool {
       client.call("lead.disconnect", { generation }, 2_000).catch(() => {}),
     ));
   }
+}
+
+/**
+ * A lapsed attachment, as opposed to a genuine refusal.
+ *
+ * This deliberately keys on the daemon's structured reason rather than on the
+ * POLICY_DENIED code. Treating every POLICY_DENIED as a lapse re-issued
+ * genuinely forbidden requests: a lead calling an admin-only route (say
+ * `approval.resolve`) would be denied, silently re-attached, and the forbidden
+ * call sent a second time. DAEMON_AUTH_FAILED is likewise not repairable —
+ * attaching with the same rejected token cannot succeed.
+ */
+export function lapsedLeadAttachment(error: unknown) {
+  if (!error || typeof error !== "object" || !("details" in error)) return false;
+  const details = (error as { details?: { reason?: unknown } }).details;
+  return details?.reason === LEAD_ATTACHMENT_REQUIRED;
 }
 
 async function tryClient(
