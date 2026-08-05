@@ -71,3 +71,34 @@ quiet again, and it clears itself the moment the smokes are re-run.
   requirement. Doing that is a separate, larger exercise, and claiming it here
   without doing it would be the exact failure mode this tree spent the day
   removing.
+
+## Gate A area → where its evidence executes
+
+Each Gate A area in [plan.md](../plan.md) mapped to the suites that run for it.
+
+**Read this as a map, not a verdict.** It establishes that no Gate A area is
+without executing coverage. It does **not** establish that each area's evidence
+requirement is satisfied clause by clause — those requirements are detailed
+(e.g. "legacy-aware persisted-RunResult decoding at *every* durable read
+boundary"), and verifying each clause is a separate exercise. Nothing here should
+be quoted as "Gate A area X is complete".
+
+| Gate A area | Suites that execute for it |
+| --- | --- |
+| Contracts | `contracts-v2`, `adapters-v2`, `public-api`, `receipt-schema`, `safe-json` |
+| Upgrade compatibility | `persisted-run-result-compatibility`, `run-event-store`, `receipt-store`, `receipt-journal` |
+| Daemon | `daemon`, `daemon-auth`, `daemon-route-dispatcher`, `daemon-process`, `daemon-lifecycle-leak`, `daemon-candidate-routes`, `daemon-fleet-routes`, `daemon-receipt-routes`, `control-plane-utils`, `job-admission-service` |
+| Lead onboarding | `lead-observer`, `mcp`, `mcp-install`, `fleet-cli-mcp`, `native-control-plane` |
+| Observer TUI | `tui-control-room`, `lead-observer`, `log-presentation` |
+| Ledger/state | `ledger-v2`, `ledger-keys`, `ledger-verify`, `receipt-*`, `project-state`, `atomic-write`, `owner-json`, `owner-only-path`, `integration-journal` |
+| Policy/budgets | `authority-budget`, `cost-budget`, `budget-concurrency-queue`, `pricing` |
+| Containment | `containment-v2`, `release-gate-containment`, `isolation-attestation`, `grok-isolation`, `native-auth`, `executable-read-roots`, `worker-env-keyring`, `linux-broker-relay`, `linux-relay-stream-proxy`, `secure-socket`, `darwin-bun-stage` |
+| Broker | `broker`, `broker-endpoint-reachability`, `pricing` |
+| Execution | `builtin-e2e`, `run-event-store`, `run-tool-endpoint`, `daemon-run-tool`, `task-store`, `message-queue`, `repair-loop`, `workflow-service` |
+| Sessions | `session-drivers`, `session-capability`, `session-driver-factory-hardening`, `session-transport-cleanup`, `native-session-manager`, `bun-session-executor`, `opencode-native-model` |
+| Package | `package-metadata`, `plugin-load`, `public-api`, plus `bun run smoke:pack` |
+| CI | `gated-coverage` (the authoritative record of which leg runs each capability gate), `release-gate-containment` |
+
+No area is evidence-free. What each area's coverage *skips* is tracked by
+`tests/gated-coverage.test.ts`, which currently declares two knowingly-uncovered
+gates, both requiring provider CLIs that CI does not install.
