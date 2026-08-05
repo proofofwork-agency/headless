@@ -45,7 +45,24 @@ The first three steps must happen in this order. Steps 4–6 may be interleaved.
    that was actually measured. The evidence is committed in step 7, after the
    tag. Do not re-run chasing a green that no committed state can hold.
 
-4. **Full release check from the final tree.**
+4. **Re-run the native-subscription smoke at the cut commit.**
+
+   ```bash
+   bun run smoke:native
+   ```
+
+   `docs/plan.md` calls this the primary Gate A real-run evidence and forbids
+   carrying an older pass forward after control-plane, native-auth,
+   session-driver, fleet, TUI **or package** changes.
+
+   **A version bump is a package change**, so this must run *after* step 2, not
+   before. Running it on a pre-cut tree spends real subscription quota on
+   evidence the cut immediately invalidates — the same trap as the live TTFV
+   smoke, for the same reason. As of 2026-08-05 the recorded pass is `a898497`
+   dated 2026-07-27 and is stale; see
+   [release-readiness.md](./release-readiness.md).
+
+5. **Full release check from the final tree.**
 
    ```bash
    bun run release:check   # check + build + smoke:pack
@@ -55,7 +72,7 @@ The first three steps must happen in this order. Steps 4–6 may be interleaved.
    session-driver, fleet, TUI, or package changes — `docs/plan.md` lists the
    exact surfaces that invalidate it.
 
-5. **Confirm CI is green on the cut commit.** Required contexts on `main` are
+6. **Confirm CI is green on the cut commit.** Required contexts on `main` are
    exactly `ubuntu-latest release gate`, `macos-latest release gate`, and
    `website build` (strict/up-to-date required; `enforce_admins: false`, so
    "required" means reported-and-visible, not impossible to bypass). The
@@ -63,7 +80,7 @@ The first three steps must happen in this order. Steps 4–6 may be interleaved.
    path-filtered, and a required context that never reports would block every
    unrelated pull request.
 
-6. **Optional regression probe.** `hosted-relay-diagnostic.yml` (manual dispatch)
+7. **Optional regression probe.** `hosted-relay-diagnostic.yml` (manual dispatch)
    samples the combined late-socket case 10× on hosted x86-64 and re-runs the
    four cooperation cases. Not required — they all run on the ordinary Ubuntu
    gate now — but it is the only thing that samples the process tree and sockets
@@ -71,7 +88,7 @@ The first three steps must happen in this order. Steps 4–6 may be interleaved.
 
 ## Then, and only then
 
-7. **Tag and publish the measured commit**, then commit the evidence file on top
+8. **Tag and publish the measured commit**, then commit the evidence file on top
    as the durable record.
 
    The order matters and is easy to get backwards. The cut commit C is what the
