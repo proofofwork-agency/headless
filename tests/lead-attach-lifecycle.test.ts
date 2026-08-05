@@ -204,6 +204,28 @@ describe("selected state is strict, discovery is fail-closed", () => {
     expect(probeLeadBinding(fixture.state)).toBeNull();
   });
 
+  test("a resolvable symlinked ancestor is an ordinary alias, not corruption", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-alias-"));
+    const runtime = mkdtempSync("/tmp/hal-");
+    fixtures.push({ root, runtime });
+    const realHome = join(root, "real-home");
+    const linkedHome = join(root, "linked-home");
+    mkdirSync(realHome);
+    symlinkSync(realHome, linkedHome);
+    const project = join(root, "project");
+    mkdirSync(project);
+
+    // State home under a SYMLINKED home directory, not yet materialized — the
+    // ordinary first run for anyone whose home is an alias. Rejecting every
+    // symlinked ancestor would make that fatal, while the rest of this path
+    // system deliberately follows intermediate aliases and canonicalizes.
+    const paths = getProjectStatePaths(project, {
+      env: { HEADLESS_STATE_HOME: join(linkedHome, "state"), HEADLESS_RUNTIME_HOME: runtime },
+    });
+    expect(readLeadBinding(paths)).toBeNull();
+    expect(probeLeadBinding(paths)).toBeNull();
+  });
+
   test("state that was never materialized is still a plain absence", () => {
     const fixture = stateFixture();
     rmSync(fixture.state.projectDir, { recursive: true, force: true });

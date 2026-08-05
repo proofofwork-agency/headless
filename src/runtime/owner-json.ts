@@ -77,7 +77,22 @@ function assertGenuineAbsence(path: string) {
       continue;
     }
     if (ancestor.isSymbolicLink()) {
-      throw new Error(`Owner-only path resolves through a symlinked ancestor: ${current}`);
+      // A RESOLVABLE directory alias is ordinary, not corruption. The rest of
+      // this path system deliberately follows intermediate links and
+      // canonicalizes before validating, and `getHeadlessStateHome` resolves
+      // rather than realpaths — so rejecting every symlinked ancestor would make
+      // FIRST RUN fatal for anyone whose state home sits under a symlinked home
+      // directory. Only a dangling or cyclic alias is the anomaly.
+      let target: Stats;
+      try {
+        target = statSync(current);
+      } catch (error) {
+        throw new Error(`Owner-only path resolves through an unusable symlinked ancestor: ${current}`, { cause: error });
+      }
+      if (!target.isDirectory()) {
+        throw new Error(`Owner-only path has a non-directory ancestor: ${current}`);
+      }
+      return;
     }
     if (!ancestor.isDirectory()) {
       throw new Error(`Owner-only path has a non-directory ancestor: ${current}`);
