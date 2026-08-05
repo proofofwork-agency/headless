@@ -14,3 +14,9 @@ opencode/
 
 # Local Claude Code session state (agents/plans/skills/settings) — never commit
 .claude/
+
+# Loose agent audit reports written to the repo root. They are working
+# artifacts, not tree content, and were committed once by an over-broad
+# `git add -A` in PR #59.
+/grokreport.md
+/opencode.md
