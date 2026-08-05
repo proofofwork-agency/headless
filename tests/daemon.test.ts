@@ -1444,8 +1444,15 @@ console.log(JSON.stringify({type:"text",text}));`);
 
     await root.call<Job>("run.wait", { jobId: active.id, timeoutMs: 10_000 });
     const completed = await root.call<Job>("run.wait", { jobId: queued.id, timeoutMs: 10_000 });
-    expect(completed.state).toBe("blocked");
-    expect(completed.result?.error?.code).toBe("POLICY_DENIED");
+    // Carry the evidence in the failure message. This failed once on ubuntu CI
+    // and could not be reproduced locally, and a bare Expected/Received told me
+    // nothing about WHY -- which is how I ended up asserting a mechanism I had
+    // not measured. If it recurs, the next reader gets the lead binding and the
+    // job's own error instead of having to guess.
+    const binding = await root.call<unknown>("lead.status", {}).catch((error) => ({ leadStatusFailed: String(error) }));
+    const evidence = JSON.stringify({ state: completed.state, result: completed.result, binding }, null, 2);
+    expect(completed.state, evidence).toBe("blocked");
+    expect(completed.result?.error?.code, evidence).toBe("POLICY_DENIED");
   });
 
   test("a concurrent read cannot sweep or delete a live writer worktree", async () => {
