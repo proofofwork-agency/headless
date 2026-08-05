@@ -37,9 +37,16 @@ from the files themselves:
 | `gate-b-mcp-smoke.json` | none recorded | n/a | Freshness **cannot be established** from the artifact. Treat as unverified for the current tree. |
 | `native-write-smoke.json` | none recorded | n/a | Same — no provenance commit, so it cannot be tied to a tree. |
 
-Two of the four record no commit at all. That is worth fixing independently of
-any release: evidence that cannot name the tree it measured cannot be checked for
-staleness, only trusted.
+Two of the four record no commit at all. **The tooling is not at fault** — every
+writer attaches provenance (`writeReleaseEvidenceFile` always does), so those two
+artifacts simply predate that helper and re-running each smoke dates it. An
+earlier draft of this file implied a code defect; it does not exist, and chasing
+it would waste the reader's time.
+
+`tests/release-evidence-provenance.test.ts` now counts them: any artifact without
+a provenance commit fails unless it is a declared legacy exemption, and an
+exemption that has since been dated fails as obsolete. So this gap cannot go
+quiet again, and it clears itself the moment the smokes are re-run.
 
 ## Requires a human
 
