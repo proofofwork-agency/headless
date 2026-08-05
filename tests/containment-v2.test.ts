@@ -35,12 +35,17 @@ const darwinTest = process.platform === "darwin" ? test : test.skip;
 // hatch stays for a self-hosted privileged runner, but no CI leg takes it: this
 // is a bwrap case, so macOS cannot run it either, and the gate is registered as
 // knowingly uncovered in tests/gated-coverage.test.ts rather than claiming a leg.
-const HOSTED_LINUX_RELAY_INCOMPATIBLE = process.platform === "linux"
-  && process.env.GITHUB_ACTIONS === "true"
-  && process.env.HEADLESS_PRIVILEGED_CONTAINMENT_CI !== "1";
-if (HOSTED_LINUX_RELAY_INCOMPATIBLE) {
-  console.warn("Skipping the late-socket broker/run-tool relay lifecycle case: the hosted GitHub Linux runner cannot terminalize the relay child, and no CI leg covers this case. Run it on a local Linux machine, or set HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 on a privileged self-hosted runner.");
-}
+// The combined case was skipped on unprivileged hosted Linux until 2026-08-04,
+// on the belief that the runner could not terminalize the relay child. The real
+// fault was ours: the Linux relay discarded any request arriving before its
+// upstream Unix connect resolved. Its failures always read brokerStatus 200 with
+// toolCode 1 -- the broker leg healthy, only the run-tool leg broken -- and the
+// broker uses the HTTP proxy, which pipes synchronously and never had that
+// window. Measured after the fix: 10 of 10 hosted x86-64 samples pass, against 3
+// of 9 failing before it (run 30956521650).
+//
+// Its unixError=ENOENT was never part of that fault. That is the deliberately
+// late host socket refusing to connect, resolved before the helper is spawned.
 // Real-sandbox tests spawn bwrap + relay + worker processes. The exact
 // broker+run-tool capability test has reached the helper's 15s latency bound
 // on loaded two-core Linux runners even though the transport remains healthy.
@@ -50,9 +55,6 @@ const SANDBOX_TEST_TIMEOUT_MS = process.platform === "linux" ? 90_000 : 30_000;
 const linuxBwrapTest: typeof test | typeof test.skip = process.platform === "linux" && hasBwrap()
   ? ((name: string, fn: () => unknown | Promise<unknown>) => test(name, fn, SANDBOX_TEST_TIMEOUT_MS)) as typeof test
   : test.skip;
-const linuxRelayLifecycleTest: typeof test | typeof test.skip = HOSTED_LINUX_RELAY_INCOMPATIBLE
-  ? test.skip
-  : linuxBwrapTest;
 const linuxX64BwrapTest: typeof test | typeof test.skip = process.platform === "linux" && process.arch === "x64" && hasBwrap()
   ? ((name: string, fn: () => unknown | Promise<unknown>) => test(name, fn, SANDBOX_TEST_TIMEOUT_MS)) as typeof test
   : test.skip;
@@ -521,7 +523,7 @@ describe("Linux bubblewrap profiles", () => {
     }
   });
 
-  linuxRelayLifecycleTest("denies a host Unix socket created after launch while broker and run tools remain reachable", async () => {
+  linuxBwrapTest("denies a host Unix socket created after launch while broker and run tools remain reachable", async () => {
     const project = temporaryDirectory("headless-linux-late-socket-project-");
     const runtime = temporaryDirectory("headless-linux-late-socket-runtime-");
     const brokerSocket = join(runtime, "broker.sock");

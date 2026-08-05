@@ -62,33 +62,6 @@ const GATES: GateCoverage[] = [
   { gate: "darwinTest", files: ["tests/containment-v2.test.ts"], legs: ["macos"] },
   { gate: "linuxBwrapTest", files: ["tests/containment-v2.test.ts"], legs: ["ubuntu"] },
   { gate: "linuxX64BwrapTest", files: ["tests/containment-v2.test.ts"], legs: ["ubuntu"] },
-  {
-    gate: "linuxRelayLifecycleTest",
-    files: ["tests/containment-v2.test.ts"],
-    legs: [],
-    undeclaredReason:
-      "It is a bwrap case, so macOS cannot run it, and the hosted GitHub Linux runner cannot terminalize "
-      + "the relay child (see docs/internal/hosted-linux-relay-follow-up.md). The privileged CI step that "
-      + "HEADLESS_PRIVILEGED_CONTAINMENT_CI=1 was written for no longer exists, so the only coverage is a "
-      + "local Linux machine or a self-hosted privileged runner that sets that variable. This gate now "
-      + "guards ONLY the combined case, which also requires the broker and run-tool relays to be "
-      + "reachable; that availability leg is repeatedly intermittent on hosted x86-64 (3 of 9 samples "
-      + "failed, every diagnosed one with unixError ENOENT and toolCode 1 — containment held), so it is "
-      + "deliberately skipped there and measured off-CI on native Linux. The SECURITY property it used to "
-      + "carry is NOT uncovered: the standalone `denies a host Unix socket created after launch` case runs "
-      + "on the ordinary ubuntu leg and again in the privileged workflow, asserts the socket was visible "
-      + "before trusting its denial, and is mutation-proved against removal of the seccomp filter. Note "
-      + "that the ordinary ubuntu leg IS an enforced required check on main (branch protection added "
-      + "2026-08-04: website build, ubuntu-latest and macos-latest release gates, strict up-to-date), while "
-      + "the privileged job is deliberately NOT required because it is path-filtered and a never-reporting "
-      + "required context would block unrelated pull requests.",
-    cases: [
-      {
-        file: "tests/containment-v2.test.ts",
-        name: "denies a host Unix socket created after launch while broker and run tools remain reachable",
-      },
-    ],
-  },
   { gate: "darwinTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },
   { gate: "realDarwinNetworkTest", files: ["tests/native-auth.test.ts"], legs: ["macos"] },
   { gate: "linuxTest", files: ["tests/linux-broker-relay.test.ts"], legs: ["ubuntu"] },
@@ -141,12 +114,17 @@ const GATES: GateCoverage[] = [
     files: ["tests/control-plane-utils.test.ts", "tests/daemon.test.ts"],
     legs: ["ubuntu", "macos"],
   },
+  // daemon-run-tool joined this gate on 2026-08-04. It previously carried an
+  // extra HOSTED_LINUX_RELAY_INCOMPATIBLE clause and declared only macos, so
+  // depth-one contained delegation had never executed on any Linux. The relay
+  // defect that caused those hosted failures is fixed (bridgeStreamConnection),
+  // and the four cases now pass on GitHub-hosted x86-64, so ubuntu is a real
+  // leg here rather than an aspiration.
   {
-    gate: "skipIf(HOSTED_LINUX_RELAY_INCOMPATIBLE || !strictContainmentAvailable())",
-    files: ["tests/daemon-run-tool.test.ts"],
-    legs: ["macos"],
+    gate: "skipIf(!strictContainmentAvailable())",
+    files: ["tests/runtime-fault-audit.test.ts", "tests/daemon-run-tool.test.ts"],
+    legs: ["ubuntu", "macos"],
   },
-  { gate: "skipIf(!strictContainmentAvailable())", files: ["tests/runtime-fault-audit.test.ts"], legs: ["ubuntu", "macos"] },
   { gate: 'skipIf(process.platform !== "darwin")', files: ["tests/run-tool-endpoint.test.ts"], legs: ["macos"] },
   { gate: 'guard(typeof process.getuid !== "function")', files: ["tests/owner-only-path.test.ts"], legs: ["ubuntu", "macos"] },
 ];
@@ -329,10 +307,10 @@ describe("capability gate coverage", () => {
    * docs/internal/hosted-linux-relay-follow-up.md for the command, the pass
    * counts, and the architecture limit that still applies.
    */
-  test("exactly three gate names are knowingly uncovered by CI", () => {
+  test("exactly two gate names are knowingly uncovered by CI", () => {
     const uncovered = GATES.filter((gate) => gate.legs.length === 0);
     expect(uncovered.map((gate) => gate.gate).sort())
-      .toEqual(["installedCodexTest", "linuxRelayLifecycleTest", "realGrokInspectTest"]);
+      .toEqual(["installedCodexTest", "realGrokInspectTest"]);
   });
 
   /**

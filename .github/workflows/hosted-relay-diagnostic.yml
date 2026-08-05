@@ -1,27 +1,24 @@
 name: Hosted relay diagnostic
 
-# Characterises the ONE gap this repository cannot otherwise close: the four
-# tests/daemon-run-tool.test.ts cooperation cases fail on GitHub-hosted Linux
-# and pass everywhere else, so depth-one contained delegation has never been
-# executed on x86-64. docs/internal/hosted-linux-relay-follow-up.md scopes two
-# concrete faults behind that, and both need a hosted reproducer:
+# RESOLVED 2026-08-04 — kept as a regression probe, no longer a reproducer.
 #
-#   1. the relay/descendant lifecycle — the helper response completes but the
-#      bwrap supervisor or filtered child does not terminalize, so the run
-#      hangs to the deadline (observed up to 105s);
-#   2. `Unknown goal: goal_…` errors emitted by background goal-delegation
-#      work — FIXED AT SOURCE, so this job no longer targets it. The cause was
-#      a fire-and-forget autonomy scan surviving dispose() and reporting its own
-#      teardown as a runtime fault (see GoalRuntimeService.dispose). This job
-#      runs one test file that creates no goals and starts no autonomy, so it
-#      could never have reproduced that anyway — it is here for fault 1 only,
-#      and the `Unknown goal` grep below is a leftover tripwire, not coverage.
+# This job existed because the four tests/daemon-run-tool.test.ts cooperation
+# cases failed on GitHub-hosted Linux and passed everywhere else, which was
+# attributed to a hosted-runner incompatibility and a relay child that would not
+# terminalize. Both attributions were wrong. The instrumented runs this job
+# produced (30951464184, 30953476478) showed every stage succeeding while the
+# daemon received ZERO complete frames: the Linux relay was discarding any
+# request that arrived before its upstream Unix connect resolved. Fast hosts won
+# that race, which is why only the hosted x86-64 leg failed. See
+# bridgeStreamConnection in src/broker/linux-relay.ts, and
+# docs/internal/hosted-linux-relay-follow-up.md for the full record.
 #
-# Raising timeouts 15 -> 30 -> 60s did not converge, so this does NOT retry.
-# It forces the guarded cases to run, then captures the process tree, relay
-# sockets and daemon inventory at the moment of failure. It exists to produce
-# EVIDENCE, so it never gates a merge: continue-on-error keeps a red diagnostic
-# from blocking anyone, and the artifact is the deliverable.
+# Those four now run unguarded on the ordinary ubuntu leg, so this job is no
+# longer the only place they execute. It is retained because it is the only
+# place that samples the process tree and sockets WHILE they run, which is what
+# made the fault findable at all. It still does NOT retry, and it still never
+# gates a merge: continue-on-error keeps a red diagnostic from blocking anyone,
+# and the artifact is the deliverable.
 #
 # Manual only. It deliberately reproduces a known failure and would otherwise
 # burn a runner on every push for a result we already expect.
@@ -53,6 +50,18 @@ jobs:
           # step strictContainmentAvailable() can be false here and all four
           # cases skip — a second, quieter way for this job to prove nothing.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # Mirror ci.yml exactly. setup-bun installs under ~/.bun, and contained
+          # workers see a tmpfs over the real home, so a fixture that execs the
+          # literal `bun` cannot resolve it inside the sandbox. Omitting this is
+          # why `cannot connect to a non-broker host Unix socket re-exposed with
+          # the project` failed HERE with "bwrap: execvp bun: No such file or
+          # directory" while passing in the release gate at the same commit —
+          # an environment mismatch, not a containment regression. Until this
+          # step existed, the step name's claim to match the release gate's
+          # setup was false. A symlink is not enough; its target is masked by
+          # the same tmpfs.
+          sudo cp "$(command -v bun)" /usr/local/bin/bun
+          sudo chmod 755 /usr/local/bin/bun
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
@@ -107,6 +116,42 @@ jobs:
 
           kill "$(cat sampler.pid)" 2>/dev/null || true
 
+      - name: Sample the combined late-socket case
+        continue-on-error: true
+        run: |
+          # `set +e` is load-bearing: GitHub runs `run:` steps as `bash -e {0}`,
+          # so a non-zero `bun test` aborts the step. The first version of this
+          # sampler collected ONE iteration instead of ten and printed it as a
+          # clean result. For a race, a truncated sample is not a weaker result,
+          # it is a false one — hence the iteration count and the hard error.
+          set +e
+          set -uo pipefail
+          # This case was skipped on hosted Linux until the relay fix, because
+          # its run-tool leg was intermittent there: 3 of 9 samples failed, every
+          # diagnosed one with brokerStatus 200 and toolCode 1 — the broker leg
+          # healthy, only the run-tool leg broken. Only that leg traversed the
+          # discard window. Kept as a standing re-sampler so the 10-of-10 result
+          # stays reproducible rather than being a number in a document.
+          : > combined.log
+          pass=0; fail=0; absent=0
+          for i in $(seq 1 10); do
+            CI=true NO_COLOR=1 bun test tests/containment-v2.test.ts 2>&1 | tee -a combined.log > run.log
+            if grep -qE '^\(pass\) .*denies a host Unix socket created after launch while broker and run tools remain reachable \[' run.log; then
+              pass=$((pass+1))
+            elif grep -qE '^\(fail\) .*denies a host Unix socket created after launch while broker and run tools remain reachable' run.log; then
+              fail=$((fail+1))
+            else
+              absent=$((absent+1))
+            fi
+          done
+          iterations=$((pass+fail+absent))
+          echo "combined-late-socket samples: pass=$pass fail=$fail absent=$absent iterations=$iterations" | tee combined-summary.txt
+          if [ "$iterations" -ne 10 ]; then echo "::error::sampler collected $iterations of 10 iterations" | tee -a combined-summary.txt; fi
+          # Any other failing case in this file is reported too. This is where
+          # the missing bun visibility step showed up as "execvp bun".
+          echo "other failing cases:" | tee -a combined-summary.txt
+          grep -E '^\(fail\)' combined.log | sort -u | tee -a combined-summary.txt
+
       - name: Refuse a vacuous reproducer
         run: |
           set -euo pipefail
@@ -152,4 +197,6 @@ jobs:
             cooperation.log
             process-tree.log
             findings.txt
+            combined.log
+            combined-summary.txt
           retention-days: 30
