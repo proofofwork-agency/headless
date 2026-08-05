@@ -384,11 +384,23 @@ describe("native authentication capsules", () => {
     linkSync(alias, join(hardlinkHome, ".claude", ".headless-setup-token"));
     const hardlinkWorker = createWorkerEnvironment({ baseDir: hardlinkBase });
     try {
-      expect(installNativeAuthCapsule(hardlinkWorker, "claude-code", { homeDir: hardlinkHome })).toMatchObject({
-        available: false,
-        manifest: null,
-        reason: "Claude setup-token must be a single-link regular file.",
-      });
+      const refusal = installNativeAuthCapsule(hardlinkWorker, "claude-code", { homeDir: hardlinkHome });
+      expect(refusal).toMatchObject({ available: false, manifest: null });
+      // WHICH refusal fires is the filesystem's choice, not ours. On macOS APFS
+      // realpath() of a multi-link file may return either of its names, so the
+      // canonical-path check sees the alias instead of the requested path and
+      // refuses first; otherwise the nlink check refuses. Measured directly:
+      // canonical=<home>/setup-token-alias against
+      // expected=<home>/.claude/.headless-setup-token, roughly 1 run in 35.
+      //
+      // Both are correct rejections of the same hazard, so pinning one made this
+      // a flaky SECURITY test — the kind that gets re-run until it passes and
+      // then stops being read. The refusal itself is asserted unconditionally
+      // above; only the reason is allowed to be either, and only these two.
+      expect([
+        "Claude setup-token must be a single-link regular file.",
+        "Claude setup-token must be a canonical non-symlinked file at ~/.claude/.headless-setup-token.",
+      ]).toContain(refusal.reason);
     } finally {
       hardlinkWorker.cleanup();
     }
