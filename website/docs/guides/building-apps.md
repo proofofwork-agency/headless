@@ -15,7 +15,7 @@ Read this top-down. Each layer assumes the previous one works. Do not start at
 Layer E (writes) on a project that has not completed Layer A (kernel).
 
 :::note Private beta
-Headless is an unpublished private beta (`0.2.0-beta.7`). Prefer disposable
+Headless is an unpublished private beta (`0.2.0-beta.8`). Prefer disposable
 projects, bounded spend, and human-in-the-loop approvals. Advanced surfaces
 below live under `headless experimental` and carry **no stability promise**.
 :::

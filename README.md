@@ -395,7 +395,7 @@ Product Gate does not authorize npm publication.
 | C | Leased write candidates and authorized integration | Capstone and rotating-lead builds recorded | No |
 
 The [release plan](./docs/plan.md) is the canonical cumulative checklist.
-Packages remain private at `0.2.0-beta.7`; no npm availability is implied.
+Packages remain private at `0.2.0-beta.8`; no npm availability is implied.
 
 ## CLI stability boundary
 

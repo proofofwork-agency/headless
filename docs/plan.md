@@ -1,6 +1,6 @@
 # Headless v0.2 release plan
 
-This is an acceptance checklist, not a completion claim. Publication happens per gate: Gate A’s original publish target was `0.2.0-beta.3` (kernel surface), Gate B publishes the orchestration beta, Gate C publishes writes GA. The current tree is **`0.2.0-beta.7` and remains unpublished** — private packages and blocked npm publication. No gate publishes while a P0/P1 security or data-integrity defect remains, and no later-gate evidence requirement is deleted by this staging — it is sequenced.
+This is an acceptance checklist, not a completion claim. Publication happens per gate: Gate A’s original publish target was `0.2.0-beta.3` (kernel surface), Gate B publishes the orchestration beta, Gate C publishes writes GA. The current tree is **`0.2.0-beta.8` and remains unpublished** — private packages and blocked npm publication. No gate publishes while a P0/P1 security or data-integrity defect remains, and no later-gate evidence requirement is deleted by this staging — it is sequenced.
 
 **Product Gate P** (`docs/product-gate.md`, OST: `docs/product-ost.md`) is an orthogonal UX oracle for golden-path and progressive-disclosure quality. A green Product Gate does **not** authorize npm publish and does not replace security/release Gates A/B/C in this document.
 

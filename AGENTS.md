@@ -18,7 +18,7 @@ Follow the spirit of OpenCode's AGENTS.md (cloned in `opencode/AGENTS.md`) and t
 
 ## Product Gate P (scope freeze)
 - Product quality oracle: `docs/product-gate.md`, OST: `docs/product-ost.md` (orthogonal UX oracle; does not authorize npm publish).
-- Security/release gates A/B/C remain in `docs/plan.md`. Current tree is unpublished private beta (`0.2.0-beta.7`).
+- Security/release gates A/B/C remain in `docs/plan.md`. Current tree is unpublished private beta (`0.2.0-beta.8`).
 - **Do not run two full test suites on the same machine at once.** Daemon and
   election state is machine-global: the stale-socket election database is keyed
   by socket path, so a second concurrent suite becomes an unexpected contender.

@@ -7,7 +7,7 @@ complete. Where a claim here is not backed by a command output, it says so.
 
 ## Publication is mechanically blocked, deliberately
 
-`package.json` has `private: true` at `0.2.0-beta.7`. No workflow publishes.
+`package.json` has `private: true` at `0.2.0-beta.8`. No workflow publishes.
 Tagging and publishing remain human acts.
 
 ## Re-verified on every gate run (current at HEAD)
