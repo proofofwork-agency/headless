@@ -1,6 +1,6 @@
 # Headless OpenCode plugin
 
-> **Unpublished private beta (`0.2.0-beta.6`).** This plugin is not published; its version and peer dependency on `@proofofwork-agency/headless` stay aligned with core at `0.2.0-beta.6`. Use disposable projects until release gates pass.
+> **Unpublished private beta (`0.2.0-beta.7`).** This plugin is not published; its version and peer dependency on `@proofofwork-agency/headless` stay aligned with core at `0.2.0-beta.7`. Use disposable projects until release gates pass.
 
 The plugin is a thin client of the project-scoped Headless daemon. Admission, authentication, containment, policy, budgets, terminal results, events, and ledger state remain daemon-owned.
 

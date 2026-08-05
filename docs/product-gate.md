@@ -92,7 +92,7 @@ Product Gate P dogfood is **partial and deliberate** — not continuous self-hos
 - Unattended production operation
 - That Headless fully builds this monorepo as routine practice
 
-Case studies and Gate B/C evidence dogfood orchestration and write **kernels**, not full product bootstrap. Private beta remains unpublished (`0.2.0-beta.6`); a green Product Gate does not publish the package.
+Case studies and Gate B/C evidence dogfood orchestration and write **kernels**, not full product bootstrap. Private beta remains unpublished (`0.2.0-beta.7`); a green Product Gate does not publish the package.
 
 ### Product Gate loops vs runtime repair loops
 

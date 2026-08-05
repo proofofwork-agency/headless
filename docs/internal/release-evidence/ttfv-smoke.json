@@ -46,7 +46,7 @@
     "generatedAt": "2026-08-05T09:05:28.384Z",
     "commit": "0debbf3e02687816d97e64948cf18128f705780a",
     "platform": "darwin-arm64",
-    "headlessVersion": "0.2.0-beta.6",
+    "headlessVersion": "0.2.0-beta.7",
     "backendVersions": {
       "claude-code": "2.1.222 (Claude Code)",
       "codex": "codex-cli 0.146.0",
