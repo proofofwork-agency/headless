@@ -1389,17 +1389,23 @@ console.log(JSON.stringify({type:"text",text}));`);
 
   test("a queued lead job is reauthorized after an explicit lead switch", async () => {
     const fixture = createFixture();
-    // OBSERVED: this failed once on ubuntu CI with Expected "blocked" /
-    // Received "succeeded", on a docs-only PR, so the flake is real and
-    // pre-existing.
+    // MECHANISM, proven by probe rather than reasoning:
     //
-    // NOT ESTABLISHED: why. The obvious mechanism is that the first job finishes
-    // before the lead switch lands, letting the second dequeue under still-valid
-    // authorization -- but two attempts to force that ordering locally both
-    // still PASSED: 0.3-CPU starvation on Linux (6/6), and shrinking the first
-    // job to 20ms (which should make it finish first every time). So that
-    // explanation is a hypothesis this test does not support, and it is recorded
-    // here as unproven rather than asserted.
+    // The block comes from lead.use REVOKING the previous lead's integration
+    // credential (see useLead in daemon/server.ts: provision new credential,
+    // persist binding, revoke previous). A revoke cannot retroactively stop a
+    // job that is already RUNNING. Forcing the queued job to start before the
+    // switch reproduces the CI signature exactly:
+    //     stateAtSwitch=running  finalState=succeeded  err=none
+    // which is the observed ubuntu failure (Expected "blocked", Received
+    // "succeeded", on a docs-only PR).
+    //
+    // Why it does not reproduce locally by slowing things down: lead.use does
+    // three durable writes, which finish in milliseconds on a fast disk, while
+    // the first job costs a process spawn plus its sleep. Uniform CPU starvation
+    // slows both and preserves the ordering; shrinking the first job cannot beat
+    // spawn overhead. Only a host where lead.use's I/O outlasts the first job
+    // inverts it, which is what a loaded CI runner can do.
     //
     // What this setup does regardless: removes the timing dependency entirely,
     // so whatever the real cause, it is no longer expressible through a race
