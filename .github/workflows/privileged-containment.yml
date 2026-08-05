@@ -27,17 +27,20 @@ name: Privileged containment
 #     it does not do is witness individual cases — bun's summary reads "0 fail"
 #     whether a given case ran or skipped. Here the architecture is asserted by
 #     whole-line sentinel, each case name is anchored to (pass), and the
-#     combined case is required to appear as (skip), which is the only proof
-#     that GITHUB_ACTIONS reached the container and armed the hosted predicate.
+#     combined case is required to appear as (pass).
 #
-# It deliberately does NOT cover the combined
-# "denied while broker and run tools remain reachable" case: that one also
-# depends on the run-tool relay, and that leg is repeatedly intermittent on
-# hosted runners with containment holding in every diagnosed failure. Gating a
-# security assertion behind a flaky availability check produces a red people
-# learn to re-run, which is how a real breach gets waved through. Nor does it
-# attempt the four tests/daemon-run-tool.test.ts cooperation cases, whose
-# hosted incompatibility is reproduced and unresolved.
+# HISTORICAL, kept because the reasoning still applies to any future gate: this
+# job used to exclude the combined "denied while broker and run tools remain
+# reachable" case, because its run-tool leg was intermittent on hosted runners
+# while containment held in every diagnosed failure. Gating a security assertion
+# behind a flaky availability check produces a red people learn to re-run, which
+# is how a real breach gets waved through.
+#
+# That intermittency is fixed (the relay discarded requests arriving before its
+# upstream connect resolved), so the case now runs here and on the ordinary
+# Ubuntu leg, and the four tests/daemon-run-tool.test.ts cooperation cases run on
+# the Ubuntu leg too. Nothing in this file is excluded for a relay reason any
+# more.
 # See docs/internal/hosted-linux-relay-follow-up.md.
 on:
   workflow_dispatch:
