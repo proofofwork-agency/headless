@@ -1,35 +1,57 @@
 {
+  "version": 1,
   "gate": "product-P.TTFV",
   "mode": "live",
   "ok": true,
-  "totalMs": 4620,
-  "ceremonyMs": 858,
+  "releaseGatePassed": true,
+  "totalMs": 5465,
+  "ceremonyMs": 1212,
   "budgetMs": 300000,
-  "project": "/var/folders/86/ttb_ll0s2h7dvx62qjf758km0000gn/T/headless-ttfv-QHXCOE/project",
+  "project": "/var/folders/86/ttb_ll0s2h7dvx62qjf758km0000gn/T/headless-ttfv-xjPRZj/project",
   "recommendedBackend": "codex",
   "readyForNativeExec": true,
   "doctorNextActions": 2,
+  "modelOutputVerified": true,
+  "containmentVerified": true,
+  "expectedOutput": "TTFV_OK",
+  "failure": null,
   "steps": [
     {
       "name": "setup",
-      "durationMs": 767,
-      "exitCode": 0
+      "durationMs": 1137,
+      "exitCode": 0,
+      "timedOut": false
     },
     {
       "name": "doctor",
-      "durationMs": 91,
-      "exitCode": 0
+      "durationMs": 75,
+      "exitCode": 0,
+      "timedOut": false
     },
     {
       "name": "exec",
-      "durationMs": 3679,
-      "exitCode": 0
+      "durationMs": 4171,
+      "exitCode": 0,
+      "timedOut": false
     },
     {
       "name": "verify",
-      "durationMs": 83,
-      "exitCode": 0
+      "durationMs": 82,
+      "exitCode": 0,
+      "timedOut": false
     }
   ],
-  "completedAt": "2026-07-30T20:35:55.738Z"
+  "completedAt": "2026-08-05T09:05:28.384Z",
+  "provenance": {
+    "generatedAt": "2026-08-05T09:05:28.384Z",
+    "commit": "0debbf3e02687816d97e64948cf18128f705780a",
+    "platform": "darwin-arm64",
+    "headlessVersion": "0.2.0-beta.6",
+    "backendVersions": {
+      "claude-code": "2.1.222 (Claude Code)",
+      "codex": "codex-cli 0.146.0",
+      "opencode": "1.18.13",
+      "grok-build": "grok 0.2.118 (1e1687c1cf6a)"
+    }
+  }
 }
