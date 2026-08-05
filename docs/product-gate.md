@@ -43,7 +43,7 @@ Product quality oracle for Headless weak-point closure. **Not** a substitute for
 
 | Check | Status | Evidence |
 | --- | --- | --- |
-| P.TTFV | manual | The earlier live result remains historical, but predates strict output/provenance validation. Re-run `bun run smoke:ttfv:live` with explicit provider authorization. |
+| P.TTFV | pass at the measured commit | Live run 2026-08-05 at `0debbf3`: 5465ms against a 300000ms budget, `exec` and `verify` both exit 0, strict provenance recorded (claude-code 2.1.222, codex-cli 0.146.0, opencode 1.18.13, grok 0.2.118). Product gate read **10 pass / 0 manual / 0 fail** at that commit. See the pinning note below for why it does not stay green. |
 | P.STEPS | green | Golden path is setup → trust grant → `exec --profile` → verify (≤ 4); product-gate + tests lock it |
 | P.HELP | green | 11 stable commands + golden-path banner |
 | P.REMEDY | green | `src/cli/remedy.ts` covers 12 codes; CLI prints Next: lines |
@@ -106,3 +106,34 @@ These are different systems. Do not treat one as proof of the other.
 | Claims | Teachable setup → trust → profile exec → verify | Structured repair attempts under required containment |
 
 Contrast verify in the Product Gate protocol means re-running tests and manual dogfood after changes. It is not the same mechanism as a runtime repair graph driven by `experimental loop --repair`.
+
+## P.TTFV is commit-pinned — read this before a release
+
+`scripts/product-gate.ts` passes P.TTFV only when
+`docs/internal/release-evidence/ttfv-smoke.json` has `mode: "live"` **and**
+`provenance.commit` equals `git rev-parse HEAD`.
+
+The evidence file is tracked, so **committing it moves HEAD past the commit it
+names and P.TTFV immediately reverts to `manual — "Live evidence is stale"`**.
+There is no committed state in which P.TTFV is green. That is intended: live
+evidence only describes the tree it measured. It is not a defect, and it is not
+something to "fix" by loosening the comparison.
+
+Consequences, in order:
+
+1. **Settle HEAD first.** Land every other change, then run the live smoke.
+   Running it earlier is wasted the moment anything else merges.
+2. **10 pass / 0 manual is only observable in the working tree at the measured
+   commit.** The committed JSON is a durable record, not a standing pass, and CI
+   will always report P.TTFV as `manual` for this reason.
+3. **At release, re-run `bun run smoke:ttfv:live` at the exact commit being
+   tagged, and read the gate before committing the evidence.** A tag whose
+   evidence names an earlier commit has not been validated.
+
+The smoke performs a real read-only provider exec against the operator's native
+logins and therefore spends their quota. It requires explicit human
+authorization each time; it is never run unattended.
+
+Measured 2026-08-05: 10 pass / 0 manual / 0 fail at `0debbf3`, then 9 pass /
+1 manual at `8fd3dc1` — the only difference being the commit that stored the
+evidence. Nothing regressed between those two states.
