@@ -1389,15 +1389,25 @@ console.log(JSON.stringify({type:"text",text}));`);
 
   test("a queued lead job is reauthorized after an explicit lead switch", async () => {
     const fixture = createFixture();
-    // The first job must still be RUNNING when the lead switches, or the queued
-    // job dequeues under still-valid authorization and legitimately succeeds --
-    // the product is right and the test's premise has silently evaporated. A
-    // fixed sleep made that a race: this failed on ubuntu CI with
-    // Expected "blocked" / Received "succeeded" when the lead.use round-trip
-    // outlasted a 300ms sleep on a loaded runner. Raising the sleep would only
-    // make the race slower to lose, so gate the backend on a release file this
-    // test creates. The queued job runs the same backend, but by then the file
-    // exists, so it proceeds immediately.
+    // OBSERVED: this failed once on ubuntu CI with Expected "blocked" /
+    // Received "succeeded", on a docs-only PR, so the flake is real and
+    // pre-existing.
+    //
+    // NOT ESTABLISHED: why. The obvious mechanism is that the first job finishes
+    // before the lead switch lands, letting the second dequeue under still-valid
+    // authorization -- but two attempts to force that ordering locally both
+    // still PASSED: 0.3-CPU starvation on Linux (6/6), and shrinking the first
+    // job to 20ms (which should make it finish first every time). So that
+    // explanation is a hypothesis this test does not support, and it is recorded
+    // here as unproven rather than asserted.
+    //
+    // What this setup does regardless: removes the timing dependency entirely,
+    // so whatever the real cause, it is no longer expressible through a race
+    // between a fixed sleep and the switch. The backend blocks on a release file
+    // this test creates; the queued job runs the same backend and finds the file
+    // already present, so it proceeds immediately. If this ever fails again, the
+    // premise assertion below distinguishes "never queued" from a genuine
+    // authorization failure, which the original could not.
     const releasePath = join(fixture.project, "release-active-job");
     installBackend(
       fixture.bin,
