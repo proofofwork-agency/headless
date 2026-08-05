@@ -85,7 +85,7 @@ Partial, recorded dogfood — not continuous self-host of Headless development.
 
 Case studies exercise orchestration and write **kernels** under required
 containment and durable ledger traces. They are not a full product bootstrap
-or a claim that the private beta (`0.2.0-beta.6`) is published.
+or a claim that the private beta (`0.2.0-beta.7`) is published.
 
 **Two different “loop” systems**
 

@@ -1,6 +1,6 @@
 # Native login, sessions, and fleet operation
 
-Headless defaults to brokered provider access. Native login is an explicit private-beta (`0.2.0-beta.6`) opt-in for trusted disposable projects because its outbound destination IPs are unrestricted. Both modes retain Headless's outer operating-system containment, project boundary, durable state, worktree isolation, budgets, and finality gates.
+Headless defaults to brokered provider access. Native login is an explicit private-beta (`0.2.0-beta.7`) opt-in for trusted disposable projects because its outbound destination IPs are unrestricted. Both modes retain Headless's outer operating-system containment, project boundary, durable state, worktree isolation, budgets, and finality gates.
 
 Examples assume the compiled `headless` binary is on `PATH`. From this checkout, run `bun run build` and use `./dist/cli.js` in its place. Prefer the golden path: `headless setup` → trust grant → `exec --auth-mode native-login --profile read-only-native` → `verify`. See also [cli-and-tui-guide.md](./cli-and-tui-guide.md).
 

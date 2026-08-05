@@ -6,7 +6,7 @@ description: Configure one foreground lead, run contained workers, and observe d
 
 # CLI-first operations and the observer TUI
 
-> Unpublished private beta (`0.2.0-beta.6`). Use disposable projects and bounded spend until the release gates pass.
+> Unpublished private beta (`0.2.0-beta.7`). Use disposable projects and bounded spend until the release gates pass.
 
 Examples assume the compiled `headless` binary is on `PATH`. From this checkout, run `bun run build` and use `./dist/cli.js` in its place.
 
