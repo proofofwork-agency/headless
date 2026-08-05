@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, statSync, type Stats } from "node:fs";
 import { dirname } from "node:path";
 import { atomicWriteFile } from "./atomic-write";
 import { assertOwnerOnlyFileUnrepaired, ensureOwnerOnlyDirectory, ensureOwnerOnlyFile } from "./project-state";
@@ -23,8 +23,9 @@ export function readOwnerOnlyJson<T>(
   try {
     lstatSync(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    assertGenuineAbsence(path);
+    return null;
   }
   // `ensureOwnerOnlyFile` chmods, so it is a WRITE. Discovery probes must not
   // tighten permissions on every candidate they inspect — but they must still
@@ -46,6 +47,43 @@ export function readOwnerOnlyJson<T>(
     throw new Error(`Invalid persistent JSON at ${path}: ${error instanceof Error ? error.message : String(error)}`);
   }
   return schema.parse(value);
+}
+
+/**
+ * Separate genuine absence from a path that merely fails to RESOLVE.
+ *
+ * `lstat(fullPath)` raising ENOENT proves the full path has no referent — it does
+ * not prove the leaf is missing. A dangling symlink anywhere in the chain raises
+ * the same ENOENT, so accepting it as absence launders a structural anomaly into
+ * "never configured" exactly one directory above the leaf case.
+ *
+ * Walk to the nearest ancestor that exists. A real directory there means the
+ * state was simply never materialized, which is ordinary for a fresh project.
+ * A symlink or non-directory there is a fact about the filesystem that the
+ * caller must see.
+ */
+function assertGenuineAbsence(path: string) {
+  let current = dirname(path);
+  for (;;) {
+    let ancestor: Stats;
+    try {
+      ancestor = lstatSync(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(current);
+      // Nothing along the whole chain exists: genuinely unmaterialized state.
+      if (parent === current) return;
+      current = parent;
+      continue;
+    }
+    if (ancestor.isSymbolicLink()) {
+      throw new Error(`Owner-only path resolves through a symlinked ancestor: ${current}`);
+    }
+    if (!ancestor.isDirectory()) {
+      throw new Error(`Owner-only path has a non-directory ancestor: ${current}`);
+    }
+    return;
+  }
 }
 
 export function writeOwnerOnlyJson(path: string, value: unknown) {

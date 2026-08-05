@@ -173,9 +173,43 @@ describe("selected state is strict, discovery is fail-closed", () => {
     // lead was ever configured" — laundering a security anomaly into
     // CREDENTIAL_MISSING, which the MCP server treats as recoverable and stays
     // alive on. Absence has to mean ENOENT and nothing else.
-    expect(() => readLeadBinding(fixture.state)).toThrow();
+    expect(() => readLeadBinding(fixture.state)).toThrow(/not a regular file/);
     // Discovery stays tolerant of the wrong candidate, but still refuses to
     // treat this as a configured lead.
+    expect(probeLeadBinding(fixture.state)).toBeNull();
+  });
+
+  test("a dangling symlink one directory UP is also not an absence", () => {
+    const fixture = stateFixture();
+    rmSync(fixture.state.projectDir, { recursive: true, force: true });
+    symlinkSync(join(fixture.root, "nowhere"), fixture.state.projectDir);
+
+    // `lstat` on the full path follows the intermediate link and raises ENOENT —
+    // the SAME errno as genuine absence. Trusting that errno alone launders the
+    // anomaly into "never configured" exactly one directory above the leaf case.
+    expect(() => readLeadBinding(fixture.state)).toThrow(/symlinked ancestor/);
+    expect(probeLeadBinding(fixture.state)).toBeNull();
+  });
+
+  test("a non-directory ancestor is reported, not read as absence", () => {
+    const fixture = stateFixture();
+    rmSync(fixture.state.projectDir, { recursive: true, force: true });
+    writeFileSync(fixture.state.projectDir, "not a directory", { mode: 0o600 });
+
+    // Deterministic non-ENOENT case that needs no root: the parent is a regular
+    // file, so the state directory was replaced rather than never created. This
+    // one never reaches the ancestor walk — the leaf `lstat` itself raises
+    // ENOTDIR, and propagating it unchanged is the correct fail-closed answer.
+    expect(() => readLeadBinding(fixture.state)).toThrow(/ENOTDIR|not a directory/);
+    expect(probeLeadBinding(fixture.state)).toBeNull();
+  });
+
+  test("state that was never materialized is still a plain absence", () => {
+    const fixture = stateFixture();
+    rmSync(fixture.state.projectDir, { recursive: true, force: true });
+
+    // The fix must not make a fresh, never-configured project fatal.
+    expect(readLeadBinding(fixture.state)).toBeNull();
     expect(probeLeadBinding(fixture.state)).toBeNull();
   });
 
