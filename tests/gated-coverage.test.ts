@@ -286,9 +286,9 @@ describe("capability gate coverage", () => {
    * stated reason.
    *
    * Counts GATES, not tests, and the two are not the same number. Behind these
-   * three gates sit FOUR individual tests that execute on no CI leg:
-   *   - tests/containment-v2.test.ts:440  denies a host Unix socket created
-   *     after launch while broker and run tools remain reachable
+   * two gates sit THREE individual tests that execute on no CI leg. The
+   * containment case that used to head this list is gone: the combined
+   * late-socket case runs on the Ubuntu leg as of 2026-08-05.
    *   - tests/grok-isolation.test.ts:180  attests a gated-config-free project
    *     through the trust-gate canary
    *   - tests/grok-isolation.test.ts:217  real inspect sees no project

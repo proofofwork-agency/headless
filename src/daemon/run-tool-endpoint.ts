@@ -231,10 +231,15 @@ export class RunToolEndpointManager {
     // this window is re-based once a complete frame arrives, because
     // socket.setTimeout is an INACTIVITY timer and a handler that is running
     // produces no socket traffic. Leaving 5s in force across the handler
-    // destroyed healthy connections whenever the work outlasted it — measured
-    // on hosted x86-64, where all four run-tool cooperation cases failed at
-    // ~5.3s with "run tool connection closed without a response" while fast
-    // machines passed because their handlers finished inside the window.
+    // destroys a healthy connection whenever the work outlasts it, reproduced
+    // directly with a 6.5s handler: it hangs at the 5000ms default and passes
+    // with the window raised (tests/run-tool-endpoint.test.ts).
+    //
+    // Do NOT attribute the four hosted x86-64 cooperation failures to this. They
+    // shared the ~5.3s signature, which is why it looked that way, but
+    // instrumentation showed the daemon received ZERO complete frames: the relay
+    // was discarding the request before it arrived (see bridgeStreamConnection).
+    // This is a real and separate bug.
     socket.setTimeout(runToolCallTimeoutMs(), () => socket.destroy());
     socket.once("close", () => record.sockets.delete(socket));
     socket.once("error", () => {
