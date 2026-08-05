@@ -48,6 +48,23 @@ describe("OpenCode plugin loadability", () => {
     expect(typeof plugin.server).toBe("function");
   });
 
+  test("exposes the dispose hook OpenCode awaits, and reference-counts it", async () => {
+    const first = await server({} as never);
+    const second = await server({} as never);
+    // A guest plugin cannot hook SIGINT/SIGTERM without suppressing the host's
+    // own termination, and `beforeExit` does not fire on process.exit or on
+    // default signal termination. `dispose` is the hook OpenCode actually awaits,
+    // so it is the only one that releases the lead binding on the common path.
+    expect(typeof first.dispose).toBe("function");
+    expect(typeof second.dispose).toBe("function");
+
+    // Disposing one instance must not tear down a sibling's connections, and a
+    // repeated dispose must not underflow the count.
+    await first.dispose!();
+    await first.dispose!();
+    await second.dispose!();
+  });
+
   test("returns exactly the Headless tools with registry-accepted schemas", async () => {
     const previous = process.env.HEADLESS_MCP_TOOLSET;
     process.env.HEADLESS_MCP_TOOLSET = "full";

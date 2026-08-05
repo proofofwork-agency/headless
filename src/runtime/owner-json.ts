@@ -9,9 +9,16 @@ type RuntimeSchema<T> = {
   parse(value: unknown): T;
 };
 
-export function readOwnerOnlyJson<T>(path: string, schema: RuntimeSchema<T>) {
+export function readOwnerOnlyJson<T>(
+  path: string,
+  schema: RuntimeSchema<T>,
+  options: { repairPermissions?: boolean } = {},
+) {
   if (!existsSync(path)) return null;
-  ensureOwnerOnlyFile(path);
+  // `ensureOwnerOnlyFile` chmods, so it is a WRITE. Discovery probes that merely
+  // ask "is this the project?" must not tighten permissions on every candidate
+  // they inspect; the selected project is still fully validated when opened.
+  if (options.repairPermissions !== false) ensureOwnerOnlyFile(path);
 
   const size = statSync(path).size;
   if (size > MAX_STORE_BYTES) {

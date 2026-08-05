@@ -7,13 +7,14 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { sep } from "node:path";
+import { resolve, sep } from "node:path";
 import { z } from "zod";
 import type { CredentialScope } from "../runtime/credential-store";
 
 import { splitList } from "../utils/list";
 import { redactAndTruncate } from "../runtime/redaction";
-import { LeadDaemonClientPool } from "../daemon/connect";
+import { LeadDaemonClientPool, lapsedLeadAttachment } from "../daemon/connect";
+import { resolveLeadProjectRoot } from "../runtime/lead-project-root";
 import type { Job } from "../contracts/durable";
 import { RunRequestObjectSchema } from "../contracts/run";
 import { backendAgentSelectionRefinement } from "../contracts/agent-name";
@@ -157,16 +158,25 @@ export function mcpToolsForScopes(
 }
 
 async function handleListTools() {
-  const client = await daemonClient(process.env.HEADLESS_PROJECT_ROOT || process.cwd());
-  const identity = await client.call<{ scopes: CredentialScope[] }>("ping");
-  return { tools: mcpToolsForScopes(identity.scopes) };
+  try {
+    const client = await daemonClient(leadProjectRoot());
+    const identity = await client.call<{ scopes: CredentialScope[] }>("ping");
+    startupError = null;
+    return { tools: mcpToolsForScopes(identity.scopes) };
+  } catch (error) {
+    // Advertise the static toolset instead of failing discovery. A harness that
+    // cannot even list tools shows the operator nothing actionable; a listed
+    // tool can at least answer with the remedy when it is called.
+    startupError = isLeadBindingFailure(error) ? leadRemedy() : messageOf(error);
+    return { tools: filterToolsByMcpToolset(TOOL_DEFINITIONS, resolveMcpToolset()) };
+  }
 }
 
 async function handleCallTool(req: { params: { name: string; arguments?: Record<string, unknown> } }) {
   const name = req.params.name;
   const rawArgs = (req.params.arguments || {}) as Record<string, unknown>;
   // MCP is bound to the configured daemon project. Client-provided cwd/source/actor fields are ignored.
-  const safeCwd = process.env.HEADLESS_PROJECT_ROOT || process.cwd();
+  const safeCwd = leadProjectRoot();
   const a = rawArgs as Record<string, unknown>; // downstream calls accept loose (MCP input is dynamic)
   // Safe extractors for dynamic MCP args (prevents unknown->string TS errors at trust boundary)
   const s = (v: unknown, d?: string) => (v == null ? d : String(v));
@@ -337,6 +347,7 @@ async function handleCallTool(req: { params: { name: string; arguments?: Record<
     return toolError("unknown tool " + name);
   } catch (e: unknown) {
     const msg = redactAndTruncate(e instanceof Error ? e.message : String(e), 16_384).text;
+    if (isLeadBindingFailure(e)) return toolError(`${name} failed: ${msg} ${leadRemedy()}`);
     return toolError(name + " failed: " + msg);
   }
 }
@@ -358,10 +369,49 @@ async function waitForDaemonHandoff(client: HeadlessDaemonClient, handoffId: str
 
 const leadClients = new LeadDaemonClientPool();
 let configuredHost: string | null = null;
+let resolvedProjectRoot: string | null = null;
+let startupError: string | null = null;
 
 function daemonClient(projectRoot: string) {
   const host = configuredHost ?? leadHostFromProcess();
   return leadClients.client({ projectRoot, host });
+}
+
+/**
+ * An explicit `HEADLESS_PROJECT_ROOT` is authoritative on EVERY call and must
+ * never be shadowed by a memoized answer — caching it broke the invariant that
+ * setting the variable selects the project. Only the ancestor walk, which is
+ * filesystem work with a stable result for a given process, is memoized.
+ */
+function leadProjectRoot() {
+  const explicit = process.env.HEADLESS_PROJECT_ROOT?.trim();
+  if (explicit) return resolve(explicit);
+  return resolvedProjectRoot ?? (resolvedProjectRoot = resolveLeadProjectRoot());
+}
+
+/**
+ * Every lead failure an operator can actually fix has the same shape: this
+ * process is running, but no live binding connects it to a project. Say which
+ * project it looked at and the exact command that repairs it — a bare
+ * POLICY_DENIED or CREDENTIAL_MISSING sends people to the wrong layer.
+ */
+function leadRemedy() {
+  const host = configuredHost ?? "<host>";
+  return `No live ${host} foreground lead for ${leadProjectRoot()}.`
+    + ` Run \`headless lead use ${host} --cwd ${leadProjectRoot()}\` and retry;`
+    + " set HEADLESS_PROJECT_ROOT if that is the wrong project.";
+}
+
+/**
+ * A missing or lapsed binding — NOT any authorization failure. Matching bare
+ * POLICY_DENIED told operators to run `headless lead use` when the real answer
+ * was "that route is admin-only", sending them to fix something that was never
+ * broken.
+ */
+function isLeadBindingFailure(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "CREDENTIAL_MISSING" || code === "CREDENTIAL_REVOKED" || lapsedLeadAttachment(error);
 }
 
 function runWaitTimeouts(runTimeoutMs: number) {
@@ -394,18 +444,51 @@ server.setRequestHandler(CallToolRequestSchema, async (r) => handleCallTool(r));
 
 export async function startMcpServer(options: { host?: string } = {}) {
   configuredHost = normalizeLeadHost(options.host ?? leadHostFromProcess());
-  await daemonClient(process.env.HEADLESS_PROJECT_ROOT || process.cwd());
+  resolvedProjectRoot = resolveLeadProjectRoot();
+  // Connect the stdio transport BEFORE attaching.
+  //
+  // Attaching first meant that a missing, rotated or revoked lead binding threw
+  // out of `main()` and exited the process, so the harness could report only
+  // "server exited" — the single failure mode an operator cannot act on. The
+  // server now comes up either way and each tool answers with the exact remedy.
+  // It also repairs itself: a failed connection is evicted from the pool, so the
+  // next call after `headless lead use` succeeds without restarting the harness.
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  try {
+    await daemonClient(resolvedProjectRoot);
+    startupError = null;
+  } catch (error) {
+    // Stay alive ONLY for the recoverable case: there is no live binding yet, and
+    // the operator can create one without restarting the harness. Anything else —
+    // unreadable state, a corrupt project, a daemon that cannot start — is fatal,
+    // and a live-but-inert server would hide it behind tool errors forever.
+    if (!isLeadBindingFailure(error)) throw error;
+    startupError = leadRemedy();
+  }
+}
+
+function messageOf(error: unknown) {
+  return redactAndTruncate(error instanceof Error ? error.message : String(error), 16_384).text;
 }
 
 async function main() {
+  let shuttingDown = false;
   const shutdown = async () => {
-    await leadClients.disconnectAll();
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await leadClients.disconnectAll().catch(() => {});
     process.exit(0);
   };
   process.once("SIGINT", () => void shutdown());
   process.once("SIGTERM", () => void shutdown());
+  // A host that simply closes stdin and lets this child exit sends no signal, so
+  // signal handlers alone left the binding `connected` until the 45s window
+  // lapsed — and the operator's next attach raced their own stale attachment.
+  // This process owns its own lifecycle, so it may hook EOF; the guest plugin
+  // cannot, and uses OpenCode's `dispose` hook instead.
+  process.stdin.once("end", () => void shutdown());
+  process.stdin.once("close", () => void shutdown());
   await startMcpServer();
 }
 
@@ -436,6 +519,8 @@ export { server, TOOL_DEFINITIONS as mcpToolDefinitions };
 export const __handleCallToolForTest = handleCallTool;
 export const __handleListToolsForTest = handleListTools;
 export const __normalizeMcpInputSchemaForTest = mcpObjectInputSchema;
+/** Startup attach outcome: null once attached, otherwise the operator remedy. */
+export const __startupErrorForTest = () => startupError;
 
 function leadHostFromProcess() {
   const index = process.argv.indexOf("--host");

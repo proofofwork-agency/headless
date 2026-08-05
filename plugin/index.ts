@@ -20,6 +20,7 @@ import {
 export const id = "headless";
 
 export const server: Plugin = async () => {
+  const releaseLeadPool = acquireLeadPool();
   const tools = {
     headless_run: registryTool("headless_run", async (args, context) => {
         const client = await daemon(context);
@@ -132,6 +133,7 @@ export const server: Plugin = async () => {
   );
   return {
     tool: Object.fromEntries(advertised.map((entry) => [entry.name, entry.definition])),
+    dispose: releaseLeadPool,
   };
 };
 
@@ -293,6 +295,38 @@ function recordValue(value: unknown, label: string): Record<string, unknown> {
 }
 
 const leadClients = new LeadDaemonClientPool();
+let leadPoolUsers = 0;
+
+/**
+ * Release the lead binding when OpenCode disposes this plugin.
+ *
+ * Without it the daemon holds the binding `connected` until the 45s heartbeat
+ * window lapses, so an operator who restarts OpenCode and reattaches immediately
+ * races their own stale attachment.
+ *
+ * This hangs off the host's awaited `dispose` hook rather than a process event.
+ * `beforeExit` was the wrong choice: it fires only on natural event-loop
+ * exhaustion, not on `process.exit` and not on default SIGINT/SIGTERM
+ * termination — i.e. not on the paths that actually end an editor session. And a
+ * guest plugin must NOT install SIGINT/SIGTERM listeners, because registering one
+ * suppresses Node's default termination for the entire host process. The
+ * dedicated `headless-mcp` entrypoint owns its process and may hook signals; a
+ * guest inside someone else's process does not get to make that choice for them.
+ *
+ * The pool is module-global, so disposal is reference-counted: if the host ever
+ * instantiates this plugin for two project contexts in one process, the first
+ * dispose must not tear the second one's connections down.
+ */
+function acquireLeadPool() {
+  leadPoolUsers += 1;
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    leadPoolUsers -= 1;
+    if (leadPoolUsers === 0) await leadClients.disconnectAll();
+  };
+}
 
 async function daemon(context: ToolContext) {
   const projectRoot = runtimeCwd(context);
