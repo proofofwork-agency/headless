@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadlessDaemonClient } from "../src/daemon/client";
 import { LeadDaemonClientPool, lapsedLeadAttachment } from "../src/daemon/connect";
 import { HeadlessDaemon } from "../src/daemon/server";
-import { LEAD_ATTACHMENT_REQUIRED, LeadBindingStore, readLeadBinding } from "../src/runtime/lead-binding";
+import { LEAD_ATTACHMENT_REQUIRED, LeadBindingStore, probeLeadBinding, readLeadBinding } from "../src/runtime/lead-binding";
 import { resolveLeadProjectRoot } from "../src/runtime/lead-project-root";
 import { ensureProjectStateDirectories, getProjectStatePaths } from "../src/runtime/project-state";
 
@@ -142,6 +142,41 @@ describe("only a lapsed attachment is retried", () => {
     // Re-attaching with the same rejected token cannot succeed.
     expect(lapsedLeadAttachment({ code: "DAEMON_AUTH_FAILED" })).toBe(false);
     expect(lapsedLeadAttachment({ code: "POLICY_DENIED", details: { reason: LEAD_ATTACHMENT_REQUIRED } })).toBe(true);
+  });
+});
+
+describe("selected state is strict, discovery is fail-closed", () => {
+  test("the selected read surfaces corruption instead of reporting a missing credential", () => {
+    const fixture = stateFixture();
+    writeFileSync(fixture.state.leadBindingPath, "{ not json", { mode: 0o600 });
+    // Collapsing this to null made corrupt state indistinguishable from "no lead
+    // configured", so the harness told the operator to run `headless lead use`
+    // and stayed alive on a project it could not read.
+    expect(() => readLeadBinding(fixture.state)).toThrow();
+
+    writeFileSync(fixture.state.leadBindingPath, JSON.stringify({
+      version: 1,
+      projectId: "f".repeat(64),
+      generation: 1,
+      binding: null,
+      updatedAt: 1_700_000_000_000,
+    }), { mode: 0o600 });
+    expect(() => readLeadBinding(fixture.state)).toThrow(/another project/);
+  });
+
+  test("discovery refuses an insecure binding rather than trusting it", () => {
+    const fixture = stateFixture();
+    new LeadBindingStore(fixture.state, () => 1_700_000_000_000)
+      .use({ host: "codex", backendId: "codex", integrationPrincipal: "integration:lead-codex-g1", generation: 1 });
+    expect(probeLeadBinding(fixture.state)).toMatchObject({ host: "codex" });
+
+    // A group/other-readable binding must not get to decide which project a lead
+    // attaches to. Skipping validation to avoid the chmod would have trusted it.
+    chmodSync(fixture.state.leadBindingPath, 0o644);
+    expect(probeLeadBinding(fixture.state)).toBeNull();
+
+    writeFileSync(fixture.state.leadBindingPath, "{ not json", { mode: 0o600 });
+    expect(probeLeadBinding(fixture.state)).toBeNull();
   });
 });
 

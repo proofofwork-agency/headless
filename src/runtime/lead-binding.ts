@@ -165,17 +165,32 @@ export function leadCredentialName(host: string, generation: number) {
  * store for it would litter the machine with state for projects that do not
  * exist — and, worse, make the wrong root look configured on the next probe.
  */
-export function readLeadBinding(
-  paths: ProjectStatePaths,
-  options: { repairPermissions?: boolean } = {},
-): LeadBinding | null {
-  let state: z.infer<typeof LeadBindingStateSchema> | null;
+export function readLeadBinding(paths: ProjectStatePaths): LeadBinding | null {
+  const state = readOwnerOnlyJson(paths.leadBindingPath, LeadBindingStateSchema);
+  if (!state) return null;
+  if (state.projectId !== paths.projectId) {
+    throw new HeadlessError("CONFLICT", `Lead binding at ${paths.leadBindingPath} belongs to another project.`);
+  }
+  return state.binding;
+}
+
+/**
+ * Discovery variant: ask whether a CANDIDATE directory has a usable lead, making
+ * no writes and never throwing.
+ *
+ * Tolerance here is about the wrong candidate, not about bad state. A binding
+ * that is corrupt, foreign, symlinked or group-readable answers "no" — the
+ * directory is not a configured lead — so an insecure file can never steer which
+ * project gets attached. That is the opposite of `readLeadBinding`, which is used
+ * once the project is SELECTED and must surface corruption loudly rather than
+ * report it as a missing credential the operator is told to recreate.
+ */
+export function probeLeadBinding(paths: ProjectStatePaths): LeadBinding | null {
   try {
-    state = readOwnerOnlyJson(paths.leadBindingPath, LeadBindingStateSchema, options);
+    const state = readOwnerOnlyJson(paths.leadBindingPath, LeadBindingStateSchema, { repairPermissions: false });
+    if (!state || state.projectId !== paths.projectId) return null;
+    return state.binding;
   } catch {
-    // A corrupt or foreign binding must not abort a probe of other candidates.
     return null;
   }
-  if (!state || state.projectId !== paths.projectId) return null;
-  return state.binding;
 }

@@ -199,6 +199,25 @@ export function ensureOwnerOnlyFile(path: string) {
 }
 
 /**
+ * Owner-only file validation WITHOUT repair, for read-only discovery.
+ *
+ * `ensureOwnerOnlyFile` chmods, so a probe that merely asks "is this a project?"
+ * cannot use it. Skipping validation altogether is not the alternative: that
+ * would let a symlinked or group-writable binding decide which project a lead
+ * attaches to. This applies exactly the same fail-closed checks and simply
+ * refuses, rather than repairs, a file whose mode is already too permissive.
+ */
+export function assertOwnerOnlyFileUnrepaired(path: string) {
+  const info = lstatSync(path);
+  assertOwnedLeaf(path, info, "file");
+  if ((info.mode & 0o077) !== 0) {
+    throw new Error(`Owner-only file path is group/other accessible: ${path}`);
+  }
+  assertTrustedAncestorChain(realpathSync(path), `Owner-only file ${path}`);
+  return path;
+}
+
+/**
  * Fail-closed leaf checks shared by ensureOwnerOnlyDirectory/File.
  * Does not auto-repair ownership — foreign-uid paths are refused.
  */

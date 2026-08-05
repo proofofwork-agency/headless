@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { readLeadBinding } from "./lead-binding";
+import { probeLeadBinding } from "./lead-binding";
 import { getProjectStatePaths, type ProjectStateOptions } from "./project-state";
 
 export type LeadProjectRootOptions = {
@@ -45,11 +45,11 @@ export function resolveLeadProjectRoot(options: LeadProjectRootOptions = {}): st
     (paths !== null && existsSync(paths.projectDir)) || existsSync(join(directory, ".git")));
   if (boundary === -1) return start;
 
-  // Probe read-only: deciding which project this is must not tighten permissions
-  // on binding files belonging to every directory on the way up.
+  // Probe, don't open: deciding which project this is must neither tighten
+  // permissions on every binding on the way up nor trust an insecure one.
   const configured = candidates
     .slice(0, boundary + 1)
-    .find(({ paths }) => paths !== null && readLeadBinding(paths, { repairPermissions: false }) !== null);
+    .find(({ paths }) => paths !== null && probeLeadBinding(paths) !== null);
 
   return configured?.directory ?? candidates[boundary]!.directory;
 }

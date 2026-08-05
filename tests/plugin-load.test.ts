@@ -8,7 +8,7 @@ import { connectOrStartDaemon } from "../src/daemon/connect";
 import { HeadlessDaemon } from "../src/daemon/server";
 import { getProjectStatePaths } from "../src/runtime/project-state";
 import { CORE_MCP_TOOL_NAMES } from "../src/contracts/tool-registry";
-import plugin, { id, server } from "../plugin/index";
+import plugin, { __leadPoolUsersForTest, id, server } from "../plugin/index";
 
 const EXPECTED_TOOLS = [
   "headless_run",
@@ -49,6 +49,7 @@ describe("OpenCode plugin loadability", () => {
   });
 
   test("exposes the dispose hook OpenCode awaits, and reference-counts it", async () => {
+    const baseline = __leadPoolUsersForTest();
     const first = await server({} as never);
     const second = await server({} as never);
     // A guest plugin cannot hook SIGINT/SIGTERM without suppressing the host's
@@ -57,12 +58,35 @@ describe("OpenCode plugin loadability", () => {
     // so it is the only one that releases the lead binding on the common path.
     expect(typeof first.dispose).toBe("function");
     expect(typeof second.dispose).toBe("function");
+    expect(__leadPoolUsersForTest()).toBe(baseline + 2);
 
     // Disposing one instance must not tear down a sibling's connections, and a
     // repeated dispose must not underflow the count.
     await first.dispose!();
     await first.dispose!();
+    expect(__leadPoolUsersForTest()).toBe(baseline + 1);
     await second.dispose!();
+    expect(__leadPoolUsersForTest()).toBe(baseline);
+  });
+
+  test("a failed construction leaves no ghost lease behind", async () => {
+    const baseline = __leadPoolUsersForTest();
+    const previous = process.env.HEADLESS_MCP_TOOLSET;
+    process.env.HEADLESS_MCP_TOOLSET = "not-a-toolset";
+    try {
+      await expect(server({} as never)).rejects.toThrow();
+    } finally {
+      if (previous === undefined) delete process.env.HEADLESS_MCP_TOOLSET;
+      else process.env.HEADLESS_MCP_TOOLSET = previous;
+    }
+    // Acquiring the lease before construction could throw left the count
+    // permanently high, so a later healthy instance would dispose and still
+    // never release the pool.
+    expect(__leadPoolUsersForTest()).toBe(baseline);
+
+    const healthy = await server({} as never);
+    await healthy.dispose!();
+    expect(__leadPoolUsersForTest()).toBe(baseline);
   });
 
   test("returns exactly the Headless tools with registry-accepted schemas", async () => {

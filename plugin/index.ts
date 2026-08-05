@@ -20,7 +20,6 @@ import {
 export const id = "headless";
 
 export const server: Plugin = async () => {
-  const releaseLeadPool = acquireLeadPool();
   const tools = {
     headless_run: registryTool("headless_run", async (args, context) => {
         const client = await daemon(context);
@@ -131,9 +130,14 @@ export const server: Plugin = async () => {
     Object.entries(tools).map(([name, definition]) => ({ name, definition })),
     resolveMcpToolset(),
   );
+  // Acquire the lease ONLY once every throwing step is behind us. Taking it at
+  // the top leaked a permanent ghost lease whenever construction failed (a bad
+  // HEADLESS_MCP_TOOLSET makes `resolveMcpToolset` throw): the count could never
+  // return to zero, so a later healthy instance would dispose and still never
+  // release the connections.
   return {
     tool: Object.fromEntries(advertised.map((entry) => [entry.name, entry.definition])),
-    dispose: releaseLeadPool,
+    dispose: acquireLeadPool(),
   };
 };
 
@@ -317,6 +321,9 @@ let leadPoolUsers = 0;
  * instantiates this plugin for two project contexts in one process, the first
  * dispose must not tear the second one's connections down.
  */
+/** Test hook: a leaked lease is invisible from outside, so it must be observable. */
+export const __leadPoolUsersForTest = () => leadPoolUsers;
+
 function acquireLeadPool() {
   leadPoolUsers += 1;
   let released = false;
