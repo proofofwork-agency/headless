@@ -1,6 +1,6 @@
 # Security model
 
-> **Unpublished private beta (`0.2.0-beta.7`).** This document describes intended and implemented controls, not a release attestation. Do not use Headless with sensitive source, valuable native credentials, or unattended spend until the release gates pass.
+> **Unpublished private beta (`0.2.0-beta.8`).** This document describes intended and implemented controls, not a release attestation. Do not use Headless with sensitive source, valuable native credentials, or unattended spend until the release gates pass.
 
 Headless assumes a coding-agent backend may be prompt-injected, compromised, or intentionally malicious. Required mode therefore depends on operating-system containment and credential isolation, not on a backend’s tool-deny rules.
 

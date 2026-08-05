@@ -2,6 +2,76 @@
 
 ## Unreleased
 
+## 0.2.0-beta.8 — 2026-08-06
+
+Phase 1 of finishing the **foreground lead** — the path where an external MCP harness
+(codex, claude, opencode, grok, or any MCP-capable host) attaches over stdio and steers
+the project while the daemon owns orchestration, containment and the ledger.
+
+This path drifted because nothing in the product's UX oracle ever measured it:
+`scripts/product-gate.ts` hard-codes its live oracle to setup/doctor/exec/verify, and
+`docs/product-ost.md` contains zero occurrences of "lead". If you drive Headless from the
+CLI, nothing here changes. If you drive it from an MCP harness, every item below was
+reachable in 0.2.0-beta.7.
+
+### Breaking
+
+- **The MCP server now connects its stdio transport BEFORE attaching to the project, and
+  stays alive when no lead binding exists.** Previously a missing, rotated or revoked
+  binding threw before `server.connect`, so the process exited and the harness could report
+  only "server exited" — the one failure an operator cannot act on. The server now comes up
+  and every tool answers with the exact remedy, and it repairs itself once
+  `headless lead use <host>` runs, without restarting the harness. **A wrapper that relied
+  on the process exiting to detect a missing binding must now read the tool error instead.**
+  Genuinely fatal state — corrupt, foreign or unreadable — still exits non-zero.
+
+### Fixed
+
+- **A foreground lead no longer becomes permanently unusable after an idle lapse.** Attach
+  was always legal from `disconnected` (`assertCurrent` checks principal and generation and
+  never looks at status), so the daemon was willing to take the lead back the whole time.
+  The client discarded the rejection with an empty `catch`, and the connection cache was
+  evicted only on *initial* connect failure — so a single lapse past the 45s window left a
+  dead client for the life of the process. Recovery now has two independent mechanisms: the
+  heartbeat re-attaches, and a pooled call retries once.
+- **A harness launched from a subdirectory no longer binds to a different, empty project.**
+  The project id is a hash of the canonicalized root, so a subdirectory silently resolved to
+  another project and every promise about inherited context referred to the wrong tree.
+  Resolution now finds the nearest project boundary (git root or existing Headless state) and
+  considers configured leads only at or below it, so a stale lead in a shared parent — a home
+  directory once used as a project — cannot outrank the repository you are standing in.
+  `HEADLESS_PROJECT_ROOT` remains authoritative on every call.
+- **Genuine authorization denials are no longer retried or misreported as configuration
+  problems.** Only the daemon's structured `LEAD_ATTACHMENT_REQUIRED` reason counts as a
+  recoverable lapse. Matching bare `POLICY_DENIED` re-issued forbidden requests and told
+  operators to run `headless lead use` when the real answer was "that route is admin-only".
+- **The lead binding is released when the host goes away.** The OpenCode plugin uses the
+  awaited `dispose` hook rather than `beforeExit`, which does not fire on `process.exit` or
+  default signal termination; disposal is reference-counted so one plugin instance cannot
+  tear down another's connections. The dedicated `headless-mcp` process also releases on
+  stdio EOF, so a host that simply closes the pipe no longer leaves the binding `connected`
+  until the 45s window lapses and races the operator's next attach.
+- **Corrupt or insecure project state is no longer reported as a missing credential.**
+  Reading owner-only JSON established absence with `existsSync`, which follows symlinks — so
+  a dangling symlink (at the file, or at any ancestor) read as "never configured", which the
+  MCP server treats as recoverable and stays alive on. Absence now means a genuine `ENOENT`
+  with a usable ancestor chain; a dangling or cyclic alias, or a non-directory ancestor, is
+  surfaced. A symlink that *resolves* to a directory stays ordinary, so a state home under a
+  symlinked home directory is unaffected.
+- **Project discovery no longer rewrites permissions on directories it merely inspects.**
+  Owner-only reads chmod, so probing candidate roots silently tightened every binding on the
+  way up. Discovery validates without repairing and refuses what it cannot validate.
+
+### Verification
+
+- `bun run check`: 1113 pass, 12 skip, 0 fail; Product Gate P 9 pass, 1 manual, 0 fail.
+- 19 mutations proven red across the phase, each killing its intended test. Two are a
+  deliberate discriminating pair: rejecting every symlinked ancestor kills the valid-alias
+  case, and accepting every one kills the dangling-ancestor case.
+- New process-level gates spawn the real `headless-mcp` entrypoint: a missing binding stays
+  alive and answers a real MCP `initialize` + `tools/list` handshake, a corrupt binding exits
+  non-zero, and closing stdin without a signal releases the lead immediately.
+
 ## 0.2.0-beta.7 — 2026-08-05
 
 ### Breaking
