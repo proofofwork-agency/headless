@@ -4,10 +4,10 @@
   "mode": "live",
   "ok": true,
   "releaseGatePassed": true,
-  "totalMs": 5465,
-  "ceremonyMs": 1212,
+  "totalMs": 6579,
+  "ceremonyMs": 1064,
   "budgetMs": 300000,
-  "project": "/var/folders/86/ttb_ll0s2h7dvx62qjf758km0000gn/T/headless-ttfv-xjPRZj/project",
+  "project": "/var/folders/86/ttb_ll0s2h7dvx62qjf758km0000gn/T/headless-ttfv-G3yTul/project",
   "recommendedBackend": "codex",
   "readyForNativeExec": true,
   "doctorNextActions": 2,
@@ -18,33 +18,33 @@
   "steps": [
     {
       "name": "setup",
-      "durationMs": 1137,
+      "durationMs": 981,
       "exitCode": 0,
       "timedOut": false
     },
     {
       "name": "doctor",
-      "durationMs": 75,
+      "durationMs": 83,
       "exitCode": 0,
       "timedOut": false
     },
     {
       "name": "exec",
-      "durationMs": 4171,
+      "durationMs": 5397,
       "exitCode": 0,
       "timedOut": false
     },
     {
       "name": "verify",
-      "durationMs": 82,
+      "durationMs": 117,
       "exitCode": 0,
       "timedOut": false
     }
   ],
-  "completedAt": "2026-08-05T09:05:28.384Z",
+  "completedAt": "2026-08-05T16:13:19.799Z",
   "provenance": {
-    "generatedAt": "2026-08-05T09:05:28.384Z",
-    "commit": "0debbf3e02687816d97e64948cf18128f705780a",
+    "generatedAt": "2026-08-05T16:13:19.799Z",
+    "commit": "1a23e5759a77f801fc5e3760c8556a73fd15487e",
     "platform": "darwin-arm64",
     "headlessVersion": "0.2.0-beta.7",
     "backendVersions": {

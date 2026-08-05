@@ -22,16 +22,16 @@
       "acceptedLimitation": false,
       "code": "RATE_LIMITED",
       "reason": "Backend rate limit reported.",
-      "durationMs": 3814,
+      "durationMs": 4030,
       "driverKind": "claude-print-resume",
-      "backendVersion": "2.1.220",
+      "backendVersion": "2.1.222",
       "authProfileFingerprint": "277e016cdaffde747109892a6273f2c9af5b10126e9b03d6c85856f9f32d46af",
       "containment": {
         "mechanism": "native-session:claude-print-resume",
         "network": "native-direct-unrestricted",
         "credentialAccess": "backend-native"
       },
-      "costAmountUsd": 0.011661399999999999,
+      "costAmountUsd": 0.0116314,
       "usageTotal": null
     },
     {
@@ -41,9 +41,9 @@
       "acceptedLimitation": false,
       "code": "RATE_LIMITED",
       "reason": "Backend rate limit reported.",
-      "durationMs": 5217,
+      "durationMs": 4568,
       "driverKind": "codex-app-server",
-      "backendVersion": "0.145.0",
+      "backendVersion": "0.146.0",
       "authProfileFingerprint": "8875b9e09c239041e1bbe34a10e2f461a958f408111f025eb977cda3c75a2256",
       "containment": {
         "mechanism": "native-session:codex-app-server",
@@ -51,7 +51,7 @@
         "credentialAccess": "backend-native"
       },
       "costAmountUsd": null,
-      "usageTotal": 10704
+      "usageTotal": 9898
     },
     {
       "backend": "opencode",
@@ -60,48 +60,48 @@
       "acceptedLimitation": false,
       "code": null,
       "reason": "Native subscription turn completed with required native-direct-unrestricted containment.",
-      "durationMs": 10819,
+      "durationMs": 8568,
       "driverKind": "opencode-session",
-      "backendVersion": "1.18.5",
-      "authProfileFingerprint": "63db649aabea6fe407d3037b7ffd93b1e79a79a10f75f3e63a0822531076c8f6",
+      "backendVersion": "1.18.13",
+      "authProfileFingerprint": "8e44925472b2bc9f8ddab8071b8ff95fb5f25a2a77b6367ef4386f5f68a8e661",
       "containment": {
         "mechanism": "native-session:opencode-session",
         "network": "native-direct-unrestricted",
         "credentialAccess": "backend-native"
       },
       "costAmountUsd": 0,
-      "usageTotal": 4322
+      "usageTotal": 4319
     },
     {
       "backend": "grok-build",
       "binary": "grok",
-      "status": "passed",
+      "status": "failed",
       "acceptedLimitation": false,
-      "code": null,
-      "reason": "Native subscription turn completed with required native-direct-unrestricted containment.",
-      "durationMs": 2233,
-      "driverKind": "grok-resume",
-      "backendVersion": "0.2.112",
-      "authProfileFingerprint": "fcc3b3a3bbbbfa246a5d3661bb4993188596afaee6993d16c1cb1201c967d745",
+      "code": "NATIVE_AUTH_UNAVAILABLE",
+      "reason": "Grok native login is expired or expires before this bounded turn can finish. Run `grok login` or `grok login --device-auth`, then retry.",
+      "durationMs": 384,
+      "driverKind": null,
+      "backendVersion": null,
+      "authProfileFingerprint": null,
       "containment": {
-        "mechanism": "native-session:grok-resume",
-        "network": "native-direct-unrestricted",
-        "credentialAccess": "backend-native"
+        "mechanism": null,
+        "network": "denied",
+        "credentialAccess": "none"
       },
-      "costAmountUsd": 0.0037604,
-      "usageTotal": 1951
+      "costAmountUsd": null,
+      "usageTotal": null
     }
   ],
   "provenance": {
-    "generatedAt": "2026-07-27T14:25:19.958Z",
-    "commit": "a89849720dbd11586146b9e1901d5b63be4badde",
+    "generatedAt": "2026-08-05T16:13:55.186Z",
+    "commit": "1a23e5759a77f801fc5e3760c8556a73fd15487e",
     "platform": "darwin-arm64",
-    "headlessVersion": "0.2.0-beta.4",
+    "headlessVersion": "0.2.0-beta.7",
     "backendVersions": {
-      "claude-code": "2.1.220",
-      "codex": "0.145.0",
-      "opencode": "1.18.5",
-      "grok-build": "0.2.112"
+      "claude-code": "2.1.222",
+      "codex": "0.146.0",
+      "opencode": "1.18.13",
+      "grok-build": null
     }
   }
 }
