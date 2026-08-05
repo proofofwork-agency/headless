@@ -25,7 +25,8 @@ const COOPERATION_TEST_TIMEOUT_MS = process.platform === "linux" ? 240_000 : 45_
 // These were skipped on all GitHub Linux until 2026-08-04 under a predicate
 // that blamed the hosted runner's kernel/virtualization. They did have off-CI
 // arm64 Linux coverage through the documented privileged-Docker command, but
-// none on x86-64 Linux, which is the leg that was failing.
+// no passing x86-64 Linux evidence: excluded from ordinary CI, and failing in
+// the instrumented runs that forced them to execute there.
 //
 // The cause was ours, not the runner's: the Linux relay discarded any request
 // that arrived before its upstream Unix connect resolved (see

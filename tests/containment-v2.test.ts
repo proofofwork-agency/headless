@@ -30,11 +30,10 @@ setTestTimeout(5_000);
 
 const cleanupRoots: string[] = [];
 const darwinTest = process.platform === "darwin" ? test : test.skip;
-// The privileged Linux containment step this escape hatch was written for was
-// removed from .github/workflows/ci.yml, and nothing sets the variable now. The
-// hatch stays for a self-hosted privileged runner, but no CI leg takes it: this
-// is a bwrap case, so macOS cannot run it either, and the gate is registered as
-// knowingly uncovered in tests/gated-coverage.test.ts rather than claiming a leg.
+// HEADLESS_PRIVILEGED_CONTAINMENT_CI no longer gates anything here. It was the
+// opt-in that let a privileged or self-hosted runner execute what the hosted
+// predicate excluded, and that predicate is gone: the case below runs on the
+// ordinary Ubuntu leg as of 2026-08-05.
 // The combined case was skipped on unprivileged hosted Linux until 2026-08-04,
 // on the belief that the runner could not terminalize the relay child. The real
 // fault was ours: the Linux relay discarded any request arriving before its
@@ -444,9 +443,9 @@ describe("Linux bubblewrap profiles", () => {
    * sandbox launched must still be unreachable from inside it.
    *
    * Split out of the combined case below deliberately. That one also requires
-   * the broker relay and the run-tool helper to be reachable, and on hosted
-   * x86-64 the run-tool leg is repeatedly intermittent — 3 of 9 sampled hosted
-   * runs failed, and every diagnosed one reported
+   * the broker relay and the run-tool helper to be reachable, and its run-tool
+   * leg WAS intermittent on hosted x86-64 until 2026-08-05 — 3 of 9 sampled
+   * hosted runs failed, and every diagnosed one reported
    * `{"unixError":"ENOENT", "brokerStatus":200, "toolCode":1}`, i.e. containment
    * held and only availability broke. Gating the security property behind an
    * availability check means a flaky relay makes the security gate red, which
