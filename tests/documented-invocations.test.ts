@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { validateCommandFlags, validateCommandPositionals } from "../src/cli/argv";
+import { resolveCommandSpec } from "../src/cli/command-specs";
 
 /**
  * Every `headless ...` invocation printed in the docs, README or website is run
@@ -76,12 +77,28 @@ function tokens(line: string) {
 
 test("every documented headless invocation passes the real CLI validators", () => {
   const failures: string[] = [];
-  let checked = 0;
+  const unresolved: string[] = [];
+  let validated = 0;
   for (const file of documentationFiles(ROOT)) {
     for (const line of invocations(readFileSync(file, "utf8"))) {
-      const argv = tokens(line);
+      const raw = tokens(line);
+      if (raw.length === 0) continue;
+      // `experimental` is a namespace, not a command, so the validators find no
+      // spec for it and RETURN WITHOUT CHECKING ANYTHING. src/cli.ts:42 strips it
+      // before validating; this must do the same or every documented
+      // `headless experimental ...` line is counted and never checked. That was
+      // 88 of 211 -- 42% of this corpus silently unvalidated -- when this test
+      // first landed.
+      const argv = raw[0] === "experimental" ? raw.slice(1) : raw;
       if (argv.length === 0) continue;
-      checked += 1;
+      if (!resolveCommandSpec(argv[0])) {
+        // Only bare top-level switches legitimately resolve to no command.
+        // Anything else reaching here would be silently skipped, so surface it.
+        if (argv[0] === "--version" || argv[0] === "--help" || argv[0] === "-v" || argv[0] === "-h") continue;
+        unresolved.push(`${relative(ROOT, file)}: ${line}`);
+        continue;
+      }
+      validated += 1;
       try {
         validateCommandFlags(argv);
         validateCommandPositionals(argv);
@@ -91,10 +108,10 @@ test("every documented headless invocation passes the real CLI validators", () =
     }
   }
 
-  // A corpus that silently empties would make the assertion below unfailable,
-  // which is the exact shape this repository keeps shipping. 210 were found when
-  // this landed; the floor only has to be high enough that a broken extractor
-  // cannot pass.
-  expect(checked, "documented invocations were not found — the extractor is broken, not the docs").toBeGreaterThan(150);
+  // Counts only invocations the validators ACTUALLY inspected. Counting attempts
+  // instead let a no-op inflate the floor, which is how this test shipped
+  // claiming a corpus it was not checking -- the exact shape it exists to catch.
+  expect(validated, "documented invocations were not validated — the extractor or the namespace normalization is broken, not the docs").toBeGreaterThan(150);
+  expect(unresolved, `documented invocations naming no known command (silently unchecked):\n${unresolved.join("\n")}`).toEqual([]);
   expect(failures, `documented invocations rejected by the CLI validators:\n${failures.join("\n")}`).toEqual([]);
 });
