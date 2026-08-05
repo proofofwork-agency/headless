@@ -57,10 +57,16 @@ export function readOwnerOnlyJson<T>(
  * the same ENOENT, so accepting it as absence launders a structural anomaly into
  * "never configured" exactly one directory above the leaf case.
  *
- * Walk to the nearest ancestor that exists. A real directory there means the
- * state was simply never materialized, which is ordinary for a fresh project.
- * A symlink or non-directory there is a fact about the filesystem that the
- * caller must see.
+ * Walk to the nearest ancestor that exists. A directory there — reached directly
+ * or through a symlink that RESOLVES to one — means the state was simply never
+ * materialized, which is ordinary for a fresh project and must stay a plain
+ * absence. Only an unusable ancestor is a fact the caller must see: a dangling or
+ * cyclic alias, or a non-directory.
+ *
+ * This deliberately does not apply the trusted-ancestor predicate. Nothing has
+ * been materialized yet, so there is no state to trust; canonical validation
+ * belongs where the path is actually used — `ensureOwnerOnlyDirectory` on
+ * creation and the leaf validators on an existing file.
  */
 function assertGenuineAbsence(path: string) {
   let current = dirname(path);
