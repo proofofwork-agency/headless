@@ -4,10 +4,10 @@
   "mode": "live",
   "ok": true,
   "releaseGatePassed": true,
-  "totalMs": 6579,
-  "ceremonyMs": 1064,
+  "totalMs": 5639,
+  "ceremonyMs": 1265,
   "budgetMs": 300000,
-  "project": "/var/folders/86/ttb_ll0s2h7dvx62qjf758km0000gn/T/headless-ttfv-G3yTul/project",
+  "project": "/var/folders/86/ttb_ll0s2h7dvx62qjf758km0000gn/T/headless-ttfv-pZfjWA/project",
   "recommendedBackend": "codex",
   "readyForNativeExec": true,
   "doctorNextActions": 2,
@@ -18,38 +18,38 @@
   "steps": [
     {
       "name": "setup",
-      "durationMs": 981,
+      "durationMs": 1140,
       "exitCode": 0,
       "timedOut": false
     },
     {
       "name": "doctor",
-      "durationMs": 83,
+      "durationMs": 125,
       "exitCode": 0,
       "timedOut": false
     },
     {
       "name": "exec",
-      "durationMs": 5397,
+      "durationMs": 4266,
       "exitCode": 0,
       "timedOut": false
     },
     {
       "name": "verify",
-      "durationMs": 117,
+      "durationMs": 108,
       "exitCode": 0,
       "timedOut": false
     }
   ],
-  "completedAt": "2026-08-05T16:13:19.799Z",
+  "completedAt": "2026-08-05T22:27:47.063Z",
   "provenance": {
-    "generatedAt": "2026-08-05T16:13:19.799Z",
-    "commit": "1a23e5759a77f801fc5e3760c8556a73fd15487e",
+    "generatedAt": "2026-08-05T22:27:47.063Z",
+    "commit": "fa5a5982759f0b49003797d1603ab26ea515d6a3",
     "platform": "darwin-arm64",
-    "headlessVersion": "0.2.0-beta.7",
+    "headlessVersion": "0.2.0-beta.8",
     "backendVersions": {
       "claude-code": "2.1.222 (Claude Code)",
-      "codex": "codex-cli 0.146.0",
+      "codex": "codex-cli 0.146.1",
       "opencode": "1.18.13",
       "grok-build": "grok 0.2.118 (1e1687c1cf6a)"
     }
