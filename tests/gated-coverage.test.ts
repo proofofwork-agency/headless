@@ -302,10 +302,11 @@ describe("capability gate coverage", () => {
    * number. The enumeration above is the human-readable record, kept here so
    * the understatement is visible at the assertion rather than inferred.
    *
-   * The containment case, the first of those four, is no longer merely declared: it is measured
-   * off-CI on privileged Linux with real bubblewrap. See
-   * docs/internal/hosted-linux-relay-follow-up.md for the command, the pass
-   * counts, and the architecture limit that still applies.
+   * The containment gate that used to be enumerated here is gone: the combined
+   * late-socket case is an ordinary linuxBwrapTest running on the Ubuntu leg as
+   * of 2026-08-05, so it is no longer uncovered and no longer needs off-CI
+   * evidence to stand in for CI. See
+   * docs/internal/hosted-linux-relay-follow-up.md.
    */
   test("exactly two gate names are knowingly uncovered by CI", () => {
     const uncovered = GATES.filter((gate) => gate.legs.length === 0);
