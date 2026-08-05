@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadlessDaemonClient } from "../src/daemon/client";
@@ -162,6 +162,77 @@ describe("selected state is strict, discovery is fail-closed", () => {
       updatedAt: 1_700_000_000_000,
     }), { mode: 0o600 });
     expect(() => readLeadBinding(fixture.state)).toThrow(/another project/);
+  });
+
+  test("a dangling symlink is a fact, not an absence", () => {
+    const fixture = stateFixture();
+    rmSync(fixture.state.leadBindingPath, { force: true });
+    symlinkSync(join(fixture.root, "nowhere"), fixture.state.leadBindingPath);
+
+    // `existsSync` follows the link and reports false, so this state read as "no
+    // lead was ever configured" — laundering a security anomaly into
+    // CREDENTIAL_MISSING, which the MCP server treats as recoverable and stays
+    // alive on. Absence has to mean ENOENT and nothing else.
+    expect(() => readLeadBinding(fixture.state)).toThrow(/not a regular file/);
+    // Discovery stays tolerant of the wrong candidate, but still refuses to
+    // treat this as a configured lead.
+    expect(probeLeadBinding(fixture.state)).toBeNull();
+  });
+
+  test("a dangling symlink one directory UP is also not an absence", () => {
+    const fixture = stateFixture();
+    rmSync(fixture.state.projectDir, { recursive: true, force: true });
+    symlinkSync(join(fixture.root, "nowhere"), fixture.state.projectDir);
+
+    // `lstat` on the full path follows the intermediate link and raises ENOENT —
+    // the SAME errno as genuine absence. Trusting that errno alone launders the
+    // anomaly into "never configured" exactly one directory above the leaf case.
+    expect(() => readLeadBinding(fixture.state)).toThrow(/symlinked ancestor/);
+    expect(probeLeadBinding(fixture.state)).toBeNull();
+  });
+
+  test("a non-directory ancestor is reported, not read as absence", () => {
+    const fixture = stateFixture();
+    rmSync(fixture.state.projectDir, { recursive: true, force: true });
+    writeFileSync(fixture.state.projectDir, "not a directory", { mode: 0o600 });
+
+    // Deterministic non-ENOENT case that needs no root: the parent is a regular
+    // file, so the state directory was replaced rather than never created. This
+    // one never reaches the ancestor walk — the leaf `lstat` itself raises
+    // ENOTDIR, and propagating it unchanged is the correct fail-closed answer.
+    expect(() => readLeadBinding(fixture.state)).toThrow(/ENOTDIR|not a directory/);
+    expect(probeLeadBinding(fixture.state)).toBeNull();
+  });
+
+  test("a resolvable symlinked ancestor is an ordinary alias, not corruption", () => {
+    const root = mkdtempSync(join(tmpdir(), "headless-alias-"));
+    const runtime = mkdtempSync("/tmp/hal-");
+    fixtures.push({ root, runtime });
+    const realHome = join(root, "real-home");
+    const linkedHome = join(root, "linked-home");
+    mkdirSync(realHome);
+    symlinkSync(realHome, linkedHome);
+    const project = join(root, "project");
+    mkdirSync(project);
+
+    // State home under a SYMLINKED home directory, not yet materialized — the
+    // ordinary first run for anyone whose home is an alias. Rejecting every
+    // symlinked ancestor would make that fatal, while the rest of this path
+    // system deliberately follows intermediate aliases and canonicalizes.
+    const paths = getProjectStatePaths(project, {
+      env: { HEADLESS_STATE_HOME: join(linkedHome, "state"), HEADLESS_RUNTIME_HOME: runtime },
+    });
+    expect(readLeadBinding(paths)).toBeNull();
+    expect(probeLeadBinding(paths)).toBeNull();
+  });
+
+  test("state that was never materialized is still a plain absence", () => {
+    const fixture = stateFixture();
+    rmSync(fixture.state.projectDir, { recursive: true, force: true });
+
+    // The fix must not make a fresh, never-configured project fatal.
+    expect(readLeadBinding(fixture.state)).toBeNull();
+    expect(probeLeadBinding(fixture.state)).toBeNull();
   });
 
   test("discovery refuses an insecure binding rather than trusting it", () => {
