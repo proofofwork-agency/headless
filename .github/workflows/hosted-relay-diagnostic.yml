@@ -145,8 +145,17 @@ jobs:
             fi
           done
           iterations=$((pass+fail+absent))
-          echo "combined-late-socket samples: pass=$pass fail=$fail absent=$absent iterations=$iterations" | tee combined-summary.txt
-          if [ "$iterations" -ne 10 ]; then echo "::error::sampler collected $iterations of 10 iterations" | tee -a combined-summary.txt; fi
+          # Count the suite runs INDEPENDENTLY, from the log the suite itself wrote.
+          # pass+fail+absent is tautological -- every loop pass increments exactly
+          # one of them, so it can only disagree with 10 if the loop aborted, and
+          # then this line never executes. That made the old guard unfailable: a
+          # check that cannot fail, inside the job whose purpose is refusing
+          # vacuous results.
+          suite_runs=$(grep -c "Ran .* tests across" combined.log || true)
+          echo "combined-late-socket samples: pass=$pass fail=$fail absent=$absent counted=$iterations suiteRuns=$suite_runs" | tee combined-summary.txt
+          if [ "$suite_runs" -ne 10 ]; then
+            echo "::error::sampler completed $suite_runs of 10 suite runs -- this is a race, so a truncated sample is a false result, not a weaker one" | tee -a combined-summary.txt
+          fi
           # Any other failing case in this file is reported too. This is where
           # the missing bun visibility step showed up as "execvp bun".
           echo "other failing cases:" | tee -a combined-summary.txt
