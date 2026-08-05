@@ -19,6 +19,14 @@ Follow the spirit of OpenCode's AGENTS.md (cloned in `opencode/AGENTS.md`) and t
 ## Product Gate P (scope freeze)
 - Product quality oracle: `docs/product-gate.md`, OST: `docs/product-ost.md` (orthogonal UX oracle; does not authorize npm publish).
 - Security/release gates A/B/C remain in `docs/plan.md`. Current tree is unpublished private beta (`0.2.0-beta.6`).
+- **Do not run two full test suites on the same machine at once.** Daemon and
+  election state is machine-global: the stale-socket election database is keyed
+  by socket path, so a second concurrent suite becomes an unexpected contender.
+  Measured 2026-08-05: two concurrent `bun test tests/daemon.test.ts` runs failed
+  3 of 3 pairs on `does not enter stale-socket recovery while another election
+  owns the database`, while the same file alone is 10/10 clean. CI is unaffected
+  (one suite per runner). If you are hunting a flake with repeated runs, run them
+  strictly in series or you will manufacture failures and then chase them.
 - **Do not add stable public CLI commands** without Product Gate owner acknowledgement and an outcome link in those docs. New work defaults to `headless experimental` / experimental namespaces.
 - Prefer golden-path improvements (`setup`, profiles, remedies, TUI next-actions) over new orchestration surfaces until Product Gate P is green.
 - Run `bun scripts/product-gate.ts` after UX/CLI surface changes. Kernel `bun run check` remains mandatory.
