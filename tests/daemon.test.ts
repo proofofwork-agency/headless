@@ -1389,7 +1389,22 @@ console.log(JSON.stringify({type:"text",text}));`);
 
   test("a queued lead job is reauthorized after an explicit lead switch", async () => {
     const fixture = createFixture();
-    installBackend(fixture.bin, `await Bun.sleep(300); console.log(JSON.stringify({type:"text",text:"done"}));`);
+    // The first job must still be RUNNING when the lead switches, or the queued
+    // job dequeues under still-valid authorization and legitimately succeeds --
+    // the product is right and the test's premise has silently evaporated. A
+    // fixed sleep made that a race: this failed on ubuntu CI with
+    // Expected "blocked" / Received "succeeded" when the lead.use round-trip
+    // outlasted a 300ms sleep on a loaded runner. Raising the sleep would only
+    // make the race slower to lose, so gate the backend on a release file this
+    // test creates. The queued job runs the same backend, but by then the file
+    // exists, so it proceeds immediately.
+    const releasePath = join(fixture.project, "release-active-job");
+    installBackend(
+      fixture.bin,
+      `const {existsSync}=require("node:fs");`
+      + `while(!existsSync(${JSON.stringify(releasePath)}))await Bun.sleep(5);`
+      + `console.log(JSON.stringify({type:"text",text:"done"}));`,
+    );
     const daemon = new HeadlessDaemon({
       projectRoot: fixture.project,
       state: fixture.state,
@@ -1407,7 +1422,15 @@ console.log(JSON.stringify({type:"text",text}));`);
 
     const active = await root.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "hold slot", containment: "unsafe", timeoutMs: 5_000 });
     const queued = await lead.call<Job>("run.submit", { backend: FIXTURE_READ_BACKEND, prompt: "must be denied", containment: "unsafe", timeoutMs: 5_000 });
+    // Assert the premise instead of assuming it. Without this the test can pass
+    // OR fail for reasons that have nothing to do with reauthorization.
+    expect(
+      (await root.call<Job>("run.status", { jobId: queued.id })).state,
+      "the second job must still be queued when the lead switches, or this asserts nothing about reauthorization",
+    ).toBe("queued");
+
     await root.call("lead.use", { host: "opencode" });
+    writeFileSync(releasePath, "release", { mode: 0o600 });
 
     await root.call<Job>("run.wait", { jobId: active.id, timeoutMs: 10_000 });
     const completed = await root.call<Job>("run.wait", { jobId: queued.id, timeoutMs: 10_000 });
