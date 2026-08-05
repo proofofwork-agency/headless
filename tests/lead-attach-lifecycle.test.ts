@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadlessDaemonClient } from "../src/daemon/client";
@@ -162,6 +162,21 @@ describe("selected state is strict, discovery is fail-closed", () => {
       updatedAt: 1_700_000_000_000,
     }), { mode: 0o600 });
     expect(() => readLeadBinding(fixture.state)).toThrow(/another project/);
+  });
+
+  test("a dangling symlink is a fact, not an absence", () => {
+    const fixture = stateFixture();
+    rmSync(fixture.state.leadBindingPath, { force: true });
+    symlinkSync(join(fixture.root, "nowhere"), fixture.state.leadBindingPath);
+
+    // `existsSync` follows the link and reports false, so this state read as "no
+    // lead was ever configured" — laundering a security anomaly into
+    // CREDENTIAL_MISSING, which the MCP server treats as recoverable and stays
+    // alive on. Absence has to mean ENOENT and nothing else.
+    expect(() => readLeadBinding(fixture.state)).toThrow();
+    // Discovery stays tolerant of the wrong candidate, but still refuses to
+    // treat this as a configured lead.
+    expect(probeLeadBinding(fixture.state)).toBeNull();
   });
 
   test("discovery refuses an insecure binding rather than trusting it", () => {

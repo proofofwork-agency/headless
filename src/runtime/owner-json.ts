@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { atomicWriteFile } from "./atomic-write";
 import { assertOwnerOnlyFileUnrepaired, ensureOwnerOnlyDirectory, ensureOwnerOnlyFile } from "./project-state";
@@ -14,7 +14,18 @@ export function readOwnerOnlyJson<T>(
   schema: RuntimeSchema<T>,
   options: { repairPermissions?: boolean } = {},
 ) {
-  if (!existsSync(path)) return null;
+  // Absence is established with lstat, NOT existsSync. `existsSync` follows the
+  // link, so a dangling symlink at this path reports "absent" — and the caller
+  // then concludes the state was never configured. For a selected project that
+  // laundered a security anomaly into CREDENTIAL_MISSING, which is precisely the
+  // corrupt-state-looks-recoverable failure the strict reader exists to prevent.
+  // Only a genuine ENOENT is absence; anything else is a fact to propagate.
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
   // `ensureOwnerOnlyFile` chmods, so it is a WRITE. Discovery probes must not
   // tighten permissions on every candidate they inspect — but they must still
   // VALIDATE. Skipping the checks would let a symlinked or group-writable file
